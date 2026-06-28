@@ -40,7 +40,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from typing import Callable, Iterable, Iterator, Optional
 
 import config

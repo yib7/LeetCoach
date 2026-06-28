@@ -119,6 +119,7 @@ def test_default_run_fn_is_claude_cli_run():
     # Signature sanity: classify defaults run_fn to claude_cli.run so production
     # code needs no wiring, while tests can override it.
     import inspect
+
     import claude_cli
     sig = inspect.signature(classifier.classify)
     assert sig.parameters["run_fn"].default is claude_cli.run

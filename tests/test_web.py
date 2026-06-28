@@ -26,7 +26,6 @@ import pytest
 
 import app as app_module
 
-
 # --- a fake Claude that answers both the classify and the answer prompt ---
 
 CLASSIFY_JSON = {"problem_type": "two_pointers", "topics": ["arrays"]}

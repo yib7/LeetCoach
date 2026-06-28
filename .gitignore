@@ -14,9 +14,18 @@ venv/
 output/
 topic_index.json
 
-# Autopilot SDD scratch (gitignored working memory)
-.superpowers/sdd/
+# Autopilot / AI working files — kept on disk for continuity, never published
+.autopilot/
+CLAUDE.md
+.claude/
+.superpowers/
 
-# OS / editor
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
 .DS_Store
 Thumbs.db

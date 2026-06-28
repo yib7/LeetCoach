@@ -1,0 +1,10 @@
+# Store text as LF in the repo and check out LF on every platform, so a Windows
+# clone doesn't churn CRLF into diffs. Minified vendor assets are text too (LF).
+* text=auto eol=lf
+
+# Real binary media: store/serve verbatim, never normalized or diffed.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary

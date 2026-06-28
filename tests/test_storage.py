@@ -65,6 +65,52 @@ def test_slug_never_empty():
     assert s == storage.slug(s)  # idempotent on its own output
 
 
+def test_slug_suffixes_windows_reserved_names():
+    # con/nul/com1/... are illegal Windows filenames even with an extension, so
+    # slug must not emit them bare — but must stay safe and non-empty.
+    for name in ("con", "CON", "nul", "PRN", "aux", "com1", "LPT9"):
+        s = storage.slug(name)
+        assert s not in storage._WIN_RESERVED
+        assert s
+    assert storage.slug("CON") == "con_"
+    # a name that merely contains a reserved word is untouched
+    assert storage.slug("contains") == "contains"
+
+
+def test_slug_caps_length():
+    # a huge input must not produce a name that overflows the OS path limit
+    s = storage.slug("word " * 200)
+    assert 0 < len(s) <= storage._MAX_SLUG
+    assert not s.endswith(("_", "-"))  # trailing separator trimmed after the cut
+
+
+def test_problem_name_uses_title_line():
+    # a full multi-line paste should save under the title, not the whole body
+    problem = "Two Sum\n\nGiven an array of integers nums and a target...\n"
+    assert storage._problem_name(problem) == "two_sum"
+
+
+# --- regression: a full pasted problem must not blow past the path limit -----
+
+def test_save_answer_full_problem_paste_stays_short(out_root):
+    # Reproduces the real bug: the textarea holds the WHOLE problem, and slugging
+    # the full text produced a 200+ char filename that failed to write on Windows.
+    full = (
+        "Two Sum\n\nGiven an array of integers nums and an integer target, "
+        "return indices of the two numbers such that they add up to target. "
+    ) * 5  # long, multi-sentence body
+    code_path, reasoning_path = storage.save_answer(
+        full, "hash_map", tier="normal", language="python",
+        code="print('[0,1]')", reasoning="reasoning",
+    )
+    for path in (code_path, reasoning_path):
+        p = Path(path)
+        assert p.exists()  # the write actually succeeded
+        # the filename stem stays bounded (title-derived + capped)
+        assert len(p.name) <= storage._MAX_SLUG + len("__normal.py")
+        assert p.name.startswith("two_sum")
+
+
 # --- exact output paths per mode -----------------------------------------
 
 def test_save_learning_path(out_root):
