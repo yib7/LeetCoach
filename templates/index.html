@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LeetCoach</title>
+  <link rel="stylesheet" href="/static/vendor/highlight-github-dark.min.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body data-claude-available="__CLAUDE_AVAILABLE__">
+  <main class="wrap">
+    <header class="topbar">
+      <h1>Leet<span class="accent">Coach</span></h1>
+      <p class="tagline">Paste a problem &middot; pick a mode &middot; let Claude coach you.</p>
+    </header>
+
+    <section id="claude-warning" class="banner banner-warn" hidden>
+      The <code>claude</code> CLI was not found on PATH. Runs will fail until
+      Claude Code is installed and authenticated (or set
+      <code>LEETCOACH_CLAUDE_BIN</code>), then reload this page.
+    </section>
+
+    <section class="composer">
+      <div class="problem-head">
+        <label for="problem">Problem</label>
+        <button id="paste" type="button" class="ghost" title="Paste from clipboard">
+          Paste from clipboard
+        </button>
+      </div>
+      <textarea
+        id="problem"
+        rows="9"
+        placeholder="Paste the full LeetCode problem here (title, description, examples, constraints)…"
+      ></textarea>
+
+      <div class="controls">
+        <label class="field">
+          <span>Mode</span>
+          <select id="mode">
+            <option value="answer" selected>Answer</option>
+            <option value="learning">Learning</option>
+            <option value="guided">Guided Learning</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Language</span>
+          <select id="language">
+            <option value="python" selected>Python</option>
+            <option value="cpp">C++</option>
+            <option value="java">Java</option>
+          </select>
+        </label>
+
+        <label class="field" id="tier-field">
+          <span>Tier</span>
+          <select id="tier">
+            <option value="simple">Simple</option>
+            <option value="normal" selected>Normal</option>
+            <option value="complex">Complex</option>
+          </select>
+        </label>
+
+        <button id="run" type="button" class="run">Run</button>
+      </div>
+    </section>
+
+    <section class="results">
+      <div id="status" class="status" hidden></div>
+      <div id="meta" class="meta" hidden></div>
+      <article id="output" class="output markdown" aria-live="polite"></article>
+    </section>
+
+    <footer class="foot">
+      Output is saved to your local <code>output/</code> study library.
+    </footer>
+  </main>
+
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/highlight.min.js"></script>
+  <script src="/static/vendor/hljs-python.min.js"></script>
+  <script src="/static/vendor/hljs-cpp.min.js"></script>
+  <script src="/static/vendor/hljs-java.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
