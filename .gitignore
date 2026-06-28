@@ -17,6 +17,12 @@ topic_index.json
 # Autopilot SDD scratch (gitignored working memory)
 .superpowers/sdd/
 
-# OS / editor
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
 .DS_Store
 Thumbs.db
