@@ -11,10 +11,14 @@ Design mirrors the Xeno RAG pattern, in Flask flavour:
   for each delta and a terminal ``event: done`` (or ``event: error``) so the
   stream always closes cleanly — a last-resort ``except`` guarantees it.
 
-Only **Answer** mode is wired here (SP3). Learning / Guided are recognised as
-valid modes but return a "coming soon" error event for now (SP4 wires them).
+All three modes (Answer / Learning / Guided) are wired here. They share one
+shape — classify -> build a mode-specific prompt -> stream + accumulate the
+deltas -> save the result -> emit a terminal ``done`` — so the streaming and the
+``done``/``error`` plumbing live in one place (``event_stream`` +
+``_stream_and_accumulate``); only the per-mode prompt-builder and save call
+differ.
 
-SSE event protocol (SP4 reuses it for Learning / Guided):
+SSE event protocol (shared by every mode):
     data: "<text delta>"\n\n                 # incremental answer text (json string)
     event: done\ndata: {json}\n\n             # terminal success:
         { "problem_type": str, "topics": [str], "paths": [str], "mode": str }
@@ -102,40 +106,56 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
         if mode != "learning" and tier not in TIERS:
             return jsonify({"error": f"Unknown tier {tier!r}."}), 400
 
+        def _stream_and_accumulate(prompt):
+            """Stream ``run_fn(prompt)`` deltas to the client (yielding SSE text
+            events) while accumulating the full text. Returns the joined text via
+            a one-element list trick — generators can't ``return`` a value the
+            caller easily reads while also yielding, so we stash it on ``out[0]``.
+            """
+            out[0] = ""  # reset accumulator for this call
+            full = []
+            for delta in run_fn(prompt):
+                if delta:
+                    full.append(delta)
+                    yield _sse_text(delta)
+            out[0] = "".join(full)
+
+        out = [""]  # accumulator shared with the helper above
+
         def event_stream():
             try:
-                if mode != "answer":
-                    # SP4 wires Learning / Guided; recognised but not yet live.
-                    yield _sse_event(
-                        "error",
-                        f"{mode.title()} mode is coming soon (Answer mode is wired).",
-                    )
-                    return
-
                 # 1) classify (same injected run_fn -> tests cover this call too)
                 cls = classifier.classify(problem, run_fn=run_fn)
 
-                # 2) build the Answer prompt for this tier x language
-                prompt = prompts.build_answer(problem, tier=tier, language=language)
-
-                # 3) stream the answer, accumulating the full text as we go
-                full = []
-                for delta in run_fn(prompt):
-                    if delta:
-                        full.append(delta)
-                        yield _sse_text(delta)
-                answer_md = "".join(full)
-
-                # 4) split into code + reasoning and persist
-                code = parsing.extract_code(answer_md, language)
-                code_path, reasoning_path = storage.save_answer(
-                    problem,
-                    cls.problem_type,
-                    tier=tier,
-                    language=language,
-                    code=code,
-                    reasoning=answer_md,
-                )
+                # 2) build the mode-specific prompt; 3) stream + accumulate;
+                #    4) save with the mode's own storage call. Only these two
+                #    bits differ between modes — the stream/accumulate/done
+                #    plumbing is shared.
+                if mode == "answer":
+                    prompt = prompts.build_answer(problem, tier=tier, language=language)
+                    yield from _stream_and_accumulate(prompt)
+                    body = out[0]
+                    code = parsing.extract_code(body, language)
+                    code_path, reasoning_path = storage.save_answer(
+                        problem,
+                        cls.problem_type,
+                        tier=tier,
+                        language=language,
+                        code=code,
+                        reasoning=body,
+                    )
+                    paths = [code_path, reasoning_path]
+                elif mode == "learning":
+                    # Learning has no tier; SP5 will feed already_learned_topics.
+                    prompt = prompts.build_learning(
+                        problem, language=language, already_learned_topics=None
+                    )
+                    yield from _stream_and_accumulate(prompt)
+                    paths = [storage.save_learning(problem, cls.problem_type, out[0])]
+                else:  # mode == "guided" (validation guarantees a valid tier)
+                    prompt = prompts.build_guided(problem, tier=tier, language=language)
+                    yield from _stream_and_accumulate(prompt)
+                    paths = [storage.save_guided(problem, cls.problem_type, out[0])]
 
                 # 5) terminal success event
                 yield _sse_event(
@@ -144,7 +164,7 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                         "mode": mode,
                         "problem_type": cls.problem_type,
                         "topics": cls.topics,
-                        "paths": [code_path, reasoning_path],
+                        "paths": paths,
                     },
                 )
             except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
