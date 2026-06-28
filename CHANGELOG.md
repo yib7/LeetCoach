@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format follows
 First public release.
 
 ### Added
-- Three study modes driven by the `claude` CLI (no API key — uses a Claude Code
+- Three study modes driven by the `claude` CLI (no API key; uses a Claude Code
   subscription): **Learning** (teach the full stack a problem needs), **Guided
   Learning** (restate, teach, reason, then answer in one document), and **Answer**
   (a working solution with reasoning and an explicit Big-O line).
@@ -24,4 +24,4 @@ First public release.
 - A growing `output/` study library, organized by problem type.
 - Single-page dark UI with paste-from-clipboard, vendored markdown rendering and
   syntax highlighting (no runtime CDN).
-- 140 tests, all mocking the `claude` subprocess (no real Claude calls in the suite).
+- 143 tests, all mocking the `claude` subprocess (no real Claude calls in the suite).
