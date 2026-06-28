@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Env / secrets
+.env
+
+# Generated study library (personal output; not source)
+output/
+topic_index.json
+
+# Autopilot SDD scratch (gitignored working memory)
+.superpowers/sdd/
+
+# OS / editor
+.DS_Store
+Thumbs.db
