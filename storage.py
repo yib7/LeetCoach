@@ -38,6 +38,14 @@ _LANG_EXT = {
 # ``.`` (so ``..``) to underscores, which is what guarantees containment.
 _UNSAFE = re.compile(r"[^a-z0-9_-]+")
 
+# Windows reserved device names — illegal as a filename even with an extension,
+# so a slug must never emit one bare (the project's primary platform is Windows).
+_WIN_RESERVED = (
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
 
 def slug(name: str) -> str:
     """Return a filesystem-safe, lowercase slug derived from ``name``.
@@ -49,6 +57,8 @@ def slug(name: str) -> str:
     * path separators (``/`` ``\\``) and ``..`` are stripped — a slug can never
       contain a directory boundary or a traversal token;
     * leading/trailing separators are trimmed;
+    * Windows reserved device names (``con`` / ``nul`` / ``com1`` ...) are
+      suffixed so the slug is always a legal filename on Windows;
     * never empty — all-garbage input yields the literal ``"untitled"`` so a
       filename always exists.
     """
@@ -57,8 +67,12 @@ def slug(name: str) -> str:
     # Collapse any accidental runs and trim separator chars off the ends so we
     # don't get names like ``_foo_`` or ``--bar``.
     s = re.sub(r"_+", "_", s)
-    s = s.strip("_-")
-    return s or "untitled"
+    s = s.strip("_-") or "untitled"
+    # A bare Windows device name can't be a filename even with an extension;
+    # suffix it so a write never fails on the project's primary platform.
+    if s in _WIN_RESERVED:
+        s = f"{s}_"
+    return s
 
 
 def _ensure_dir(path: Path) -> Path:

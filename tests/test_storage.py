@@ -65,6 +65,18 @@ def test_slug_never_empty():
     assert s == storage.slug(s)  # idempotent on its own output
 
 
+def test_slug_suffixes_windows_reserved_names():
+    # con/nul/com1/... are illegal Windows filenames even with an extension, so
+    # slug must not emit them bare — but must stay safe and non-empty.
+    for name in ("con", "CON", "nul", "PRN", "aux", "com1", "LPT9"):
+        s = storage.slug(name)
+        assert s not in storage._WIN_RESERVED
+        assert s
+    assert storage.slug("CON") == "con_"
+    # a name that merely contains a reserved word is untouched
+    assert storage.slug("contains") == "contains"
+
+
 # --- exact output paths per mode -----------------------------------------
 
 def test_save_learning_path(out_root):
