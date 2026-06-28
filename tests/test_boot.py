@@ -39,8 +39,8 @@ def test_create_app_constructs_without_live_claude():
 def test_all_core_modules_import():
     """Every first-party module imports cleanly (no import-time side effects that
     need a live claude / network)."""
-    import claude_cli  # noqa: F401
     import classifier  # noqa: F401
+    import claude_cli  # noqa: F401
     import config  # noqa: F401
     import parsing  # noqa: F401
     import prompts  # noqa: F401

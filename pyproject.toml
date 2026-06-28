@@ -1,0 +1,10 @@
+# Tooling config only — LeetCoach is run from source (app.py), not pip-installed,
+# so there is no [project]/[build-system] table here.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# Defaults (pyflakes F + pycodestyle E4/E7/E9) plus import sorting (I).
+extend-select = ["I"]

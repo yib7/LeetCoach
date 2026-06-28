@@ -21,7 +21,6 @@ import pytest
 
 import prompts
 
-
 PROBLEM = "Given an array nums, return indices of the two numbers adding to target."
 
 LANGS = ["python", "cpp", "java"]

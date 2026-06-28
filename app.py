@@ -30,15 +30,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, stream_with_context
 
-import claude_cli
 import classifier
+import claude_cli
 import parsing
 import prompts
 import sandbox
 import storage
 import topic_index
+
+# Load .env from the project root (next to this file) if present, so LEETCOACH_*
+# settings written to a .env take effect for `python app.py` and WSGI imports.
+# Never overrides vars already set in the real environment; a missing .env is a
+# silent no-op.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE / "templates"

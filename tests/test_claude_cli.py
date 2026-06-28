@@ -19,7 +19,6 @@ import json
 
 import claude_cli
 
-
 # --- fakes ---------------------------------------------------------------
 
 def make_recording_runner(lines):

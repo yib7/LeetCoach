@@ -1,0 +1,5 @@
+# Development + test dependencies. Installs the runtime deps too (-r line below).
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8,<10
+ruff>=0.6

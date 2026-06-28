@@ -15,12 +15,9 @@ Covered:
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 import sandbox
-
 
 # --- verify_python: pass / fail / error ----------------------------------
 
