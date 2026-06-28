@@ -36,3 +36,16 @@ def claude_bin() -> str:
 def output_dir() -> Path:
     """Root directory of the generated study library (created lazily elsewhere)."""
     return Path(os.environ.get("LEETCOACH_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
+
+
+def topic_index_path() -> Path:
+    """Path to the persisted topic index JSON.
+
+    Defaults to ``<output_dir>/topic_index.json`` (gitignored). Overridable with
+    ``LEETCOACH_TOPIC_INDEX`` for tests / alternative locations. Read at call
+    time so tests can monkeypatch the environment.
+    """
+    override = os.environ.get("LEETCOACH_TOPIC_INDEX")
+    if override:
+        return Path(override)
+    return output_dir() / "topic_index.json"

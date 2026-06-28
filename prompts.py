@@ -126,11 +126,40 @@ def _bigo_fragment() -> str:
     )
 
 
+def _runnable_python_fragment() -> str:
+    """Instruct Claude to make the Python solution a self-contained runnable
+    script so the sandbox can verify it against the problem's sample I/O.
+
+    The contract the verifier relies on: the script reads ONE line from stdin in
+    exactly the problem's ``Input:`` format (e.g. ``nums = [2,7,11,15],
+    target = 9``) and prints the result to stdout in exactly the problem's
+    ``Output:`` format (e.g. ``[0,1]``) — so sample input fed on stdin and the
+    expected output can be diffed directly. Python only.
+    """
+    return (
+        "Make this a SELF-CONTAINED RUNNABLE Python script so it can be tested "
+        "automatically. Keep the clean solution function, then add a small "
+        "`if __name__ == \"__main__\":` driver that:\n"
+        "  - reads ONE line from standard input in EXACTLY the problem's `Input:` "
+        "format (e.g. the line after `Input:` such as "
+        "`nums = [2,7,11,15], target = 9`), parsing the named arguments out of "
+        "that line (do not prompt the user; just read the line);\n"
+        "  - calls the solution and PRINTS the result to standard output in "
+        "EXACTLY the problem's `Output:` format (e.g. `[0,1]`), matching its "
+        "spacing/brackets so it can be diffed against the expected output.\n"
+        "Use only the standard library for parsing (e.g. `ast.literal_eval`). The "
+        "script must run as `python solution.py` with the sample input piped on "
+        "stdin and print only the answer line(s)."
+    )
+
+
 def _answer_fragment(tier: str, language: str, *, with_tradeoff: bool) -> str:
     """The 'produce the answer + step-by-step reasoning' block.
 
     ``with_tradeoff`` adds the Answer-mode instruction to compare against the
     other tiers; Guided omits it (it commits to a single tier in a pipeline).
+    For Python, a runnable-driver instruction is appended so the sandbox can
+    auto-verify the solution against the problem's sample I/O.
     """
     lang_name = _LANG_NAME[language]
     stdlib = _LANG_STDLIB[language]
@@ -142,6 +171,8 @@ def _answer_fragment(tier: str, language: str, *, with_tradeoff: bool) -> str:
         "learner can follow how the solution is derived.",
         _bigo_fragment(),
     ]
+    if language == "python":
+        parts.append(_runnable_python_fragment())
     if with_tradeoff:
         others = [t for t in TIERS if t != tier]
         parts.append(

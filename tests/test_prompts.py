@@ -165,6 +165,31 @@ def test_guided_composes_learning_and_answer():
     assert "reasoning" in p or "step" in p
 
 
+# --- Python answers must be runnable scripts (so the sandbox can verify) --
+
+@pytest.mark.parametrize("tier", TIERS)
+def test_python_answer_is_runnable_script(tier):
+    p = _lower(prompts.build_answer(PROBLEM, tier=tier, language="python"))
+    # instructs a stdin/stdout runnable driver so the sandbox can diff samples
+    assert "stdin" in p or "standard input" in p
+    assert "stdout" in p or "standard output" in p
+    assert "__main__" in p
+
+
+def test_python_guided_answer_is_runnable_script():
+    p = _lower(prompts.build_guided(PROBLEM, tier="normal", language="python"))
+    assert "stdin" in p or "standard input" in p
+    assert "__main__" in p
+
+
+@pytest.mark.parametrize("lang", ["cpp", "java"])
+def test_non_python_answer_omits_runnable_driver(lang):
+    # The runnable-stdin driver instruction is Python-only (the sandbox only
+    # auto-runs Python); cpp/java should not carry the __main__ stdin contract.
+    p = _lower(prompts.build_answer(PROBLEM, tier="normal", language=lang))
+    assert "__main__" not in p
+
+
 # --- invalid inputs are rejected clearly ---------------------------------
 
 def test_invalid_tier_raises():
