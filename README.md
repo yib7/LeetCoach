@@ -43,8 +43,16 @@ installed and authenticated. There are no secrets to configure.
 
 ## Setup
 
-Developed and tested on **Windows 11**; it is plain cross-platform Python with no
-OS-specific dependencies. Requires **Python 3.12+** (use the `py` launcher on Windows).
+Developed and tested on **Windows 11**; plain cross-platform Python with no OS-specific
+dependencies. Requires **Python 3.12+** (use the `py` launcher on Windows).
+
+On Windows, one command creates the virtual environment and installs everything:
+
+```powershell
+.\setup.ps1
+```
+
+Or set it up manually (any platform):
 
 ```sh
 py -m venv .venv
@@ -52,8 +60,9 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
-Optionally copy `.env.example` to `.env` to change the model or paths (everything has a
-sensible default; see [Configuration](#configuration)).
+Optionally copy `.env.example` to `.env` to change the model or paths (all optional; see
+[Configuration](#configuration)). To run the tests, also install `requirements-dev.txt`
+(`requirements.lock` pins exact versions for a reproducible setup).
 
 ## Run
 
@@ -143,6 +152,7 @@ output/
 All tests mock the `claude` subprocess, so the suite runs offline with no real Claude calls.
 
 ```sh
+pip install -r requirements-dev.txt
 py -m pytest -q
 ```
 
