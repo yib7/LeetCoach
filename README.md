@@ -44,35 +44,38 @@ installed and authenticated. There are no secrets to configure.
 ## Setup
 
 Developed and tested on **Windows 11**; plain cross-platform Python with no OS-specific
-dependencies. Requires **Python 3.12+** (use the `py` launcher on Windows).
+dependencies. You need **Python 3.12+** (use the `py` launcher on Windows) and the
+**`claude` CLI** installed, on your PATH, and authenticated (it drives your Claude Code
+subscription; there is no API key).
 
-On Windows, one command creates the virtual environment and installs everything:
+**Step 1: get the code.**
+
+```powershell
+git clone https://github.com/yib7/LeetCoach.git
+cd LeetCoach
+```
+
+**Step 2: install.** On Windows, one command creates the virtual environment and installs
+the runtime dependencies:
 
 ```powershell
 .\setup.ps1
 ```
 
-Or set it up manually (any platform):
+(Not on Windows? Run `py -m venv .venv`, activate it, then `pip install -r requirements.txt`.)
 
-```sh
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1     # PowerShell (use activate / activate.bat / source elsewhere)
-pip install -r requirements.txt
-```
+**Step 3: run.**
 
-Optionally copy `.env.example` to `.env` to change the model or paths (all optional; see
-[Configuration](#configuration)). To run the tests, also install `requirements-dev.txt`
-(`requirements.lock` pins exact versions for a reproducible setup).
-
-## Run
-
-```sh
+```powershell
 python app.py
 ```
 
-Open the printed localhost URL (default `http://127.0.0.1:5000`). Paste a problem, choose a
-mode and language (and tier), and click **Run**. The answer streams in live and is saved
-under `output/`.
+Open the printed URL (default `http://127.0.0.1:5000`), paste a problem, pick a mode and
+language (and tier), and click **Run**. The answer streams in live and is saved under
+`output/`. `python app.py` is the single entry point for every later run.
+
+(Optional) Copy `.env.example` to `.env` to change the model or paths; all settings are
+optional, see [Configuration](#configuration).
 
 ## Modes
 
@@ -118,7 +121,7 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
 | Front end | Vendored `marked` + `highlight.js`, dark single-page UI |
-| Tests / lint | pytest (143 tests, all mocking the subprocess), ruff |
+| Tests / lint | pytest (145 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

@@ -16,6 +16,8 @@ emits (observed live during SP1):
 from __future__ import annotations
 
 import json
+import sys
+import threading
 
 import claude_cli
 
@@ -208,3 +210,62 @@ def test_run_raises_clear_error_when_unavailable():
         assert "claude" in str(exc).lower()
     else:
         raise AssertionError("expected ClaudeUnavailableError when claude is missing")
+
+
+# --- (d) _real_runner: stderr never deadlocks the stdout stream -----------
+# These drive the REAL subprocess path, but use this Python interpreter as a
+# harmless stand-in for `claude` (a local helper script) — still no real
+# `claude` call, no network. A regression here would deadlock, so each runs in
+# a worker thread with a join timeout: a hang fails the assert instead of
+# wedging the suite.
+
+def _drive_real_runner(argv, stdin_text, timeout=20):
+    out: dict = {}
+
+    def go():
+        try:
+            out["lines"] = list(claude_cli._real_runner(argv, stdin_text))
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
+            out["exc"] = exc
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(timeout)
+    assert not t.is_alive(), "_real_runner did not finish in time — stderr/stdout pipe deadlock?"
+    if "exc" in out:
+        raise out["exc"]
+    return out["lines"]
+
+
+def test_real_runner_large_stderr_does_not_deadlock():
+    # The child floods stderr (~300KB, far past a 64KB OS pipe buffer) BEFORE
+    # writing stdout. If stderr were an unread PIPE this would deadlock; with
+    # stderr redirected to a file the run completes and stdout still arrives.
+    script = (
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "sys.stderr.write('E' * 300000)\n"
+        "sys.stderr.flush()\n"
+        "sys.stdout.write('hello\\n')\n"
+        "sys.stdout.write('world\\n')\n"
+    )
+    lines = _drive_real_runner([sys.executable, "-c", script], "ping")
+    assert [ln.strip() for ln in lines] == ["hello", "world"]
+
+
+def test_real_runner_surfaces_stderr_on_nonzero_exit():
+    # A nonzero exit must still raise with the child's stderr text attached
+    # (read back from the temp file), so diagnostics aren't lost.
+    script = (
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "sys.stderr.write('boom diagnostic detail')\n"
+        "sys.exit(3)\n"
+    )
+    try:
+        _drive_real_runner([sys.executable, "-c", script], "ping")
+    except claude_cli.ClaudeUnavailableError as exc:
+        assert "boom diagnostic detail" in str(exc)
+        assert "3" in str(exc)
+    else:
+        raise AssertionError("expected ClaudeUnavailableError on nonzero exit")

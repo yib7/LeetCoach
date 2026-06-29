@@ -40,6 +40,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from typing import Callable, Iterable, Iterator, Optional
 
 import config
@@ -69,10 +70,16 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
     child sees EOF and starts producing output, which we read line-by-line for
     incremental streaming.
     """
+    # stderr goes to a temp file, not a PIPE: an unread stderr PIPE can fill its
+    # ~64KB OS buffer and deadlock the child (it blocks writing stderr while we
+    # block reading stdout). A file has no such limit; we read it back only if
+    # the child exits nonzero. Binary file -> decode manually (text= applies to
+    # the stdin/stdout pipes, not a redirected file handle).
+    stderr_file = tempfile.TemporaryFile()
     popen_kwargs: dict = {
         "stdin": subprocess.PIPE,
         "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
+        "stderr": stderr_file,
         "text": True,
         "encoding": "utf-8",
         "errors": "replace",
@@ -101,14 +108,16 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
         if proc.stdout is not None:
             proc.stdout.close()
         returncode = proc.wait()
-        if returncode != 0:
-            stderr = ""
-            if proc.stderr is not None:
-                stderr = proc.stderr.read() or ""
-            raise ClaudeUnavailableError(
-                f"`{config.claude_bin()}` exited with code {returncode}. "
-                f"Is the claude CLI installed and authenticated?\n{stderr.strip()}"
-            )
+        try:
+            if returncode != 0:
+                stderr_file.seek(0)
+                stderr = stderr_file.read().decode("utf-8", "replace")
+                raise ClaudeUnavailableError(
+                    f"`{config.claude_bin()}` exited with code {returncode}. "
+                    f"Is the claude CLI installed and authenticated?\n{stderr.strip()}"
+                )
+        finally:
+            stderr_file.close()
 
 
 # --- stream-json parsing -------------------------------------------------

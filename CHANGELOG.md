@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-06-29
+
+### Fixed
+- `claude_cli`: the child process's stderr now goes to a temp file instead of an
+  unread pipe. A large stderr burst from `claude` could previously fill the OS pipe
+  buffer and deadlock the streaming read (child blocked writing stderr, parent blocked
+  reading stdout). Added two hermetic regression tests, bringing the suite to 145.
+
 ## [1.0.0] - 2026-06-28
 
 First public release.
