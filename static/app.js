@@ -187,11 +187,20 @@
     outputEl.innerHTML = "";
     var acc = "";
 
+    // Abort the in-flight /run if the user navigates away or closes the tab, so
+    // the server sees the connection drop and cancels the Claude subprocess
+    // instead of letting it run to completion and burn subscription usage.
+    var controller = new AbortController();
+    function abortOnUnload() { controller.abort(); }
+    window.addEventListener("pagehide", abortOnUnload);
+    window.addEventListener("beforeunload", abortOnUnload);
+
     try {
       var resp = await fetch("/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
 
       if (!resp.ok) {
@@ -221,8 +230,13 @@
         feed(decoder.decode(r.value, { stream: true }));
       }
     } catch (e) {
-      setStatus("Network error: " + e.message, "warn");
+      // An AbortError here is an intentional cancel (page unload), not a fault.
+      if (e && e.name !== "AbortError") {
+        setStatus("Network error: " + e.message, "warn");
+      }
     } finally {
+      window.removeEventListener("pagehide", abortOnUnload);
+      window.removeEventListener("beforeunload", abortOnUnload);
       setRunning(false);
     }
   }

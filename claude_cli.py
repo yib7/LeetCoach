@@ -98,18 +98,35 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
         argv = [resolved, *argv[1:]]
 
     proc = subprocess.Popen(argv, **popen_kwargs)
+    drained = False
     try:
         assert proc.stdin is not None and proc.stdout is not None
         proc.stdin.write(stdin_text)
         proc.stdin.close()
         for line in proc.stdout:
             yield line
+        drained = True  # stdout hit EOF naturally — the child is done
     finally:
+        # If we did NOT drain stdout to EOF, the generator is being closed early
+        # — the SSE client disconnected (Flask throws GeneratorExit into us at
+        # the next yield) or an exception unwound the consumer. The `claude`
+        # subprocess would otherwise keep running to completion and keep burning
+        # subscription usage, so terminate it. Without this, proc.wait() below
+        # would also block until the abandoned child finishes.
+        if not drained and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()  # last resort if terminate was ignored
         if proc.stdout is not None:
             proc.stdout.close()
         returncode = proc.wait()
         try:
-            if returncode != 0:
+            # Only surface a nonzero-exit error on a normal, fully-drained run.
+            # A process we terminated on client disconnect exits nonzero by
+            # design; that's a cancellation, not a Claude failure to report.
+            if drained and returncode != 0:
                 stderr_file.seek(0)
                 stderr = stderr_file.read().decode("utf-8", "replace")
                 raise ClaudeUnavailableError(

@@ -253,6 +253,37 @@ def test_real_runner_large_stderr_does_not_deadlock():
     assert [ln.strip() for ln in lines] == ["hello", "world"]
 
 
+def test_real_runner_kills_subprocess_on_early_close():
+    """Closing the generator early (the SSE client disconnected) must terminate
+    the child instead of leaving it running to completion. Regression guard for
+    audit P2 #4 (client disconnect should cancel the Claude subprocess).
+
+    The child prints one line, then sleeps far longer than the test would wait.
+    We read exactly one line, then close() the generator (as Flask does on
+    disconnect) and assert the child actually exits quickly.
+    """
+    import time
+
+    script = (
+        "import sys, time\n"
+        "sys.stdin.read()\n"
+        "sys.stdout.write('first\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"          # would hang for 60s if not terminated
+        "sys.stdout.write('second\\n')\n"
+    )
+    gen = claude_cli._real_runner([sys.executable, "-c", script], "ping")
+    first = next(gen)
+    assert first.strip() == "first"
+
+    start = time.monotonic()
+    gen.close()  # Flask does this on client disconnect (throws GeneratorExit)
+    elapsed = time.monotonic() - start
+    # If the child were left to run its sleep(60), close() would block on
+    # proc.wait() for ~60s. Terminating it makes close() return promptly.
+    assert elapsed < 15, f"early close took {elapsed:.1f}s — subprocess was not terminated"
+
+
 def test_real_runner_surfaces_stderr_on_nonzero_exit():
     # A nonzero exit must still raise with the child's stderr text attached
     # (read back from the temp file), so diagnostics aren't lost.
