@@ -40,6 +40,24 @@
     });
   }
 
+  // Defense-in-depth XSS hardening (this is a localhost tool, but Claude's
+  // output is still untrusted markdown we render via innerHTML). marked v12
+  // dropped the old `sanitize` option, so neutralize raw HTML at the renderer
+  // level: any literal HTML block/inline in the markdown is escaped and shown
+  // as text instead of being injected into the DOM. Markdown-generated tags
+  // (headings, code, emphasis, links, etc.) still render normally.
+  if (window.marked && typeof marked.use === "function") {
+    marked.use({
+      renderer: {
+        // Raw HTML blocks/inline: emit them as escaped, visible text.
+        html: function (token) {
+          var raw = typeof token === "string" ? token : (token && token.text) || "";
+          return escapeHtml(raw);
+        },
+      },
+    });
+  }
+
   // Claude availability banner (flag injected server-side into <body>).
   if (document.body.getAttribute("data-claude-available") === "false") {
     var warn = $("claude-warning");
