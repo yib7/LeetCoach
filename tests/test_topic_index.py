@@ -8,6 +8,7 @@ records the classifier's topics back into the index.
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -96,6 +97,48 @@ def test_record_on_corrupt_file_recovers(idx_path):
     idx_path.write_text("garbage", encoding="utf-8")
     topic_index.record("dp", ["memoization"])  # starts from empty, then records
     assert "memoization" in topic_index.known_topics()
+
+
+# --- concurrency: record() under many threads loses no topics ------------
+
+def test_concurrent_record_loses_no_topics(idx_path):
+    """Flask runs ``threaded=True``. Many concurrent Learning runs must not lose
+    topics via a load->merge->save race: the load/merge/save is serialized by an
+    in-process lock, so every recorded topic survives.
+
+    Regression guard for the TOCTOU race (audit P1 #1): without locking, threads
+    interleave load and save and one thread's merge overwrites another's, so the
+    final index is missing topics. With locking, all N are present.
+    """
+    n_threads = 40
+    # Each thread records a distinct topic under a distinct problem_type, so a
+    # dropped write is detectable as a missing topic (not merely a reorder).
+    topics = [f"topic_{i}" for i in range(n_threads)]
+    barrier = threading.Barrier(n_threads)
+
+    def worker(i):
+        # Line every thread up at the barrier so they hammer record() together,
+        # maximizing the interleave that would trigger the race if unguarded.
+        barrier.wait()
+        topic_index.record(f"type_{i}", [topics[i], "shared"])
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert all(not t.is_alive() for t in threads), "a record() worker hung"
+
+    known = set(topic_index.known_topics())
+    missing = set(topics) - known
+    assert not missing, f"lost {len(missing)} topics under concurrency: {sorted(missing)}"
+    assert "shared" in known
+
+    # Every per-type bucket persisted too (one per thread + they don't collide).
+    data = topic_index.load()
+    assert len(data["by_type"]) == n_threads
+    # The flat list is still de-duplicated (no "shared" repeats).
+    assert data["all"].count("shared") == 1
 
 
 # --- Learning route passes known topics into the prompt builder ----------

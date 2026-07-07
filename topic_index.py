@@ -20,9 +20,20 @@ can point ``LEETCOACH_TOPIC_INDEX`` at a tmp file.
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 
 import config
+
+# Serializes the load->merge->save cycle in ``record()``. Flask runs
+# ``threaded=True``, so two concurrent Learning requests could otherwise
+# interleave loads and saves and lose one thread's merged topics (a TOCTOU
+# race). This is a single-process personal tool, so an in-process lock plus an
+# atomic tmp-then-rename write is sufficient (and Windows-compatible — no
+# fcntl). All record() calls share this one module-level lock regardless of the
+# target path; contention is trivial for a personal tool.
+_RECORD_LOCK = threading.Lock()
 
 
 def _path(path=None) -> Path:
@@ -81,7 +92,12 @@ def save(data: dict, path=None) -> str:
         "by_type": data.get("by_type", {}) if isinstance(data, dict) else {},
         "all": data.get("all", []) if isinstance(data, dict) else [],
     }
-    p.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+    # Atomic write: dump to a sibling temp file, then os.replace() onto the
+    # target. os.replace is atomic on both Windows and POSIX, so a reader never
+    # sees a half-written file and a crash mid-write can't corrupt the index.
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
     return str(p)
 
 
@@ -100,20 +116,23 @@ def record(problem_type: str, topics, path=None) -> dict:
     bucket always exists. Never raises on a write hiccup — it returns the merged
     in-memory index regardless.
     """
-    data = load(path)
     ptype = (problem_type or "uncategorized").strip() or "uncategorized"
     incoming = [str(t).strip() for t in (topics or []) if str(t).strip()]
 
-    bucket = list(data["by_type"].get(ptype, []))
-    data["by_type"][ptype] = _dedupe(bucket + incoming)
-    data["all"] = _dedupe(list(data["all"]) + incoming)
+    # Hold the lock across the whole load->merge->save so a concurrent record()
+    # can't read a stale index between our load and save and clobber our write.
+    with _RECORD_LOCK:
+        data = load(path)
+        bucket = list(data["by_type"].get(ptype, []))
+        data["by_type"][ptype] = _dedupe(bucket + incoming)
+        data["all"] = _dedupe(list(data["all"]) + incoming)
 
-    try:
-        save(data, path)
-    except OSError:
-        # Persisting is best-effort; the caller still gets the merged view.
-        pass
-    return data
+        try:
+            save(data, path)
+        except OSError:
+            # Persisting is best-effort; the caller still gets the merged view.
+            pass
+        return data
 
 
 def _dedupe(items) -> list:
