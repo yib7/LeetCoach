@@ -182,6 +182,64 @@ def test_run_rejects_empty_problem(client):
     assert resp.status_code == 400
 
 
+# --- mid-stream subprocess failure -> SSE error event --------------------
+
+def test_run_answer_midstream_failure_emits_error_event(tmp_path, monkeypatch):
+    """If the Claude runner raises *after* yielding some text (the CLI subprocess
+    dying mid-response), the stream must not just cut off silently — it must emit
+    a terminal ``event: error`` so the browser knows the run failed.
+
+    Regression guard for audit P1 #2 (mid-stream exception not converted to an
+    SSE error event).
+    """
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+
+    def failing_run(prompt, **kwargs):
+        # classify call succeeds so we get past step 1 and into the answer stream
+        if "Classify the following" in prompt and "Respond with ONLY a tiny" in prompt:
+            yield json.dumps(CLASSIFY_JSON)
+            return
+        # answer stream: yield a couple of real deltas, then the subprocess dies
+        yield "Here is the start of the answer"
+        yield " with more text"
+        raise app_module.claude_cli.ClaudeUnavailableError(
+            "`claude` exited with code 1. Is the claude CLI installed?"
+        )
+
+    application = app_module.create_app(run_fn=failing_run)
+    application.config.update(TESTING=True)
+    client = application.test_client()
+
+    resp = client.post(
+        "/run",
+        json={
+            "problem": "Two Sum",
+            "mode": "answer",
+            "language": "python",
+            "tier": "normal",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    text_chunks, events = _parse_sse(body)
+
+    # the partial text made it to the client before the failure
+    assert "".join(text_chunks).startswith("Here is the start")
+
+    # a terminal error event is present, carrying the failure detail...
+    errors = [p for (name, p) in events if name == "error"]
+    assert errors, f"expected a terminal error event, got events: {events}"
+    assert "claude" in errors[0].lower()
+
+    # ...and NO done event was emitted (the run did not succeed)
+    assert not [n for (n, _) in events if n == "done"]
+
+    # no partial answer file was saved for a failed run
+    answers_dir = tmp_path / "answers"
+    saved = [p for p in answers_dir.rglob("*") if p.is_file()] if answers_dir.exists() else []
+    assert not saved, f"a failed run should not save files, found: {saved}"
+
+
 # --- app constructs without a live claude --------------------------------
 
 def test_create_app_does_not_require_claude(monkeypatch):

@@ -148,14 +148,27 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
             events) while accumulating the full text. Returns the joined text via
             a one-element list trick — generators can't ``return`` a value the
             caller easily reads while also yielding, so we stash it on ``out[0]``.
+
+            If iterating ``run_fn`` fails mid-stream (e.g. the `claude` subprocess
+            dies part-way through a response), the exception is caught HERE and
+            re-raised only after the accumulator is left in a defined state — so
+            the outer ``event_stream`` handler converts it into a terminal SSE
+            ``error`` event instead of the stream cutting off silently. Whatever
+            text arrived before the failure has already been yielded to the
+            client; we do NOT proceed to save a partial/incomplete answer.
             """
             out[0] = ""  # reset accumulator for this call
             full = []
-            for delta in run_fn(prompt):
-                if delta:
-                    full.append(delta)
-                    yield _sse_text(delta)
-            out[0] = "".join(full)
+            try:
+                for delta in run_fn(prompt):
+                    if delta:
+                        full.append(delta)
+                        yield _sse_text(delta)
+            finally:
+                # Publish whatever we accumulated even if the loop raised, so any
+                # cleanup path sees a consistent value (the raise still aborts the
+                # mode's save/done steps below).
+                out[0] = "".join(full)
 
         out = [""]  # accumulator shared with the helper above
 
