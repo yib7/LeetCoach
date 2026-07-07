@@ -104,6 +104,11 @@ def save(data: dict, path=None) -> str:
 def known_topics(path=None) -> list:
     """Flattened, de-duplicated list of every topic learned so far (order of first
     appearance). Empty list if nothing has been recorded / the file is missing."""
+    # Intentionally unlocked: this is a read-only path (no lock needed for
+    # correctness here) and it's safe against a concurrent record() because
+    # save() writes via tmp-file + os.replace(), an atomic rename on both
+    # Windows and POSIX — a reader here always sees either the old file or
+    # the fully-written new one, never a partial write.
     return list(load(path).get("all", []))
 
 

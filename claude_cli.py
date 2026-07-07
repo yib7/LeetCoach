@@ -40,6 +40,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import Callable, Iterable, Iterator, Optional
 
@@ -62,6 +63,32 @@ def is_available(*, which: Callable[[str], Optional[str]] = shutil.which) -> boo
 
 
 # --- subprocess runner (the only real-IO part) ---------------------------
+
+def _kill_process_tree(proc: "subprocess.Popen[str]") -> bool:
+    """Best-effort kill of `proc` AND its descendants. Returns True if a
+    tree-kill mechanism was invoked (not necessarily that it succeeded).
+
+    On Windows the installed `claude` binary is typically an npm shim
+    (``claude.cmd`` launching node via a child process), so `proc.terminate()`
+    only kills the shim — the actual node process doing the work is left
+    running. ``taskkill /T`` walks the process tree by PID and kills the
+    whole thing. No new dependency (psutil) is pulled in for this; taskkill
+    ships with Windows. Falls back to terminate()/kill() on non-Windows or if
+    taskkill itself fails to launch.
+    """
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                check=False,
+            )
+            return True
+        except OSError:
+            pass  # taskkill missing/unusable — fall through to terminate()
+    proc.terminate()
+    return False
+
 
 def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
     """Spawn `claude`, feed `stdin_text`, and yield stdout lines as they arrive.
@@ -114,11 +141,11 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
         # subscription usage, so terminate it. Without this, proc.wait() below
         # would also block until the abandoned child finishes.
         if not drained and proc.poll() is None:
-            proc.terminate()
+            _kill_process_tree(proc)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()  # last resort if terminate was ignored
+                proc.kill()  # last resort if terminate/taskkill was ignored
         if proc.stdout is not None:
             proc.stdout.close()
         returncode = proc.wait()
@@ -153,41 +180,55 @@ def _iter_text_deltas(lines: Iterable[str]) -> Iterator[str]:
     saw_stream_event_text = False
     assistant_fallback: list[str] = []
 
-    for raw in lines:
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            # Defensive: a stray non-JSON line must never crash the stream.
-            continue
-        if not isinstance(obj, dict):
-            continue
+    # `lines` is typically the generator returned by `_real_runner`. When the
+    # SSE client disconnects, Flask closes the OUTERMOST generator (the one
+    # `run()` returns, which is this generator via `yield from`); CPython
+    # propagates that close() down through the `yield from` chain into this
+    # `for` loop as a GeneratorExit, which in turn reaches `lines` only
+    # because `for` calls `lines.close()` implicitly on GC — relying on
+    # refcounting timing, not a guaranteed protocol. Close `lines` explicitly
+    # so `_real_runner`'s cleanup (which terminates the `claude` subprocess)
+    # runs deterministically regardless of GC timing.
+    try:
+        for raw in lines:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                # Defensive: a stray non-JSON line must never crash the stream.
+                continue
+            if not isinstance(obj, dict):
+                continue
 
-        kind = obj.get("type")
+            kind = obj.get("type")
 
-        if kind == "stream_event":
-            event = obj.get("event") or {}
-            if event.get("type") == "content_block_delta":
-                delta = event.get("delta") or {}
-                if delta.get("type") == "text_delta":
-                    text = delta.get("text", "")
-                    if text:
-                        saw_stream_event_text = True
-                        yield text
-            # thinking/signature deltas and other event types: ignored
-            continue
+            if kind == "stream_event":
+                event = obj.get("event") or {}
+                if event.get("type") == "content_block_delta":
+                    delta = event.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            saw_stream_event_text = True
+                            yield text
+                # thinking/signature deltas and other event types: ignored
+                continue
 
-        if kind == "assistant":
-            # Record assistant text in case no stream_event text ever appears.
-            message = obj.get("message") or {}
-            for block in message.get("content") or []:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    assistant_fallback.append(block.get("text", ""))
-            continue
+            if kind == "assistant":
+                # Record assistant text in case no stream_event text ever appears.
+                message = obj.get("message") or {}
+                for block in message.get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        assistant_fallback.append(block.get("text", ""))
+                continue
 
-        # system / result / rate_limit_event / anything else: not delta text.
+            # system / result / rate_limit_event / anything else: not delta text.
+    finally:
+        close = getattr(lines, "close", None)
+        if callable(close):
+            close()
 
     if not saw_stream_event_text and assistant_fallback:
         joined = "".join(assistant_fallback)

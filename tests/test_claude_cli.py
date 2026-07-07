@@ -284,6 +284,130 @@ def test_real_runner_kills_subprocess_on_early_close():
     assert elapsed < 15, f"early close took {elapsed:.1f}s — subprocess was not terminated"
 
 
+def test_run_full_chain_kills_subprocess_on_early_close():
+    """Same regression as test_real_runner_kills_subprocess_on_early_close, but
+    drives the FULL production chain: claude_cli.run() -> _iter_text_deltas()
+    -> _real_runner(), exactly as app.py's SSE generator does. Closing the
+    generator returned by `run()` must still propagate down to `_real_runner`
+    and terminate the underlying fake subprocess.
+
+    Regression guard for audit review round 1, Important #1: GeneratorExit
+    reaching `_real_runner` through `_iter_text_deltas`'s plain `for raw in
+    lines:` was incidental (CPython refcounting-based `lines.close()` on GC),
+    not guaranteed by the iterator protocol. `_iter_text_deltas` now closes
+    `lines` explicitly in a `finally`, so this full-chain path must behave the
+    same as calling `_real_runner` directly.
+    """
+    import time
+
+    script = (
+        "import sys, time\n"
+        "sys.stdin.read()\n"
+        "sys.stdout.write('{\\\"type\\\": \\\"stream_event\\\", \\\"event\\\": "
+        "{\\\"type\\\": \\\"content_block_delta\\\", \\\"delta\\\": "
+        "{\\\"type\\\": \\\"text_delta\\\", \\\"text\\\": \\\"first\\\"}}}\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"          # would hang for 60s if not terminated
+        "sys.stdout.write('second\\n')\n"
+    )
+
+    def real_argv_runner(argv, stdin_text):
+        # Ignore the real argv claude_cli.run() built (it targets `claude`);
+        # substitute this python stand-in script instead, but otherwise go
+        # through the exact same _real_runner code path.
+        return claude_cli._real_runner([sys.executable, "-c", script], stdin_text)
+
+    gen = claude_cli.run("hi", runner=real_argv_runner)
+    first = next(gen)
+    assert first == "first"
+
+    start = time.monotonic()
+    gen.close()  # Flask does this on client disconnect (throws GeneratorExit)
+    elapsed = time.monotonic() - start
+    assert elapsed < 15, f"early close took {elapsed:.1f}s — subprocess was not terminated"
+
+
+def test_iter_text_deltas_closes_lines_on_early_generator_close():
+    """Unit-level check (no subprocess at all): if the consumer of
+    claude_cli._iter_text_deltas() closes it early, the underlying `lines`
+    iterable's .close() must be invoked deterministically -- not left to GC.
+    """
+    closed = {"called": False}
+
+    class FakeLines:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return stream_event_line("chunk")
+
+        def close(self):
+            closed["called"] = True
+
+    gen = claude_cli._iter_text_deltas(FakeLines())
+    first = next(gen)
+    assert first == "chunk"
+    gen.close()
+
+    assert closed["called"] is True
+
+
+def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
+    """Windows-specific: `claude` is typically an npm shim (claude.cmd -> node),
+    so a plain proc.terminate() only kills the shim and leaks the real node
+    child. On win32, _kill_process_tree must shell out to
+    `taskkill /T /F /PID <pid>` instead of calling proc.terminate() directly.
+
+    Regression guard for audit review round 1, Important #2. This monkeypatches
+    both sys.platform and subprocess.run so no real process (and no real
+    taskkill) is invoked.
+    """
+    monkeypatch.setattr(claude_cli.sys, "platform", "win32")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+
+    class FakeProc:
+        pid = 4242
+
+        def terminate(self):
+            raise AssertionError("terminate() must not be called when taskkill is used")
+
+    invoked_tree_kill = claude_cli._kill_process_tree(FakeProc())
+
+    assert invoked_tree_kill is True
+    assert len(calls) == 1
+    cmd = calls[0]
+    assert cmd[0] == "taskkill"
+    assert "/T" in cmd and "/F" in cmd
+    assert "/PID" in cmd
+    assert str(FakeProc.pid) in cmd
+
+
+def test_kill_process_tree_falls_back_to_terminate_on_non_windows(monkeypatch):
+    monkeypatch.setattr(claude_cli.sys, "platform", "linux")
+    terminated = {"called": False}
+
+    class FakeProc:
+        pid = 4242
+
+        def terminate(self):
+            terminated["called"] = True
+
+    invoked_tree_kill = claude_cli._kill_process_tree(FakeProc())
+
+    assert invoked_tree_kill is False
+    assert terminated["called"] is True
+
+
 def test_real_runner_surfaces_stderr_on_nonzero_exit():
     # A nonzero exit must still raise with the child's stderr text attached
     # (read back from the temp file), so diagnostics aren't lost.
