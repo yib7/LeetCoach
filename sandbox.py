@@ -235,6 +235,14 @@ _INPUT_RE = re.compile(
 _OUTPUT_RE = re.compile(
     r"(?im)^[ \t>*-]*output\s*[:=]\s*(.*?)\s*$"
 )
+# Section markers that terminate the search for an ``Output:`` after an
+# ``Input:``. A multi-line Input block (e.g. an array printed across several
+# lines) can push Output well past a small fixed window, so instead of a fixed
+# line count we scan forward until the Output — or bail at the next section so
+# we never swallow prose or the following example's data.
+_TERMINAL_RE = re.compile(
+    r"(?im)^[ \t>*-]*(?:explanation|example|constraints?|follow[ -]?up|note)\b"
+)
 
 
 def parse_samples(problem_text: str) -> list:
@@ -265,16 +273,20 @@ def parse_samples(problem_text: str) -> list:
             i += 1
             continue
         stdin_val = m_in.group(1).strip()
-        # Find the next Output: within the next few lines (allow a blank between).
+        # Scan forward for the matching Output:. No fixed window — a multi-line
+        # Input block can push Output arbitrarily far down — but bail at a
+        # section marker (Explanation/Example/Constraints/...) or another Input:,
+        # so we never cross into prose or the next example.
         out_val = None
         j = i + 1
-        while j < n and j <= i + 4:
+        while j < n:
             m_out = _OUTPUT_RE.match(lines[j])
             if m_out:
                 out_val = m_out.group(1).strip()
                 break
-            # Stop if we hit another Input: before an Output: (malformed pair).
-            if _INPUT_RE.match(lines[j]):
+            # Stop at the next section or another Input: before an Output:
+            # (malformed / unpaired Input).
+            if _INPUT_RE.match(lines[j]) or _TERMINAL_RE.match(lines[j]):
                 break
             j += 1
         if out_val is not None and (stdin_val or out_val):

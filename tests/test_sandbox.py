@@ -123,6 +123,50 @@ def test_parse_samples_returns_empty_when_none():
     assert sandbox.parse_samples("") == []
 
 
+# A multi-line Input block pushes Output past the old fixed 4-line window.
+MULTILINE_INPUT_PROBLEM = """\
+Example 1:
+
+Input:
+grid = [
+  [1, 0, 0],
+  [0, 1, 0],
+  [0, 0, 1]
+]
+target = 3
+Output: [2,2]
+Explanation: the diagonal sums to target.
+"""
+
+
+def test_parse_samples_finds_output_past_multiline_input():
+    """A multi-line Input block must not push the Output out of range. Regression
+    guard for audit P2 #6 (fixed 4-line window silently dropped the pair, so
+    verification degraded to 'not auto-verified')."""
+    samples = sandbox.parse_samples(MULTILINE_INPUT_PROBLEM)
+    assert len(samples) == 1, f"expected the pair to be found, got {samples}"
+    assert samples[0].expected_stdout == "[2,2]"
+
+
+def test_parse_samples_stops_at_section_marker_when_no_output():
+    """An Input: with no Output: before the next section must NOT be paired with
+    a later example's Output (the scan bails at the section marker)."""
+    text = (
+        "Example 1:\n"
+        "Input: nums = [1,2]\n"
+        "Explanation: no output line here at all.\n"
+        "\n"
+        "Example 2:\n"
+        "Input: nums = [3,4]\n"
+        "Output: [0,1]\n"
+    )
+    samples = sandbox.parse_samples(text)
+    # Only the well-formed second pair should be captured.
+    assert len(samples) == 1
+    assert "nums = [3,4]" in samples[0].stdin
+    assert samples[0].expected_stdout == "[0,1]"
+
+
 # --- verify_answer orchestrator: python first-class ----------------------
 
 ECHO_TARGET_SOLUTION = (
