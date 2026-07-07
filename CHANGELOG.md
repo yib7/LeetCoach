@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-07-07
+
+### Fixed
+- `topic_index`: fixed a TOCTOU race in `record()` so concurrent runs no longer
+  clobber each other's entries.
+- SSE streaming: a mid-stream `claude` failure is now delivered to the browser as
+  an explicit SSE error event instead of silently truncating the response.
+- `claude_cli`: the `claude` subprocess is now cancelled deterministically when the
+  SSE client disconnects (with a Windows process-tree kill), so an abandoned run no
+  longer keeps burning subscription usage.
+
+### Security
+- Rendered markdown now escapes any raw HTML in Claude's output (defense-in-depth
+  XSS hardening for the local UI).
+
+### Changed
+- Sample-I/O parser now handles multi-line `Input:` blocks.
+- Test suite grown to 154, all still mocking the `claude` subprocess.
+
 ## [1.0.1] - 2026-06-29
 
 ### Fixed
