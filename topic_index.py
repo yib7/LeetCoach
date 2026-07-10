@@ -101,15 +101,23 @@ def save(data: dict, path=None) -> str:
     return str(p)
 
 
-def known_topics(path=None) -> list:
+def known_topics(path=None, *, limit=None) -> list:
     """Flattened, de-duplicated list of every topic learned so far (order of first
-    appearance). Empty list if nothing has been recorded / the file is missing."""
+    appearance). Empty list if nothing has been recorded / the file is missing.
+
+    ``limit`` (audit6 P2-12) keeps only the LAST ``limit`` entries. The stored
+    ``all`` list preserves insertion order (first appearance), so the tail is
+    the most recently first-recorded topics — i.e. "the most recent N".
+    """
     # Intentionally unlocked: this is a read-only path (no lock needed for
     # correctness here) and it's safe against a concurrent record() because
     # save() writes via tmp-file + os.replace(), an atomic rename on both
     # Windows and POSIX — a reader here always sees either the old file or
     # the fully-written new one, never a partial write.
-    return list(load(path).get("all", []))
+    topics = list(load(path).get("all", []))
+    if limit is not None:
+        topics = topics[-limit:] if limit > 0 else []
+    return topics
 
 
 def record(problem_type: str, topics, path=None) -> dict:

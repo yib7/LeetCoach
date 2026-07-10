@@ -65,6 +65,11 @@ PORT = 5000
 # port. Bracketed "[::1]" covers the IPv6 loopback literal.
 ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
 
+# Cap on how many already-learned topics get interpolated into the Learning
+# prompt (audit6 P2-12): the index grows forever, the prompt must not. The
+# stored list is insertion-ordered, so "the most recent N" is its tail.
+LEARNED_TOPICS_CAP = 50
+
 # Allowlists — never pass an arbitrary string downstream to prompts/storage.
 MODES = ("answer", "learning", "guided")
 LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
@@ -106,16 +111,50 @@ def _verification_line(result) -> str:
     return f"⚠ not auto-verified ({note})" if note else "⚠ not auto-verified"
 
 
-def _verify_code(body: str, problem: str, language: str):
-    """Best-effort sandbox verification of the extracted code. Returns
-    ``(result, verdict_line)``; never raises (a verifier hiccup must not break a
-    run). ``result`` may be ``None`` if verification couldn't even start."""
+def _verify_code(code: str, problem: str, language: str):
+    """Best-effort sandbox verification of pre-extracted ``code`` (the caller
+    extracts exactly once — audit6 P2-13). Returns ``(result, verdict_line)``;
+    never raises (a verifier hiccup must not break a run). ``result`` may be
+    ``None`` if verification couldn't even start."""
     try:
-        code = parsing.extract_code(body, language)
         result = sandbox.verify_answer(code, problem, language)
         return result, _verification_line(result)
     except Exception as exc:  # noqa: BLE001 - verification is strictly best-effort
         return None, f"⚠ not auto-verified (verifier error: {exc})"
+
+
+def _verification_detail(result) -> str:
+    """A compact markdown block describing each NON-passing sample (audit6
+    P2-9), appended to the SAVED reasoning ``.md`` only — the stream keeps the
+    one-line verdict (which already carries the pass/fail counts).
+
+    Empty string unless ``result`` is a fail/error with per-sample detail.
+    Input/expected/got/stderr are rendered in fenced blocks so multi-line
+    sample bodies (P1-1) stay readable; the sandbox has already truncated and
+    capped every captured field.
+    """
+    if result is None or getattr(result, "status", None) not in ("fail", "error"):
+        return ""
+    blocks = []
+    for entry in getattr(result, "detail", None) or []:
+        status = entry.get("status", result.status)
+        if status == "pass":
+            continue  # the verdict line's counts already cover passing samples
+        header = f"**Sample {entry.get('sample', '?')} — {status}**"
+        rc = entry.get("returncode")
+        if rc is not None:
+            header = header[:-2] + f" (exit code {rc})**"
+        lines = [header, ""]
+        for label, key in (("Input", "stdin"), ("Expected", "expected"), ("Got", "stdout")):
+            value = str(entry.get(key, "")).rstrip("\n")
+            lines += [f"{label}:", "```", value, "```"]
+        stderr = str(entry.get("stderr") or "").rstrip("\n")
+        if stderr:
+            lines += ["Stderr:", "```", stderr, "```"]
+        blocks.append("\n".join(lines))
+    if not blocks:
+        return ""
+    return "\n**Failed samples:**\n\n" + "\n\n".join(blocks) + "\n"
 
 
 def create_app(*, run_fn=claude_cli.run) -> Flask:
@@ -265,11 +304,15 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     code = parsing.extract_code(body, language)
 
                     # SP5: best-effort sample-I/O verification. Stream a short
-                    # verdict line and fold it into the saved reasoning .md.
-                    result, verdict = _verify_code(body, problem, language)
+                    # verdict line; the saved reasoning .md gets the verdict
+                    # PLUS the per-sample failure detail (audit6 P2-9).
+                    result, verdict = _verify_code(code, problem, language)
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")
-                    reasoning = body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                    reasoning = (
+                        body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                        + _verification_detail(result)
+                    )
 
                     cls = _classification()  # join before the save needs its result
                     code_path, reasoning_path = storage.save_answer(
@@ -284,8 +327,10 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                 elif mode == "learning":
                     # SP5: feed already-learned topics so Claude skips/cross-links
                     # covered tech, then record this run's topics afterward.
+                    # Capped to the most recent LEARNED_TOPICS_CAP so the
+                    # prompt stays bounded as the index grows (audit6 P2-12).
                     try:
-                        learned = topic_index.known_topics()
+                        learned = topic_index.known_topics(limit=LEARNED_TOPICS_CAP)
                     except Exception:  # noqa: BLE001 - index is best-effort
                         learned = []
                     prompt = prompts.build_learning(
@@ -305,11 +350,17 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     yield from _stream_and_accumulate(prompt)
                     body = out[0]
 
-                    # SP5: verify Guided's answer step the same way as Answer.
-                    result, verdict = _verify_code(body, problem, language)
+                    # SP5: verify Guided's answer step the same way as Answer —
+                    # extract the code from the full piped doc exactly once
+                    # (P2-13), and save verdict + failure detail (P2-9).
+                    code = parsing.extract_code(body, language)
+                    result, verdict = _verify_code(code, problem, language)
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")
-                    saved = body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                    saved = (
+                        body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                        + _verification_detail(result)
+                    )
                     cls = _classification()  # join before the save needs its result
                     paths = [storage.save_guided(problem, cls.problem_type, saved)]
 
