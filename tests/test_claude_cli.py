@@ -20,6 +20,7 @@ import sys
 import threading
 
 import claude_cli
+import config
 import proc_util
 
 # --- fakes ---------------------------------------------------------------
@@ -409,6 +410,92 @@ def test_kill_process_tree_falls_back_to_terminate_on_non_windows(monkeypatch):
 
     assert invoked_tree_kill is False
     assert terminated["called"] is True
+
+
+def test_run_timeout_env_knob_defaults_and_invalid_values_fall_back(monkeypatch):
+    # Unset -> default 600s. Non-numeric, zero, or negative values must fall
+    # back to the default rather than crash or disable the watchdog.
+    monkeypatch.delenv("LEETCOACH_RUN_TIMEOUT", raising=False)
+    assert config.run_timeout() == 600.0
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "not-a-number")
+    assert config.run_timeout() == 600.0
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "0")
+    assert config.run_timeout() == 600.0
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "-5")
+    assert config.run_timeout() == 600.0
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "45")
+    assert config.run_timeout() == 45.0
+
+
+def test_real_runner_times_out_and_kills_hung_child(monkeypatch):
+    """audit6 P2-2: a hung `claude` (network stall, wedged node, auth prompt)
+    must not block the stdout read loop forever. With LEETCOACH_RUN_TIMEOUT
+    set tiny, a child that emits one line then sleeps far past the cap must be
+    tree-killed and the run must raise a clear "timed out" error — NOT a bogus
+    "exited with code N" report, and NOT a silent partial answer treated as
+    complete.
+    """
+    import time
+
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "2")
+    script = (
+        "import sys, time\n"
+        "sys.stdin.read()\n"
+        "sys.stdout.write('first\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"          # far past the 2s cap; watchdog must kill it
+        "sys.stdout.write('second\\n')\n"
+    )
+    start = time.monotonic()
+    try:
+        _drive_real_runner([sys.executable, "-c", script], "ping")
+    except claude_cli.ClaudeUnavailableError as exc:
+        assert "timed out" in str(exc).lower()
+        assert "2" in str(exc)  # names the cap that was hit
+    else:
+        raise AssertionError("expected ClaudeUnavailableError on wall-clock timeout")
+    elapsed = time.monotonic() - start
+    # If the watchdog failed to kill the child, _real_runner's proc.wait()
+    # would sit out the full sleep(60); a prompt return proves no leaked child.
+    assert elapsed < 15, f"timeout path took {elapsed:.1f}s — child not killed by watchdog"
+
+
+def test_real_runner_normal_run_unaffected_by_timeout_knob(monkeypatch):
+    # Regression guard: a run that finishes well under the cap must complete
+    # normally and never be misreported as a timeout.
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "30")
+    script = (
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "sys.stdout.write('hello\\n')\n"
+    )
+    lines = _drive_real_runner([sys.executable, "-c", script], "ping")
+    assert [ln.strip() for ln in lines] == ["hello"]
+
+
+def test_real_runner_broken_stdin_pipe_surfaces_child_stderr():
+    """audit6 P2-3 (testing gap 6): if the child exits at startup WITHOUT
+    reading stdin (bad flag, corrupt install), the stdin write raises
+    BrokenPipeError/OSError before any stdout is read. The runner must still
+    surface the child's real stderr diagnostics, not a bare broken-pipe errno.
+    """
+    script = (
+        "import sys\n"
+        "sys.stderr.write('startup crash diagnostic 42')\n"
+        "sys.stderr.flush()\n"
+        "sys.exit(3)\n"
+    )
+    # >1MB so the write overflows the OS pipe buffer and actually raises once
+    # the child is gone (a small prompt could fit in the buffer and "succeed").
+    big_prompt = "x" * (2 * 1024 * 1024)
+    try:
+        _drive_real_runner([sys.executable, "-c", script], big_prompt)
+    except claude_cli.ClaudeUnavailableError as exc:
+        assert "startup crash diagnostic 42" in str(exc)
+        assert "Broken pipe" not in str(exc)
+        assert "Errno 32" not in str(exc)
+    else:
+        raise AssertionError("expected ClaudeUnavailableError when the child dies at startup")
 
 
 def test_real_runner_surfaces_stderr_on_nonzero_exit():
