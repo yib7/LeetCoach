@@ -142,10 +142,55 @@ Explanation: the diagonal sums to target.
 def test_parse_samples_finds_output_past_multiline_input():
     """A multi-line Input block must not push the Output out of range. Regression
     guard for audit P2 #6 (fixed 4-line window silently dropped the pair, so
-    verification degraded to 'not auto-verified')."""
+    verification degraded to 'not auto-verified').
+
+    Also guards audit P1-1: the body below a bare ``Input:`` label IS the stdin —
+    it must not be dropped (which yielded ``stdin == '\\n'`` and a false FAIL)."""
     samples = sandbox.parse_samples(MULTILINE_INPUT_PROBLEM)
     assert len(samples) == 1, f"expected the pair to be found, got {samples}"
     assert samples[0].expected_stdout == "[2,2]"
+    stdin = samples[0].stdin
+    assert "grid" in stdin, f"multi-line Input body was dropped: {stdin!r}"
+    assert "[1, 0, 0]," in stdin
+    assert "[0, 0, 1]" in stdin
+    assert "target = 3" in stdin
+    assert stdin.endswith("\n")  # synthesized stdin keeps its trailing newline
+
+
+# `Output:` on its own line with the value below (common for 2-D results).
+MULTILINE_OUTPUT_PROBLEM = """\
+Example 1:
+
+Input: root = [3,9,20,null,null,15,7]
+Output:
+[[3],[9,20],[15,7]]
+
+Explanation: level order traversal.
+"""
+
+
+def test_parse_samples_captures_output_on_following_line():
+    """A bare ``Output:`` label with its value on the next line(s) must capture
+    that value, not an empty expected_stdout (audit P1-1)."""
+    samples = sandbox.parse_samples(MULTILINE_OUTPUT_PROBLEM)
+    assert len(samples) == 1, f"expected the pair to be found, got {samples}"
+    assert "root = [3,9,20,null,null,15,7]" in samples[0].stdin
+    assert samples[0].expected_stdout == "[[3],[9,20],[15,7]]"
+
+
+def test_parse_samples_drops_pair_when_both_sides_empty():
+    """Bare ``Input:`` / ``Output:`` labels with no data anywhere must yield NO
+    sample (caller falls back to 'not auto-verified') instead of a bogus
+    ``('\\n', '')`` pair that false-FAILs a correct solution (audit P1-1)."""
+    text = (
+        "Example 1:\n"
+        "Input:\n"
+        "Output:\n"
+        "\n"
+        "Constraints:\n"
+        "  1 <= n <= 10\n"
+    )
+    assert sandbox.parse_samples(text) == []
 
 
 def test_parse_samples_stops_at_section_marker_when_no_output():

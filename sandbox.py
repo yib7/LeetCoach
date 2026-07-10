@@ -259,6 +259,15 @@ def parse_samples(problem_text: str) -> list:
     the raw text after ``Output:`` (e.g. ``[0,1]``). The generated Python driver
     is instructed (see ``prompts.py``) to read that exact line format from stdin
     and print the result in that exact format — so this is a literal round-trip.
+
+    Bare labels (data on the following lines) are handled too: an empty
+    remainder after ``Input:`` takes the lines up to the ``Output:`` as the
+    stdin body (verbatim, surrounding blank lines trimmed), and an empty
+    remainder after ``Output:`` takes the following lines up to a blank line /
+    the next section / the next ``Input:`` as the expected stdout. A pair where
+    either side is *still* empty is dropped — a bogus ``('\\n', '')`` sample
+    would false-FAIL a correct solution, whereas no sample degrades to
+    "not auto-verified".
     """
     if not problem_text:
         return []
@@ -289,11 +298,46 @@ def parse_samples(problem_text: str) -> list:
             if _INPUT_RE.match(lines[j]) or _TERMINAL_RE.match(lines[j]):
                 break
             j += 1
-        if out_val is not None and (stdin_val or out_val):
-            samples.append(Sample(stdin=stdin_val + "\n", expected_stdout=out_val))
-            i = j + 1
-        else:
+        if out_val is None:
             i += 1
+            continue
+
+        # Bare ``Input:`` label — the data sits on the lines between it and the
+        # ``Output:``. Take that body verbatim (indentation may be meaningful),
+        # trimming surrounding blank lines.
+        if not stdin_val:
+            body = lines[i + 1:j]
+            while body and not body[0].strip():
+                body.pop(0)
+            while body and not body[-1].strip():
+                body.pop()
+            stdin_val = "\n".join(body)
+
+        # Bare ``Output:`` label — the value sits on the following line(s), up
+        # to a blank line, the next section, or the next ``Input:``. Each line
+        # is stripped, mirroring the single-line ``.strip()`` convention.
+        next_i = j + 1
+        if not out_val:
+            out_body = []
+            k = j + 1
+            while k < n:
+                line = lines[k]
+                if (not line.strip()
+                        or _TERMINAL_RE.match(line)
+                        or _INPUT_RE.match(line)):
+                    break
+                out_body.append(line.strip())
+                k += 1
+            out_val = "\n".join(out_body)
+            next_i = k
+
+        if stdin_val and out_val:
+            samples.append(Sample(stdin=stdin_val + "\n", expected_stdout=out_val))
+        # else: even after the multi-line capture one side is still empty —
+        # skip the pair rather than emit a bogus sample. Either way, resume
+        # past everything this pair consumed (no Input: line is in that span;
+        # both scans bail at _INPUT_RE).
+        i = next_i
     return samples
 
 
