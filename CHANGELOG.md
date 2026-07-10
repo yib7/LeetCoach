@@ -4,6 +4,65 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-10
+
+### Added
+- A **Stop** button that cancels a run mid-stream (and stops the `claude`
+  subprocess, so an abandoned run spends no further subscription budget).
+- A read-only **library browser**: a Library panel in the UI backed by
+  `GET /library` (listing) and `GET /library/file` (one file's raw text, served
+  as `text/plain` and rendered through the same hardened markdown pipeline as
+  run output).
+- Failed verification runs now save per-sample detail (input, expected, actual
+  output, stderr, exit code) into the reasoning `.md`, so a FAIL is debuggable
+  after the fact.
+- Two new env knobs: `LEETCOACH_RUN_TIMEOUT` (wall-clock cap in seconds for a
+  single `claude` run, default 600) and `LEETCOACH_CLASSIFIER_MODEL` (model for
+  the short classification call, default `haiku`).
+
+### Fixed
+- Sample-I/O parser: multi-line `Input:` / `Output:` bodies are now captured in
+  full instead of only their first line, which could produce false FAIL (or
+  false PASS) verdicts on multi-line examples.
+- A run whose stream produced no text at all is now reported as an error instead
+  of being saved as an empty success.
+- A `claude` startup failure (BrokenPipe on stdin) now surfaces the CLI's real
+  stderr instead of masking it with the pipe error.
+- A hung `claude` CLI (network stall, stuck auth prompt) no longer wedges the
+  run forever: a wall-clock watchdog kills the process tree after
+  `LEETCOACH_RUN_TIMEOUT`.
+- Launching via `flask run` (or any non-project working directory) no longer
+  forks a second study library: the default output dir is now anchored next to
+  the app (see **Changed**). Colliding filenames get a `__2` / `__3` suffix
+  instead of silently overwriting earlier notes; identical re-runs stay
+  idempotent.
+- Removed the dead syntax-highlight option in the frontend and coalesced
+  markdown re-renders onto animation frames, so long answers stream without
+  jank.
+
+### Security
+- Every request's `Host` header is checked against a loopback allowlist and
+  rejected with a 403 otherwise, blocking DNS-rebinding pages from driving the
+  app through the browser.
+- The verification sandbox on Windows now runs the child inside a Job Object
+  (512 MB per-process memory cap, 16 active-process cap, kill-on-job-close),
+  kills the whole process tree on timeout, and bounds captured output at 64 KB
+  per stream while reading. See SECURITY.md for what it still does not confine.
+- Links in rendered markdown are restricted to safe protocols, neutralizing
+  `javascript:` URLs in model output.
+
+### Changed
+- **Default output directory moved.** The study library now defaults to the
+  `output` directory next to the app instead of the current working directory.
+  `python app.py` from the project root is unaffected; if you used `flask run`
+  from elsewhere, your existing notes are wherever that CWD was: move them
+  into the app's `output/` or point `LEETCOACH_OUTPUT_DIR` at them.
+- Classification now runs concurrently with the answer stream on a cheap model
+  (`haiku` by default), so it no longer delays the first streamed token.
+- The Learning prompt interpolates at most the 50 most recent learned topics,
+  keeping prompt size bounded as the index grows.
+- Test suite grown to 224, all still mocking the `claude` subprocess.
+
 ## [1.0.2] - 2026-07-07
 
 ### Fixed
