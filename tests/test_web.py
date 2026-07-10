@@ -21,6 +21,7 @@ SSE protocol under test (SP4 reuses it):
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -238,6 +239,129 @@ def test_run_answer_midstream_failure_emits_error_event(tmp_path, monkeypatch):
     answers_dir = tmp_path / "answers"
     saved = [p for p in answers_dir.rglob("*") if p.is_file()] if answers_dir.exists() else []
     assert not saved, f"a failed run should not save files, found: {saved}"
+
+
+# --- Host-header guard (DNS-rebinding defense, audit6 P1-3) ---------------
+
+RUN_PAYLOAD = {
+    "problem": "Two Sum: return indices of two numbers adding to target.",
+    "mode": "answer",
+    "language": "python",
+    "tier": "normal",
+}
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "evil.com",
+        "evil.com:5000",
+        "127.0.0.1.evil.com",
+        "localhost.evil.com:5000",
+    ],
+)
+def test_run_rejects_foreign_host(client, host):
+    """A DNS-rebinding page reaches 127.0.0.1 with an attacker-controlled Host
+    header. /run must refuse it before spending any Claude budget."""
+    c, tmp_path = client
+    resp = c.post("/run", json=RUN_PAYLOAD, headers={"Host": host})
+    assert resp.status_code == 403
+    assert "host" in resp.get_json()["error"].lower()
+    # nothing ran, nothing saved
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+def test_index_rejects_foreign_host(client):
+    c, _ = client
+    resp = c.get("/", headers={"Host": "evil.com"})
+    assert resp.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "localhost",
+        "localhost:5000",
+        "Localhost:5000",  # Host headers are case-insensitive
+        "127.0.0.1",
+        "127.0.0.1:8080",  # any port on a loopback hostname is fine
+        "[::1]",
+        "[::1]:5000",
+    ],
+)
+def test_index_allows_loopback_hosts(client, host):
+    c, _ = client
+    resp = c.get("/", headers={"Host": host})
+    assert resp.status_code == 200
+
+
+# --- empty Claude answer -> SSE error, nothing saved (audit6 P2-1) ---------
+
+@pytest.mark.parametrize("mode", ["answer", "learning", "guided"])
+def test_run_empty_stream_emits_error_and_saves_nothing(tmp_path, monkeypatch, mode):
+    """If the runner yields zero deltas without raising, that is a failure, not
+    an empty success: the stream must end in ``event: error`` and no files may
+    be written."""
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+
+    def empty_run(prompt, **kwargs):
+        # classify call succeeds so we get past step 1 and into the mode stream
+        if "Classify the following" in prompt and "Respond with ONLY a tiny" in prompt:
+            yield json.dumps(CLASSIFY_JSON)
+        # every other prompt: yield nothing (Claude produced no text)
+
+    application = app_module.create_app(run_fn=empty_run)
+    application.config.update(TESTING=True)
+    c = application.test_client()
+
+    resp = c.post("/run", json={**RUN_PAYLOAD, "mode": mode})
+    assert resp.status_code == 200
+    _, events = _parse_sse(resp.get_data(as_text=True))
+
+    errors = [p for (name, p) in events if name == "error"]
+    assert errors, f"expected a terminal error event, got events: {events}"
+    assert "empty answer" in errors[0].lower()
+    assert not [n for (n, _) in events if n == "done"]
+
+    # NO files at all for the empty case (no empty .md/.py husks)
+    saved = [p for p in tmp_path.rglob("*") if p.is_file()]
+    assert not saved, f"an empty run should not save files, found: {saved}"
+
+
+# --- run failure logs the traceback server-side (audit6 P2-8) --------------
+
+def test_run_failure_logs_traceback(tmp_path, monkeypatch, caplog):
+    """The last-resort handler must log the full exception (traceback included)
+    via app.logger before yielding the short SSE error message."""
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+
+    def failing_run(prompt, **kwargs):
+        if "Classify the following" in prompt and "Respond with ONLY a tiny" in prompt:
+            yield json.dumps(CLASSIFY_JSON)
+            return
+        yield "partial text"
+        raise RuntimeError("boom from claude")
+
+    application = app_module.create_app(run_fn=failing_run)
+    application.config.update(TESTING=True)
+    c = application.test_client()
+
+    with caplog.at_level(logging.ERROR):
+        resp = c.post("/run", json=RUN_PAYLOAD)
+        body = resp.get_data(as_text=True)  # consume the stream inside the capture
+
+    # the client still gets only the short message (unchanged behaviour)...
+    _, events = _parse_sse(body)
+    errors = [p for (name, p) in events if name == "error"]
+    assert errors and "boom from claude" in errors[0]
+
+    # ...while the server log keeps the exception WITH its traceback
+    records = [r for r in caplog.records if "run failed" in r.getMessage()]
+    assert records, f"expected a 'run failed' log record, got: {caplog.records}"
+    assert records[0].getMessage() == "run failed (mode=answer)"
+    assert records[0].exc_info, "log record should carry exc_info (traceback)"
+    assert "Traceback" in caplog.text
+    assert "boom from claude" in caplog.text
 
 
 # --- app constructs without a live claude --------------------------------

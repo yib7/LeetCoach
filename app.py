@@ -51,10 +51,31 @@ HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE / "templates"
 STATIC = HERE / "static"
 
+# Bind address for `python app.py` (single source of truth — the Host-header
+# allowlist below keys off loopback hostnames, so no port is duplicated here).
+HOST = "127.0.0.1"
+PORT = 5000
+
+# Host-header allowlist (DNS-rebinding defense). Hostnames only, ANY port: a
+# rebinding attacker controls what IP their hostname resolves to, never the
+# hostname the victim's browser sends — so matching the hostname IS the whole
+# defense, and pinning a port would only break `flask run` on a non-default
+# port. Bracketed "[::1]" covers the IPv6 loopback literal.
+ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
+
 # Allowlists — never pass an arbitrary string downstream to prompts/storage.
 MODES = ("answer", "learning", "guided")
 LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
 TIERS = prompts.TIERS                  # ("simple", "normal", "complex")
+
+
+def _hostname(host: str) -> str:
+    """The hostname part of a Host header value, port stripped, lowercased.
+    Handles the bracketed IPv6 form ("[::1]:5000" -> "[::1]")."""
+    host = host.strip().lower()
+    if host.startswith("["):
+        return host.partition("]")[0] + "]"
+    return host.rsplit(":", 1)[0]
 
 
 def _sse_text(delta: str) -> str:
@@ -99,6 +120,16 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
     """Build the Flask app. ``run_fn`` is the injectable Claude runner used by
     BOTH the classifier and the answer stream (tests pass a fake)."""
     app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
+
+    @app.before_request
+    def _reject_foreign_hosts():
+        # DNS-rebinding defense (audit P1-3): a malicious page can point its own
+        # hostname at 127.0.0.1 and drive /run (spending subscription budget and
+        # executing generated code in the sandbox). The browser still sends the
+        # attacker's hostname in Host, so rejecting non-loopback hostnames
+        # blocks the attack for every route.
+        if _hostname(request.host) not in ALLOWED_HOSTNAMES:
+            return jsonify({"error": "Forbidden host."}), 403
 
     @app.after_request
     def _no_cache(resp):
@@ -164,6 +195,14 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     if delta:
                         full.append(delta)
                         yield _sse_text(delta)
+                # A stream that ends without producing any text is a failure,
+                # not an empty success (audit P2-1): raising here — one place
+                # covering all three modes — aborts before any save, and the
+                # last-resort handler turns it into the terminal SSE error.
+                # A client disconnect instead raises GeneratorExit at the yield
+                # above, so it can never reach (or be misreported by) this line.
+                if not full:
+                    raise RuntimeError("Claude returned an empty answer")
             finally:
                 # Publish whatever we accumulated even if the loop raised, so any
                 # cleanup path sees a consistent value (the raise still aborts the
@@ -247,6 +286,9 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     done_payload["verification"] = verification
                 yield _sse_event("done", done_payload)
             except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
+                # Keep the full traceback in the server log (audit P2-8); the
+                # client still gets only the short message below.
+                app.logger.exception("run failed (mode=%s)", mode)
                 yield _sse_event("error", f"Run failed: {exc}")
 
         return Response(
@@ -266,8 +308,8 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    host = "127.0.0.1"
-    port = 5000
+    host = HOST
+    port = PORT
     if not claude_cli.is_available():
         print(
             "WARNING: the `claude` CLI was not found on PATH. The page will load "
