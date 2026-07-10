@@ -40,11 +40,14 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from typing import Callable, Iterable, Iterator, Optional
 
 import config
+
+# Re-exported under the historical private name: this module's tests (and any
+# older callers) reach the tree-kill via ``claude_cli._kill_process_tree``.
+from proc_util import kill_process_tree as _kill_process_tree
 
 
 class ClaudeUnavailableError(RuntimeError):
@@ -63,32 +66,6 @@ def is_available(*, which: Callable[[str], Optional[str]] = shutil.which) -> boo
 
 
 # --- subprocess runner (the only real-IO part) ---------------------------
-
-def _kill_process_tree(proc: "subprocess.Popen[str]") -> bool:
-    """Best-effort kill of `proc` AND its descendants. Returns True if a
-    tree-kill mechanism was invoked (not necessarily that it succeeded).
-
-    On Windows the installed `claude` binary is typically an npm shim
-    (``claude.cmd`` launching node via a child process), so `proc.terminate()`
-    only kills the shim — the actual node process doing the work is left
-    running. ``taskkill /T`` walks the process tree by PID and kills the
-    whole thing. No new dependency (psutil) is pulled in for this; taskkill
-    ships with Windows. Falls back to terminate()/kill() on non-Windows or if
-    taskkill itself fails to launch.
-    """
-    if sys.platform == "win32":
-        try:
-            subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                capture_output=True,
-                check=False,
-            )
-            return True
-        except OSError:
-            pass  # taskkill missing/unusable — fall through to terminate()
-    proc.terminate()
-    return False
-
 
 def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
     """Spawn `claude`, feed `stdin_text`, and yield stdout lines as they arrive.

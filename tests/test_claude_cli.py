@@ -20,6 +20,7 @@ import sys
 import threading
 
 import claude_cli
+import proc_util
 
 # --- fakes ---------------------------------------------------------------
 
@@ -360,9 +361,11 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
 
     Regression guard for audit review round 1, Important #2. This monkeypatches
     both sys.platform and subprocess.run so no real process (and no real
-    taskkill) is invoked.
+    taskkill) is invoked. The implementation lives in `proc_util` (shared with
+    sandbox.py since audit6 P1-2), so that's where the patches land; the call
+    still goes through `claude_cli._kill_process_tree` to pin the re-export.
     """
-    monkeypatch.setattr(claude_cli.sys, "platform", "win32")
+    monkeypatch.setattr(proc_util.sys, "platform", "win32")
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -373,7 +376,7 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
 
         return Result()
 
-    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(proc_util.subprocess, "run", fake_run)
 
     class FakeProc:
         pid = 4242
@@ -393,7 +396,7 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
 
 
 def test_kill_process_tree_falls_back_to_terminate_on_non_windows(monkeypatch):
-    monkeypatch.setattr(claude_cli.sys, "platform", "linux")
+    monkeypatch.setattr(proc_util.sys, "platform", "linux")
     terminated = {"called": False}
 
     class FakeProc:

@@ -15,6 +15,10 @@ Covered:
 """
 from __future__ import annotations
 
+import os
+import subprocess
+import time
+
 import pytest
 
 import sandbox
@@ -69,6 +73,115 @@ def test_timeout_is_an_error():
     r = sandbox.verify_python(loop, "", "anything", timeout=2)
     assert r.status == "error", r
     assert "out" in r.note.lower()  # "timed out"
+
+
+# --- timeout tree-kill + bounded output (audit6 P1-2 step 1) --------------
+
+def _windows_pid_alive(pid: int) -> bool:
+    """True if ``pid`` is a live process on Windows.
+
+    Probe choice: ``OpenProcess`` + ``GetExitCodeProcess`` == ``STILL_ACTIVE``
+    (259) via ctypes. ``os.kill(pid, 0)`` is NOT usable on Windows — it calls
+    ``TerminateProcess`` (it would kill the grandchild and make the test pass
+    vacuously) — and parsing ``tasklist`` output is locale-dependent. A process
+    that has exited reports its real exit code (or ``OpenProcess`` fails once
+    all handles are gone), so ``STILL_ACTIVE`` is a dependable liveness signal
+    for a grandchild that sleeps 60s and never exits code 259 on its own.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only grandchild-kill probe")
+def test_timeout_kills_grandchildren_on_windows(tmp_path):
+    """On timeout the WHOLE process tree must die, not just the direct child.
+
+    The untrusted solution spawns a grandchild (60s sleeper), reports its PID
+    through a file (path passed via stdin), then sleeps past the timeout. After
+    verify_python returns, the grandchild must be gone — the old plain
+    ``subprocess.run(timeout=...)`` only killed the direct child.
+
+    The wall-time bound below is load-bearing: the old implementation ALSO
+    blocked ~58s in its post-kill ``communicate()`` (the grandchild holds the
+    inherited stdout pipe open), by which point the grandchild had exited
+    naturally — making a liveness probe alone pass vacuously."""
+    pidfile = tmp_path / "grandchild.pid"
+    code = (
+        "import subprocess, sys, time\n"
+        "pidfile = sys.stdin.readline().strip()\n"
+        "gc = subprocess.Popen(\n"
+        "    [sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "with open(pidfile, 'w') as f:\n"
+        "    f.write(str(gc.pid))\n"
+        "time.sleep(60)\n"
+    )
+    start = time.monotonic()
+    r = sandbox.verify_python(code, str(pidfile) + "\n", "whatever", timeout=2)
+    elapsed = time.monotonic() - start
+    assert elapsed < 10, (
+        f"took {elapsed:.1f}s -- verify_python blocked on the grandchild's pipe"
+    )
+    assert r.status == "error", r
+    assert "timed out" in r.note
+
+    assert pidfile.exists(), "child never reported a grandchild PID (test setup)"
+    gc_pid = int(pidfile.read_text().strip())
+    try:
+        # taskkill is near-instant but asynchronous at the margins: poll briefly.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and _windows_pid_alive(gc_pid):
+            time.sleep(0.1)
+        assert not _windows_pid_alive(gc_pid), (
+            f"grandchild {gc_pid} survived the timeout tree-kill"
+        )
+    finally:
+        # Never leak a 60s sleeper into the host, even when the assert fails.
+        subprocess.run(
+            ["taskkill", "/F", "/PID", str(gc_pid)],
+            capture_output=True, check=False,
+        )
+
+
+def test_runaway_output_is_bounded_and_killed_promptly():
+    """A tight print loop must not buffer unbounded output in memory, and the
+    child must be killed as soon as the cap is exceeded — well before the
+    timeout. The stored stdout stays within _OUTPUT_LIMIT plus a short
+    truncation marker."""
+    spam = (
+        "import sys, time\n"
+        "chunk = 'x' * 65536\n"
+        "for _ in range(256):\n"      # ~16 MB if left unbounded
+        "    sys.stdout.write(chunk)\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"            # never exits on its own
+    )
+    start = time.monotonic()
+    r = sandbox.verify_python(spam, "", "whatever", timeout=30)
+    elapsed = time.monotonic() - start
+    # Generous wall bound: the overflow kill fires within ~1s in practice; the
+    # old behavior sat in communicate() for the full 30s timeout.
+    assert elapsed < 15, f"took {elapsed:.1f}s -- output cap did not kill the child"
+    assert r.status == "error", r
+    assert "exceed" in r.note.lower(), r.note
+    assert r.detail, "overflow verdict should carry the captured (bounded) output"
+    stored = r.detail[0].get("stdout", "")
+    assert len(stored) <= sandbox._OUTPUT_LIMIT + 64, (
+        f"stored stdout not bounded: {len(stored)} chars"
+    )
 
 
 # --- secret-free environment ---------------------------------------------

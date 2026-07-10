@@ -7,8 +7,11 @@ analysis code (``statlee/sandbox.py``):
 * a **secret-free** environment (``_safe_env``) so the child can't read an API
   key or any other app secret — only the bare minimum Windows/CPython needs;
 * POSIX ``resource`` rlimits where available (no-op on the Windows dev host);
-* ``subprocess.run(..., capture_output=True, text=True, timeout=...)`` with
-  output truncation.
+* ``subprocess.Popen`` with both output pipes drained on capped reader threads
+  (never more than ``_OUTPUT_LIMIT`` retained — a runaway print loop gets the
+  child killed, not hundreds of MB buffered) and a **whole-tree kill** on
+  timeout/overflow (``proc_util.kill_process_tree``) so grandchildren spawned
+  by the untrusted code die too.
 
 The public surface:
 
@@ -37,10 +40,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import dataclass, field
 
+from proc_util import kill_process_tree
+
 # Cap captured child output so a runaway print loop can't blow up memory / the
-# saved markdown.
+# saved markdown. Enforced *while reading* (see _CappedReader): the child is
+# killed as soon as either stream exceeds it, not merely trimmed afterwards.
 _OUTPUT_LIMIT = 64 * 1024
 
 
@@ -123,10 +131,68 @@ def _posix_limits():
     return set_limits
 
 
-def _truncate(text: str) -> str:
-    if text and len(text) > _OUTPUT_LIMIT:
-        return text[:_OUTPUT_LIMIT] + f"\n... [truncated at {_OUTPUT_LIMIT // 1024} KB]"
-    return text or ""
+class _CappedReader(threading.Thread):
+    """Drain one child pipe on a daemon thread, retaining at most
+    ``_OUTPUT_LIMIT`` characters.
+
+    Draining both pipes on dedicated threads is what makes the design
+    deadlock-free: the child can never block on a full stdout/stderr OS buffer
+    while the parent blocks on the other pipe (the classic two-pipe deadlock).
+    Past the cap the thread keeps *draining* (so the child isn't wedged on a
+    full pipe) but stops *retaining*, and flags ``overflowed`` so the caller
+    can kill the process tree promptly instead of buffering hundreds of MB.
+    """
+
+    def __init__(self, stream) -> None:
+        super().__init__(daemon=True)
+        self._stream = stream
+        self._chunks: list = []
+        self._kept = 0
+        self._total = 0
+        self.overflowed = threading.Event()
+        self.start()
+
+    def run(self) -> None:  # noqa: D102 - thread body
+        try:
+            while True:
+                data = self._stream.read(8192)
+                if not data:
+                    break  # EOF: every write handle to the pipe is closed
+                self._total += len(data)
+                if self._kept < _OUTPUT_LIMIT:
+                    piece = data[: _OUTPUT_LIMIT - self._kept]
+                    self._chunks.append(piece)
+                    self._kept += len(piece)
+                if self._total > _OUTPUT_LIMIT:
+                    self.overflowed.set()
+        except (OSError, ValueError):
+            pass  # pipe torn down under us mid-kill — keep what we have
+        finally:
+            try:
+                self._stream.close()
+            except OSError:
+                pass
+
+    def text(self) -> str:
+        """The retained output, with a truncation marker if any was dropped."""
+        joined = "".join(self._chunks)
+        if self._total > self._kept:
+            joined += f"\n... [truncated at {_OUTPUT_LIMIT // 1024} KB]"
+        return joined
+
+
+def _feed_stdin(stdin_pipe, text: str) -> None:
+    """Write ``text`` to the child's stdin and close it (own daemon thread: a
+    child that never reads stdin must not deadlock the parent's write)."""
+    try:
+        stdin_pipe.write(text)
+    except (BrokenPipeError, OSError, ValueError):
+        pass  # child exited / closed stdin without reading — not an error
+    finally:
+        try:
+            stdin_pipe.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
 
 
 def _normalize(text: str) -> str:
@@ -152,6 +218,11 @@ def verify_python(
 
     Returns a :class:`VerifyResult` with status ``pass`` / ``fail`` / ``error``.
     Never raises.
+
+    Containment (the code is untrusted): on timeout the whole process TREE is
+    killed (grandchildren included), and each output stream is capped at
+    ``_OUTPUT_LIMIT`` — exceeding it kills the tree and yields ``error``
+    ("output exceeded ... limit") since the capture is incomplete.
     """
     run_dir = tempfile.mkdtemp(prefix="leetcoach_run_")
     try:
@@ -168,35 +239,94 @@ def verify_python(
             popen_kwargs["preexec_fn"] = preexec
 
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 [sys.executable, script_path],
-                input=stdin_text or "",
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
+                encoding="utf-8",   # matches PYTHONIOENCODING in _safe_env
+                errors="replace",   # mojibake beats an unexpected decode raise
                 **popen_kwargs,
-            )
-        except subprocess.TimeoutExpired:
-            return VerifyResult(
-                status="error",
-                note=f"timed out after {timeout}s",
             )
         except (OSError, ValueError) as exc:
             return VerifyResult(status="error", note=f"could not run: {exc}")
 
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
+        # (SP3 will assign the child to a Windows Job Object right here,
+        #  immediately after spawn, before any of its code has run far.)
+
+        threading.Thread(
+            target=_feed_stdin, args=(proc.stdin, stdin_text or ""), daemon=True
+        ).start()
+        out_reader = _CappedReader(proc.stdout)
+        err_reader = _CappedReader(proc.stderr)
+
+        # Wait for exit / timeout / output overflow — whichever comes first.
+        # A short poll loop (not proc.wait(timeout)) so the overflow flag can
+        # interrupt the wait; 50ms granularity is plenty for a verifier.
+        deadline = time.monotonic() + timeout
+        timed_out = False
+        while proc.poll() is None:
+            if out_reader.overflowed.is_set() or err_reader.overflowed.is_set():
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            time.sleep(0.05)
+
+        if proc.poll() is None:
+            # Timeout or overflow: kill the WHOLE tree — the untrusted code may
+            # have spawned grandchildren that a plain terminate() would leak —
+            # then reap the direct child (kill() as a last resort).
+            kill_process_tree(proc)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass  # unreapable zombie — readers are daemons, move on
+
+        # Bounded join: if a leaked write handle keeps a pipe open the daemon
+        # readers may never see EOF, and we must not hang on them.
+        out_reader.join(timeout=2)
+        err_reader.join(timeout=2)
+
+        if timed_out:
+            return VerifyResult(
+                status="error",
+                note=f"timed out after {timeout}s",
+            )
+
+        stdout = out_reader.text()
+        stderr = err_reader.text()
+
+        if out_reader.overflowed.is_set() or err_reader.overflowed.is_set():
+            # Applies whether we killed it mid-spew or it finished on its own:
+            # the capture is incomplete either way, so a diff would be a lie.
+            return VerifyResult(
+                status="error",
+                note=f"output exceeded {_OUTPUT_LIMIT // 1024} KB limit",
+                detail=[{
+                    "stdin": stdin_text,
+                    "expected": expected_stdout,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }],
+            )
 
         if proc.returncode != 0:
             # A crash / nonzero exit is an `error`, not a content `fail`.
+            # stdout/stderr are already capped+marked by the readers.
             return VerifyResult(
                 status="error",
                 note=f"exited with code {proc.returncode}",
                 detail=[{
                     "stdin": stdin_text,
                     "expected": expected_stdout,
-                    "stdout": _truncate(stdout),
-                    "stderr": _truncate(stderr),
+                    "stdout": stdout,
+                    "stderr": stderr,
                     "returncode": proc.returncode,
                 }],
             )
@@ -212,8 +342,8 @@ def verify_python(
             detail=[{
                 "stdin": stdin_text,
                 "expected": expected_stdout,
-                "stdout": _truncate(stdout),
-                "stderr": _truncate(stderr),
+                "stdout": stdout,
+                "stderr": stderr,
                 "match": ok,
             }],
         )
