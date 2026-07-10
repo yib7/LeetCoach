@@ -70,6 +70,11 @@ ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
 # stored list is insertion-ordered, so "the most recent N" is its tail.
 LEARNED_TOPICS_CAP = 50
 
+# Extensions the library browser (SP10) will list and serve. Everything the
+# app itself writes (storage._LANG_EXT + .md, .txt fallback, topic_index.json)
+# is covered; anything else in the output dir is invisible to the read path.
+LIBRARY_EXTENSIONS = frozenset({".md", ".py", ".cpp", ".java", ".txt", ".json"})
+
 # Allowlists — never pass an arbitrary string downstream to prompts/storage.
 MODES = ("answer", "learning", "guided")
 LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
@@ -121,6 +126,58 @@ def _verify_code(code: str, problem: str, language: str):
         return result, _verification_line(result)
     except Exception as exc:  # noqa: BLE001 - verification is strictly best-effort
         return None, f"⚠ not auto-verified (verifier error: {exc})"
+
+
+def _library_files(root: Path) -> list[dict]:
+    """The library listing: every allowlisted file under ``root``, as
+    ``{"path": <relative, forward slashes>, "size": <bytes>}`` dicts, sorted by
+    path. A missing/empty root is an empty list, never an error."""
+    if not root.is_dir():
+        return []
+    files = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in LIBRARY_EXTENSIONS:
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue  # vanished mid-walk — skip, never 500 a listing
+        files.append({"path": path.relative_to(root).as_posix(), "size": size})
+    return files
+
+
+def _resolve_library_file(rel: str) -> Path | None:
+    """Resolve a request's ``path`` param against the output root, or ``None``.
+
+    This is the containment gate for the library's read path — the same rigor
+    as ``storage.slug`` on the write path. ``None`` (-> a uniform 404) unless
+    ALL of the following hold, so a rejection never leaks what exists:
+
+    * non-empty, no NUL, and not absolute / drive-anchored (``C:\\...``,
+      ``\\\\server\\share``, ``/etc``, ``\\foo``);
+    * ``(root / rel).resolve()`` — which collapses ``..`` (in slash OR
+      backslash form; Windows Path treats both as separators) and follows
+      symlinks — stays inside ``root.resolve()`` per ``is_relative_to``;
+    * the suffix is on ``LIBRARY_EXTENSIONS`` (checked on the RESOLVED path);
+    * it is an existing regular file (directories and reserved names fail).
+    """
+    if not rel or "\x00" in rel:
+        return None
+    root = config.output_dir().resolve()
+    try:
+        candidate = Path(rel)
+        if candidate.is_absolute() or candidate.drive:
+            return None
+        resolved = (root / candidate).resolve()
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_relative_to(root):
+        return None
+    if resolved.suffix.lower() not in LIBRARY_EXTENSIONS:
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
 
 
 def _verification_detail(result) -> str:
@@ -195,6 +252,28 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
         flag = "true" if available else "false"
         html = html.replace("__CLAUDE_AVAILABLE__", flag)
         return Response(html, mimetype="text/html")
+
+    @app.get("/library")
+    def library():
+        # Read-only listing of the study library (SP10). Missing/empty output
+        # dir is an empty listing — the library just hasn't accumulated yet.
+        return jsonify({"files": _library_files(config.output_dir().resolve())})
+
+    @app.get("/library/file")
+    def library_file():
+        # One library file's raw text. Served as text/plain (never HTML) so
+        # nothing in the library can execute in the browser; rendering happens
+        # client-side through the same hardened pipeline as run output. Every
+        # rejection is the same 404 — don't leak which check failed or what
+        # exists outside the root.
+        resolved = _resolve_library_file(request.args.get("path", ""))
+        if resolved is None:
+            return jsonify({"error": "Not found."}), 404
+        try:
+            body = resolved.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return jsonify({"error": "Not found."}), 404
+        return Response(body, mimetype="text/plain")
 
     @app.post("/run")
     def run():

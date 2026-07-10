@@ -282,4 +282,141 @@
   }
 
   runBtn.addEventListener("click", runNow);
+
+  // --- Library browser (SP10) ---------------------------------------------
+  // Read-only view of the accumulated output/ study library. The server only
+  // ever returns text/plain; .md files are rendered client-side through the
+  // SAME hardened marked pipeline as run output (raw HTML escaped, non-http
+  // links neutralized), everything else lands in a <pre> as textContent.
+
+  var libToggle = $("library-toggle");
+  var libPanel = $("library");
+  var libTree = $("library-tree");
+  var libCount = $("library-count");
+  var libViewer = $("library-viewer");
+  var libViewerPath = $("library-viewer-path");
+  var libViewerBody = $("library-viewer-body");
+  var libViewerClose = $("library-viewer-close");
+
+  var HLJS_LANG = { py: "python", cpp: "cpp", java: "java", json: "json" };
+
+  function closeViewer() {
+    libViewer.hidden = true;
+    libViewerBody.innerHTML = "";
+    libViewerPath.textContent = "";
+    var open = libTree.querySelector(".lib-file.active");
+    if (open) open.classList.remove("active");
+  }
+
+  function showFile(relPath, text) {
+    libViewerPath.textContent = relPath;
+    libViewerBody.innerHTML = "";
+    var ext = relPath.slice(relPath.lastIndexOf(".") + 1).toLowerCase();
+    if (ext === "md" && window.marked) {
+      libViewerBody.innerHTML = marked.parse(text);
+      if (window.hljs) {
+        libViewerBody.querySelectorAll("pre code").forEach(function (block) {
+          try { hljs.highlightElement(block); } catch (e) { /* noop */ }
+        });
+      }
+    } else {
+      var pre = document.createElement("pre");
+      var code = document.createElement("code");
+      if (HLJS_LANG[ext]) code.className = "language-" + HLJS_LANG[ext];
+      code.textContent = text; // escaped by construction
+      pre.appendChild(code);
+      libViewerBody.appendChild(pre);
+      if (window.hljs && HLJS_LANG[ext]) {
+        try { hljs.highlightElement(code); } catch (e) { /* noop */ }
+      }
+    }
+    libViewer.hidden = false;
+  }
+
+  function openFile(relPath, btn) {
+    fetch("/library/file?path=" + encodeURIComponent(relPath))
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.text();
+      })
+      .then(function (text) {
+        var active = libTree.querySelector(".lib-file.active");
+        if (active) active.classList.remove("active");
+        btn.classList.add("active");
+        showFile(relPath, text);
+      })
+      .catch(function (e) {
+        setStatus("Could not open " + relPath + " (" + e.message + ").", "warn");
+      });
+  }
+
+  function renderTree(files) {
+    libTree.innerHTML = "";
+    libCount.textContent = files.length
+      ? files.length + (files.length === 1 ? " file" : " files")
+      : "";
+    if (!files.length) {
+      var empty = document.createElement("p");
+      empty.className = "lib-empty";
+      empty.textContent =
+        "Nothing here yet — run a problem and it will be saved to your library.";
+      libTree.appendChild(empty);
+      return;
+    }
+    // Group by containing folder ("" for root files), preserving server order
+    // (already sorted by path).
+    var groups = [];
+    var byFolder = {};
+    files.forEach(function (f) {
+      var idx = f.path.lastIndexOf("/");
+      var folder = idx === -1 ? "" : f.path.slice(0, idx);
+      if (!(folder in byFolder)) {
+        byFolder[folder] = [];
+        groups.push(folder);
+      }
+      byFolder[folder].push(f);
+    });
+    groups.forEach(function (folder) {
+      var head = document.createElement("div");
+      head.className = "lib-folder";
+      head.textContent = folder || "(library root)";
+      libTree.appendChild(head);
+      byFolder[folder].forEach(function (f) {
+        var name = f.path.slice(f.path.lastIndexOf("/") + 1);
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "lib-file";
+        btn.textContent = name;
+        btn.title = f.path + " (" + f.size + " bytes)";
+        btn.addEventListener("click", function () { openFile(f.path, btn); });
+        libTree.appendChild(btn);
+      });
+    });
+  }
+
+  function refreshLibrary() {
+    fetch("/library")
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (data) { renderTree((data && data.files) || []); })
+      .catch(function (e) {
+        libTree.innerHTML = "";
+        var err = document.createElement("p");
+        err.className = "lib-empty";
+        err.textContent = "Could not load the library (" + e.message + ").";
+        libTree.appendChild(err);
+      });
+  }
+
+  libToggle.addEventListener("click", function () {
+    var opening = libPanel.hidden;
+    libPanel.hidden = !opening;
+    libToggle.setAttribute("aria-expanded", opening ? "true" : "false");
+    libToggle.classList.toggle("active", opening);
+    if (opening) refreshLibrary(); // re-fetch on every open: fresh after runs
+    else closeViewer();
+  });
+  libViewerClose.addEventListener("click", closeViewer);
 })();
