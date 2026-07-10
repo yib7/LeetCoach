@@ -7,9 +7,11 @@ analysis code (``statlee/sandbox.py``):
 * a **secret-free** environment (``_safe_env``) so the child can't read an API
   key or any other app secret — only the bare minimum Windows/CPython needs;
 * POSIX ``resource`` rlimits where available; on Windows a **Job Object**
-  (``proc_util.assign_job_with_caps``) caps per-process memory (512 MB, parity
-  with ``RLIMIT_AS``) and active process count (16), with KILL_ON_JOB_CLOSE so
-  closing the job handle in the ``finally`` nukes any straggler;
+  (``proc_util.create_job_with_caps`` created+configured *before* the spawn,
+  ``assign_to_job`` — one syscall — right after) caps per-process memory
+  (512 MB, parity with ``RLIMIT_AS``) and active process count (16), with
+  KILL_ON_JOB_CLOSE so closing the job handle in the ``finally`` nukes any
+  straggler;
 * ``subprocess.Popen`` with both output pipes drained on capped reader threads
   (never more than ``_OUTPUT_LIMIT`` retained — a runaway print loop gets the
   child killed, not hundreds of MB buffered) and a **whole-tree kill** on
@@ -47,7 +49,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from proc_util import assign_job_with_caps, close_job, kill_process_tree
+from proc_util import assign_to_job, close_job, create_job_with_caps, kill_process_tree
 
 # Cap captured child output so a runaway print loop can't blow up memory / the
 # saved markdown. Enforced *while reading* (see _CappedReader): the child is
@@ -255,6 +257,19 @@ def verify_python(
         if preexec:
             popen_kwargs["preexec_fn"] = preexec
 
+        # Windows: create + configure the Job Object BEFORE the spawn. Every
+        # slow step (one-time ctypes setup at proc_util import, job creation,
+        # limit configuration) happens while no child exists — an earlier
+        # revision did the ctypes setup lazily AFTER Popen, and the ~100ms
+        # first-call import cost let the first child of a fresh process run
+        # its untrusted code before the caps existed (cold-start race).
+        # None on POSIX or if the job API failed -> run uncapped; caps are
+        # defense-in-depth and must never break a verification run.
+        job_handle = create_job_with_caps(
+            memory_bytes=_MEM_LIMIT_BYTES,
+            active_processes=_JOB_PROCESS_CAP,
+        )
+
         try:
             proc = subprocess.Popen(
                 [sys.executable, script_path],
@@ -269,17 +284,12 @@ def verify_python(
         except (OSError, ValueError) as exc:
             return VerifyResult(status="error", note=f"could not run: {exc}")
 
-        # Windows: cap the child (and everything it spawns) with a Job Object
-        # immediately after spawn — the interpreter is still tens of ms away
-        # from running any untrusted code, so nothing escapes the job first
-        # (the CREATE_SUSPENDED trade-off is documented on the helper).
-        # Returns None on POSIX or if any job API failed -> run uncapped;
-        # a cap is defense-in-depth and must never break a verification run.
-        job_handle = assign_job_with_caps(
-            proc,
-            memory_bytes=_MEM_LIMIT_BYTES,
-            active_processes=_JOB_PROCESS_CAP,
-        )
+        # Post-spawn, the ONLY remaining job step: one AssignProcessToJobObject
+        # syscall (microseconds) against the child's ~20ms+ interpreter startup
+        # — `python solution.py` cannot execute a line of untrusted code before
+        # it lands inside the job, so nothing allocates or spawns outside the
+        # caps (the CREATE_SUSPENDED trade-off is documented on the helper).
+        assign_to_job(job_handle, proc)
 
         threading.Thread(
             target=_feed_stdin, args=(proc.stdin, stdin_text or ""), daemon=True

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 
 import pytest
@@ -237,11 +238,43 @@ def test_fork_bomb_is_stopped_by_active_process_cap_on_windows():
     assert "exited with code 7" in r.note, r.note
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object caps")
+def test_memory_cap_applies_on_first_call_in_fresh_interpreter():
+    """Regression for the COLD-START race: the FIRST verify_python call of a
+    fresh process must already be capped.
+
+    The original implementation did its ctypes imports lazily inside the
+    helper, so the first call in a process paid ~100ms of import cost AFTER
+    Popen had spawned the child — the child finished interpreter startup and
+    committed its 1 GB before the job was ever assigned. A warm pytest
+    process never sees that (earlier tests pre-import ctypes), which is
+    exactly why this probe runs in a brand-new python subprocess: its first
+    verification IS the cold path, same as the Flask app's first run."""
+    probe = (
+        "import sandbox\n"
+        "hog = 'data = bytearray(1024 * 1024 * 1024)\\nprint(\"survived\")\\n'\n"
+        "r = sandbox.verify_python(hog, '', 'whatever', timeout=10)\n"
+        "print('PROBE', r.status, r.note)\n"
+    )
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True, text=True, timeout=45,
+        cwd=repo_root,   # `-c` puts the cwd on sys.path -> `import sandbox` works
+    )
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    marker = [ln for ln in out.stdout.splitlines() if ln.startswith("PROBE ")]
+    assert marker, (out.stdout, out.stderr)
+    assert marker[-1].startswith("PROBE error"), (
+        f"first-call cap escaped in a fresh interpreter: {marker[-1]!r}"
+    )
+
+
 def test_verify_works_when_job_caps_unavailable(monkeypatch):
     """Graceful degradation: if the job APIs fail (old Windows, unexpected
     environment) verification must proceed WITHOUT the caps, never break.
-    Simulated by forcing the helper to report failure (None)."""
-    monkeypatch.setattr(sandbox, "assign_job_with_caps", lambda *a, **k: None)
+    Simulated by forcing the pre-spawn job creation to report failure (None)."""
+    monkeypatch.setattr(sandbox, "create_job_with_caps", lambda *a, **k: None)
     r = sandbox.verify_python(GOOD_DOUBLE, "21\n", "42")
     assert r.status == "pass", r
 
