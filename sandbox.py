@@ -6,7 +6,10 @@ analysis code (``statlee/sandbox.py``):
 * a throwaway working directory (``tempfile.mkdtemp``) cleaned in ``finally``;
 * a **secret-free** environment (``_safe_env``) so the child can't read an API
   key or any other app secret — only the bare minimum Windows/CPython needs;
-* POSIX ``resource`` rlimits where available (no-op on the Windows dev host);
+* POSIX ``resource`` rlimits where available; on Windows a **Job Object**
+  (``proc_util.assign_job_with_caps``) caps per-process memory (512 MB, parity
+  with ``RLIMIT_AS``) and active process count (16), with KILL_ON_JOB_CLOSE so
+  closing the job handle in the ``finally`` nukes any straggler;
 * ``subprocess.Popen`` with both output pipes drained on capped reader threads
   (never more than ``_OUTPUT_LIMIT`` retained — a runaway print loop gets the
   child killed, not hundreds of MB buffered) and a **whole-tree kill** on
@@ -44,12 +47,23 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from proc_util import kill_process_tree
+from proc_util import assign_job_with_caps, close_job, kill_process_tree
 
 # Cap captured child output so a runaway print loop can't blow up memory / the
 # saved markdown. Enforced *while reading* (see _CappedReader): the child is
 # killed as soon as either stream exceeds it, not merely trimmed afterwards.
 _OUTPUT_LIMIT = 64 * 1024
+
+# Per-process memory cap for the untrusted child: RLIMIT_AS on POSIX, a Job
+# Object ProcessMemoryLimit on Windows — same number, parity by construction.
+_MEM_LIMIT_BYTES = 512 * 1024 * 1024
+
+# Windows job active-process cap. Deliberately tighter than the POSIX
+# RLIMIT_NPROC (64): NPROC counts EVERY process of the user so it has to be
+# generous, while the job counts only this child's own tree — a legitimate
+# solution needs 1 process (maybe a few for multiprocessing), so 16 is ample
+# headroom and stops a fork bomb almost immediately.
+_JOB_PROCESS_CAP = 16
 
 
 @dataclass
@@ -119,8 +133,7 @@ def _posix_limits():
     import resource  # noqa: PLC0415 - POSIX-only import
 
     def set_limits():
-        mem_bytes = 512 * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+        resource.setrlimit(resource.RLIMIT_AS, (_MEM_LIMIT_BYTES,) * 2)
         resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
         resource.setrlimit(resource.RLIMIT_FSIZE, (16 * 1024 * 1024,) * 2)
         try:
@@ -222,9 +235,13 @@ def verify_python(
     Containment (the code is untrusted): on timeout the whole process TREE is
     killed (grandchildren included), and each output stream is capped at
     ``_OUTPUT_LIMIT`` — exceeding it kills the tree and yields ``error``
-    ("output exceeded ... limit") since the capture is incomplete.
+    ("output exceeded ... limit") since the capture is incomplete. On Windows
+    the child also runs inside a Job Object capping memory and process count
+    (best effort — a job API failure degrades to an uncapped run, never an
+    error); POSIX gets the equivalent rlimits via ``preexec_fn``.
     """
     run_dir = tempfile.mkdtemp(prefix="leetcoach_run_")
+    job_handle = None
     try:
         script_path = os.path.join(run_dir, "solution.py")
         try:
@@ -252,8 +269,17 @@ def verify_python(
         except (OSError, ValueError) as exc:
             return VerifyResult(status="error", note=f"could not run: {exc}")
 
-        # (SP3 will assign the child to a Windows Job Object right here,
-        #  immediately after spawn, before any of its code has run far.)
+        # Windows: cap the child (and everything it spawns) with a Job Object
+        # immediately after spawn — the interpreter is still tens of ms away
+        # from running any untrusted code, so nothing escapes the job first
+        # (the CREATE_SUSPENDED trade-off is documented on the helper).
+        # Returns None on POSIX or if any job API failed -> run uncapped;
+        # a cap is defense-in-depth and must never break a verification run.
+        job_handle = assign_job_with_caps(
+            proc,
+            memory_bytes=_MEM_LIMIT_BYTES,
+            active_processes=_JOB_PROCESS_CAP,
+        )
 
         threading.Thread(
             target=_feed_stdin, args=(proc.stdin, stdin_text or ""), daemon=True
@@ -348,6 +374,11 @@ def verify_python(
             }],
         )
     finally:
+        # KILL_ON_JOB_CLOSE: closing the job handle terminates anything still
+        # alive inside the job — the second kill mechanism after
+        # kill_process_tree — and runs BEFORE rmtree so no straggler can hold
+        # files in run_dir open.
+        close_job(job_handle)
         shutil.rmtree(run_dir, ignore_errors=True)
 
 

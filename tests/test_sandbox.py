@@ -184,6 +184,68 @@ def test_runaway_output_is_bounded_and_killed_promptly():
     )
 
 
+# --- Windows Job Object caps (audit6 P1-2 step 2) -------------------------
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object caps")
+def test_memory_hog_is_killed_by_job_cap_on_windows():
+    """Allocating far past the 512 MB job cap must fail INSIDE the child
+    (MemoryError -> nonzero exit -> ``error``) — fast, not via timeout.
+
+    Built-in cap detection: if the job caps silently failed to apply, the 1 GB
+    allocation succeeds, the child prints and exits 0, and the run is a
+    ``fail`` (wrong output) — flunking the status assert. If instead the child
+    somehow hung, the elapsed/note asserts reject the timeout path."""
+    hog = (
+        "data = bytearray(1024 * 1024 * 1024)\n"   # 1 GB >> 512 MB cap
+        "print('ALLOCATED', len(data))\n"
+    )
+    start = time.monotonic()
+    r = sandbox.verify_python(hog, "", "whatever", timeout=10)
+    elapsed = time.monotonic() - start
+    assert elapsed < 8, f"took {elapsed:.1f}s -- memory cap did not fire fast"
+    assert r.status == "error", r
+    assert "exited with code" in r.note, r.note  # MemoryError, not a timeout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object caps")
+def test_fork_bomb_is_stopped_by_active_process_cap_on_windows():
+    """Spawning more processes than the job's active-process cap (16) must
+    fail inside the child: CreateProcess is denied (OSError) once the job is
+    full, and the child exits with the marker code 7 -> ``error``.
+
+    Built-in cap detection: with no cap all 32 spawns succeed, the child
+    prints the marker and exits 0 -> ``pass`` (matched output) — flunking the
+    status assert. The ~15 sleepers that DID spawn before the wall are inside
+    the job, so close_job's KILL_ON_JOB_CLOSE in verify_python's finally reaps
+    them."""
+    bomb = (
+        "import subprocess, sys\n"
+        "procs = []\n"
+        "try:\n"
+        "    for _ in range(32):\n"
+        "        procs.append(subprocess.Popen(\n"
+        "            [sys.executable, '-c', 'import time; time.sleep(20)']))\n"
+        "except OSError:\n"
+        "    sys.exit(7)\n"   # the cap said no -- the expected path
+        "print('SPAWNED-ALL')\n"
+    )
+    start = time.monotonic()
+    r = sandbox.verify_python(bomb, "", "SPAWNED-ALL", timeout=30)
+    elapsed = time.monotonic() - start
+    assert elapsed < 25, f"took {elapsed:.1f}s -- process cap did not stop the bomb"
+    assert r.status == "error", r
+    assert "exited with code 7" in r.note, r.note
+
+
+def test_verify_works_when_job_caps_unavailable(monkeypatch):
+    """Graceful degradation: if the job APIs fail (old Windows, unexpected
+    environment) verification must proceed WITHOUT the caps, never break.
+    Simulated by forcing the helper to report failure (None)."""
+    monkeypatch.setattr(sandbox, "assign_job_with_caps", lambda *a, **k: None)
+    r = sandbox.verify_python(GOOD_DOUBLE, "21\n", "42")
+    assert r.status == "pass", r
+
+
 # --- secret-free environment ---------------------------------------------
 
 def test_child_cannot_read_a_planted_secret(monkeypatch):
