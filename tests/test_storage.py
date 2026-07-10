@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+import config
 import storage
 
 
@@ -27,6 +28,25 @@ def out_root(tmp_path, monkeypatch):
     root = tmp_path / "lib"
     monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(root))
     return root
+
+
+# --- config: default output dir is anchored, not CWD-relative (P2-10) ----
+
+def test_default_output_dir_is_anchored_next_to_config(monkeypatch):
+    # Without the env override, output_dir() must be an ABSOLUTE path anchored
+    # to the directory containing config.py — launching from another CWD
+    # (e.g. `flask run` elsewhere) must not fork the study library.
+    monkeypatch.delenv("LEETCOACH_OUTPUT_DIR", raising=False)
+    expected = Path(config.__file__).resolve().parent / "output"
+    assert config.output_dir() == expected
+    assert config.output_dir().is_absolute()
+
+
+def test_output_dir_env_override_kept_verbatim(monkeypatch):
+    # An explicit override — even a relative one — is the user's choice and is
+    # passed through untouched.
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", "my_lib")
+    assert config.output_dir() == Path("my_lib")
 
 
 # --- slug correctness ----------------------------------------------------
@@ -205,3 +225,67 @@ def test_returned_path_is_within_configured_root(out_root):
     # commonpath raises if path is not under root; this asserts containment
     common = os.path.commonpath([Path(path).resolve(), out_root.resolve()])
     assert common == str(out_root.resolve())
+
+
+# --- collisions: suffix instead of clobber (P2-11) ------------------------
+
+def test_rerun_identical_content_is_idempotent(out_root):
+    # Same problem, same body -> same path, ONE file, no __2 duplicate.
+    p1 = storage.save_learning("Two Sum", "arrays", "same body")
+    p2 = storage.save_learning("Two Sum", "arrays", "same body")
+    assert p1 == p2
+    folder = out_root / "learning" / "arrays_learning"
+    assert [f.name for f in folder.iterdir()] == ["two_sum.md"]
+
+
+def test_different_content_gets_suffixed_not_clobbered(out_root):
+    # A second, different write must NOT overwrite the first note.
+    p1 = storage.save_learning("Two Sum", "arrays", "first")
+    p2 = storage.save_learning("Two Sum", "arrays", "second")
+    p3 = storage.save_learning("Two Sum", "arrays", "third")
+    assert Path(p1).name == "two_sum.md"
+    assert Path(p2).name == "two_sum__2.md"
+    assert Path(p3).name == "two_sum__3.md"
+    assert Path(p1).read_text(encoding="utf-8") == "first"
+    assert Path(p2).read_text(encoding="utf-8") == "second"
+    assert Path(p3).read_text(encoding="utf-8") == "third"
+
+
+def test_suffixed_slot_is_idempotent_too(out_root):
+    # Re-running the SECOND variant lands back on __2, not __3.
+    storage.save_guided("Two Sum", "arrays", "first")
+    p2 = storage.save_guided("Two Sum", "arrays", "second")
+    p2_again = storage.save_guided("Two Sum", "arrays", "second")
+    assert p2 == p2_again
+    folder = out_root / "guided" / "arrays"
+    assert sorted(f.name for f in folder.iterdir()) == ["two_sum.md", "two_sum__2.md"]
+
+
+def test_answer_rerun_identical_pair_is_idempotent(out_root):
+    kwargs = dict(tier="normal", language="python", code="code", reasoning="why")
+    first = storage.save_answer("Two Sum", "arrays", **kwargs)
+    second = storage.save_answer("Two Sum", "arrays", **kwargs)
+    assert first == second
+    folder = out_root / "answers" / "arrays"
+    assert sorted(f.name for f in folder.iterdir()) == [
+        "two_sum__normal.md", "two_sum__normal.py",
+    ]
+
+
+def test_answer_pair_moves_together_when_one_sibling_collides(out_root):
+    # Pre-create ONLY the code path with different content: the pair is one
+    # logical entry, so BOTH new files must land on the same __2 stem — the
+    # code must not go to __2 while the .md stays bare.
+    folder = out_root / "answers" / "arrays"
+    folder.mkdir(parents=True)
+    (folder / "two_sum__normal.py").write_text("old code", encoding="utf-8")
+    code_path, reasoning_path = storage.save_answer(
+        "Two Sum", "arrays", tier="normal", language="python",
+        code="new code", reasoning="why",
+    )
+    assert Path(code_path).name == "two_sum__normal__2.py"
+    assert Path(reasoning_path).name == "two_sum__normal__2.md"
+    # original untouched
+    assert (folder / "two_sum__normal.py").read_text(encoding="utf-8") == "old code"
+    assert Path(code_path).read_text(encoding="utf-8") == "new code"
+    assert Path(reasoning_path).read_text(encoding="utf-8") == "why"

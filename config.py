@@ -10,7 +10,11 @@ These knobs are the only machine-specific settings the app needs:
                               cheapest model saves budget on every run).
 - ``LEETCOACH_CLAUDE_BIN``  — name/path of the ``claude`` executable (default
                               ``claude``; set an absolute path if it is not on PATH).
-- ``LEETCOACH_OUTPUT_DIR``  — where the study library is written (default ``output``).
+- ``LEETCOACH_OUTPUT_DIR``  — where the study library is written (default: the
+                              ``output`` directory next to this file, so the
+                              library never forks when the app is launched from
+                              a different working directory; a relative override
+                              stays relative — that is the user's explicit choice).
 - ``LEETCOACH_RUN_TIMEOUT`` — wall-clock cap in seconds for a single ``claude`` run
                               (default ``600``); a hung CLI is killed after this long.
 
@@ -26,7 +30,10 @@ from pathlib import Path
 DEFAULT_MODEL = "claude-opus-4-8"
 DEFAULT_CLASSIFIER_MODEL = "haiku"  # classification is trivial; cheapest model wins
 DEFAULT_CLAUDE_BIN = "claude"
-DEFAULT_OUTPUT_DIR = "output"
+# Anchored next to this file (audit6 P2-10): a CWD-relative default would let
+# `flask run` (or any launch from another directory) silently fork the study
+# library and its topic index.
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 DEFAULT_RUN_TIMEOUT = 600.0  # seconds; generous — Opus study material can be slow
 
 
@@ -71,8 +78,16 @@ def run_timeout() -> float:
 
 
 def output_dir() -> Path:
-    """Root directory of the generated study library (created lazily elsewhere)."""
-    return Path(os.environ.get("LEETCOACH_OUTPUT_DIR", DEFAULT_OUTPUT_DIR))
+    """Root directory of the generated study library (created lazily elsewhere).
+
+    Defaults to the ``output`` directory next to this file — absolute, so the
+    library does not depend on the process's CWD. An explicit
+    ``LEETCOACH_OUTPUT_DIR`` override is used verbatim (relative stays relative).
+    """
+    override = os.environ.get("LEETCOACH_OUTPUT_DIR")
+    if override:
+        return Path(override)
+    return DEFAULT_OUTPUT_DIR
 
 
 def topic_index_path() -> Path:
