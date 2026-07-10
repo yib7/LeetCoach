@@ -5,6 +5,9 @@ These knobs are the only machine-specific settings the app needs:
 - ``LEETCOACH_MODEL``       — Claude model id passed to ``claude --model`` (default
                               ``claude-opus-4-8``; override with a smaller/faster
                               alias like ``sonnet`` to save your subscription budget).
+- ``LEETCOACH_CLASSIFIER_MODEL`` — model for the short classification call (default
+                              ``haiku`` — classifying a problem is trivial, so the
+                              cheapest model saves budget on every run).
 - ``LEETCOACH_CLAUDE_BIN``  — name/path of the ``claude`` executable (default
                               ``claude``; set an absolute path if it is not on PATH).
 - ``LEETCOACH_OUTPUT_DIR``  — where the study library is written (default ``output``).
@@ -21,6 +24,7 @@ from pathlib import Path
 
 # Defaults live here so they are documented in one place and referenced by name.
 DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_CLASSIFIER_MODEL = "haiku"  # classification is trivial; cheapest model wins
 DEFAULT_CLAUDE_BIN = "claude"
 DEFAULT_OUTPUT_DIR = "output"
 DEFAULT_RUN_TIMEOUT = 600.0  # seconds; generous — Opus study material can be slow
@@ -29,6 +33,16 @@ DEFAULT_RUN_TIMEOUT = 600.0  # seconds; generous — Opus study material can be 
 def model() -> str:
     """Claude model id used for every `claude --model <id>` call."""
     return os.environ.get("LEETCOACH_MODEL", DEFAULT_MODEL)
+
+
+def classifier_model() -> str:
+    """Model id/alias for the classifier's short Claude call (audit6 P2-4).
+
+    Separate from :func:`model` because classification is a trivial task — a
+    tiny JSON object naming the technique — so it defaults to the cheapest
+    alias (``haiku``) regardless of which model produces the study material.
+    """
+    return os.environ.get("LEETCOACH_CLASSIFIER_MODEL", DEFAULT_CLASSIFIER_MODEL)
 
 
 def claude_bin() -> str:

@@ -28,6 +28,7 @@ SSE event protocol (shared by every mode):
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -35,6 +36,7 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 
 import classifier
 import claude_cli
+import config
 import parsing
 import prompts
 import sandbox
@@ -213,8 +215,41 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
 
         def event_stream():
             try:
-                # 1) classify (same injected run_fn -> tests cover this call too)
-                cls = classifier.classify(problem, run_fn=run_fn)
+                # 1) classify on a background thread (audit6 P2-4). The short
+                #    classification round-trip used to complete BEFORE the first
+                #    answer delta streamed, delaying every run by a full Claude
+                #    call; its result is only needed at save time, so it now
+                #    runs concurrently with the answer stream (same injected
+                #    run_fn -> tests still cover it) on the cheap classifier
+                #    model. The pre-seeded fallback in ``cls_holder`` keeps the
+                #    run alive even if the thread dies: classify never raises by
+                #    contract, but a crash here must degrade to "uncategorized",
+                #    never abort the run.
+                cls_holder = [classifier.Classification(classifier.FALLBACK_TYPE, [])]
+
+                def _classify_in_background():
+                    try:
+                        cls_holder[0] = classifier.classify(
+                            problem, run_fn=run_fn, model=config.classifier_model()
+                        )
+                    except Exception:  # noqa: BLE001 - fallback already seeded above
+                        app.logger.exception("background classification failed")
+
+                cls_thread = threading.Thread(
+                    target=_classify_in_background,
+                    name="leetcoach-classify",
+                    daemon=True,
+                )
+                cls_thread.start()
+
+                def _classification():
+                    """Join the classifier thread and return its result. The
+                    join is deliberately unbounded: classify rides the same
+                    claude_cli machinery as every run, whose wall-clock watchdog
+                    (LEETCOACH_RUN_TIMEOUT) already bounds a hung CLI — a second
+                    timeout here would only mask that one."""
+                    cls_thread.join()
+                    return cls_holder[0]
 
                 # 2) build the mode-specific prompt; 3) stream + accumulate;
                 #    4) save with the mode's own storage call. Only these two
@@ -236,6 +271,7 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     yield _sse_text("\n\n" + verdict + "\n")
                     reasoning = body + "\n\n---\n\n**Verification:** " + verdict + "\n"
 
+                    cls = _classification()  # join before the save needs its result
                     code_path, reasoning_path = storage.save_answer(
                         problem,
                         cls.problem_type,
@@ -258,6 +294,7 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                         already_learned_topics=learned or None,
                     )
                     yield from _stream_and_accumulate(prompt)
+                    cls = _classification()  # join before the save needs its result
                     paths = [storage.save_learning(problem, cls.problem_type, out[0])]
                     try:
                         topic_index.record(cls.problem_type, cls.topics)
@@ -273,6 +310,7 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")
                     saved = body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                    cls = _classification()  # join before the save needs its result
                     paths = [storage.save_guided(problem, cls.problem_type, saved)]
 
                 # 5) terminal success event
