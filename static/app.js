@@ -18,27 +18,15 @@
   var tierEl = $("tier");
   var tierField = $("tier-field");
   var runBtn = $("run");
+  var stopBtn = $("stop");
   var pasteBtn = $("paste");
   var statusEl = $("status");
   var metaEl = $("meta");
   var outputEl = $("output");
 
-  // Configure marked to hand code blocks to highlight.js when available.
-  if (window.marked && window.hljs) {
-    marked.setOptions({
-      breaks: false,
-      highlight: function (code, lang) {
-        try {
-          if (lang && hljs.getLanguage(lang)) {
-            return hljs.highlight(code, { language: lang }).value;
-          }
-          return hljs.highlightAuto(code).value;
-        } catch (e) {
-          return code;
-        }
-      },
-    });
-  }
+  // No marked.setOptions needed: marked v12 ignores the old `highlight`
+  // option (code blocks are highlighted post-render via hljs.highlightElement
+  // in render()), and `breaks: false` is marked's default.
 
   // Defense-in-depth XSS hardening (this is a localhost tool, but Claude's
   // output is still untrusted markdown we render via innerHTML). marked v12
@@ -53,6 +41,16 @@
         html: function (token) {
           var raw = typeof token === "string" ? token : (token && token.text) || "";
           return escapeHtml(raw);
+        },
+        // Links: neutralize non-http(s) protocols (javascript:, data:, ...).
+        // marked v12 renderer signature is positional: link(href, title, text)
+        // where `text` is the already-rendered (escaped) inner HTML.
+        link: function (href, title, text) {
+          var h = String(href || "");
+          if (!/^https?:/i.test(h)) return text || escapeHtml(h);
+          var attr = escapeHtml(h).replace(/"/g, "&quot;");
+          return '<a href="' + attr + '" rel="noopener" target="_blank">' +
+            (text || escapeHtml(h)) + "</a>";
         },
       },
     });
@@ -110,6 +108,24 @@
     }
   }
 
+  // Coalesce streaming re-renders onto animation frames. Re-parsing the full
+  // accumulated markdown (plus re-highlighting every code block) on every SSE
+  // delta is O(n^2) jank on long outputs — instead remember the latest text
+  // and render at most once per frame. A direct render(acc) still runs when
+  // the stream ends, so the final content is always complete (rAF does not
+  // fire in background tabs).
+  var renderPending = false;
+  var renderLatest = "";
+  function scheduleRender(md) {
+    renderLatest = md;
+    if (renderPending) return;
+    renderPending = true;
+    requestAnimationFrame(function () {
+      renderPending = false;
+      render(renderLatest);
+    });
+  }
+
   function showMeta(payload) {
     var paths = (payload.paths || [])
       .map(function (p) { return "<code>" + escapeHtml(p) + "</code>"; })
@@ -136,7 +152,16 @@
   function setRunning(on) {
     runBtn.disabled = on;
     runBtn.textContent = on ? "Running…" : "Run";
+    stopBtn.hidden = !on;
+    stopBtn.disabled = !on;
   }
+
+  // Stop button: aborts the in-flight run (set per-run inside runNow). The
+  // server cancels the Claude subprocess when the connection drops.
+  var activeStop = null;
+  stopBtn.addEventListener("click", function () {
+    if (activeStop) activeStop();
+  });
 
   // Parse the SSE wire format incrementally out of the fetch byte stream.
   // Emits {type:"text", data} for plain `data:` lines and
@@ -195,6 +220,14 @@
     window.addEventListener("pagehide", abortOnUnload);
     window.addEventListener("beforeunload", abortOnUnload);
 
+    // A deliberate Stop is not an error — remember it so the AbortError
+    // handler can show a neutral "Stopped." instead of a warning.
+    var stoppedByUser = false;
+    activeStop = function () {
+      stoppedByUser = true;
+      controller.abort();
+    };
+
     try {
       var resp = await fetch("/run", {
         method: "POST",
@@ -215,7 +248,7 @@
       var feed = makeSseParser(function (ev) {
         if (ev.type === "text") {
           acc += ev.data;
-          render(acc);
+          scheduleRender(acc);
         } else if (ev.name === "done") {
           setStatus("Done. Saved to your study library.", "ok");
           showMeta(ev.data || {});
@@ -230,13 +263,20 @@
         feed(decoder.decode(r.value, { stream: true }));
       }
     } catch (e) {
-      // An AbortError here is an intentional cancel (page unload), not a fault.
-      if (e && e.name !== "AbortError") {
-        setStatus("Network error: " + e.message, "warn");
+      // An AbortError here is an intentional cancel (Stop button or page
+      // unload), not a fault.
+      if (e && e.name === "AbortError") {
+        if (stoppedByUser) setStatus("Stopped.", "");
+      } else {
+        setStatus("Network error: " + (e && e.message), "warn");
       }
     } finally {
       window.removeEventListener("pagehide", abortOnUnload);
       window.removeEventListener("beforeunload", abortOnUnload);
+      activeStop = null;
+      // Final render outside the rAF path so the last chunk is never lost
+      // (and partial output stays visible after a Stop).
+      render(acc);
       setRunning(false);
     }
   }

@@ -167,6 +167,13 @@ button.run {
 button.run:hover { filter: brightness(1.07); }
 button.run:disabled { opacity: 0.6; cursor: default; filter: none; }
 
+button.stop {
+  color: var(--fg-dim);
+  padding: 10px 18px;
+  font-size: 15px;
+}
+button.stop:hover { background: rgba(154, 167, 180, 0.10); color: var(--fg); }
+
 .results { margin-top: 24px; }
 
 .status {
