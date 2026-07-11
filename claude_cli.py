@@ -102,7 +102,14 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
     if resolved:
         argv = [resolved, *argv[1:]]
 
-    proc = subprocess.Popen(argv, **popen_kwargs)
+    # If Popen fails (e.g. the binary vanished in the narrow window after
+    # is_available()), close the stderr temp file we opened above — the
+    # try/finally that normally closes it starts below this line.
+    try:
+        proc = subprocess.Popen(argv, **popen_kwargs)
+    except BaseException:
+        stderr_file.close()
+        raise
     drained = False
     stdin_ok = True      # False -> the child died before consuming stdin (P2-3)
     disconnected = False  # True -> consumer close()d us (SSE client went away)
