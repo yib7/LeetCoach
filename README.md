@@ -10,7 +10,7 @@ generated Python against the problem's own sample I/O to tell you whether the so
 actually passes. No API key: it drives your existing Claude Code subscription through the
 CLI.
 
-![LeetCoach generating and verifying a solution](docs/media/demo.gif)
+![LeetCoach streaming an Answer, verifying it against the problem's sample I/O, and browsing the saved study library](docs/media/demo.gif)
 
 ## What it does
 
@@ -27,7 +27,7 @@ CLI.
   read-only Library panel in the UI browses everything you have saved.
 
 <p align="center">
-  <img src="docs/media/screenshot.png" alt="A completed Answer run: reasoning, highlighted code, Big-O, and a passing sample-I/O check" width="640">
+  <img src="docs/media/screenshot.png" alt="A finished Answer run: syntax-highlighted solution code, an explicit Big-O complexity line, and a passing sample-I/O check" width="640">
 </p>
 
 ## How it works (the `claude` CLI dependency)
