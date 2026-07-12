@@ -10,7 +10,7 @@ generated Python against the problem's own sample I/O to tell you whether the so
 actually passes. No API key: it drives your existing Claude Code subscription through the
 CLI.
 
-![LeetCoach generating and verifying a solution](docs/media/demo.gif)
+![LeetCoach streaming an Answer, verifying it against the problem's sample I/O, and browsing the saved study library](docs/media/demo.gif)
 
 ## What it does
 
@@ -18,14 +18,16 @@ CLI.
   from problem to solution in one document, and *Answer* gives a working solution with
   reasoning and Big-O.
 - **Live streaming.** The response renders token by token in the browser over server-sent
-  events, with markdown and syntax highlighting (no runtime CDN).
+  events, with markdown and syntax highlighting (no runtime CDN). A Stop button cancels
+  a run mid-stream.
 - **Self-checking.** Generated Python solutions are run against the problem's `Input:` /
   `Output:` examples in a throwaway sandbox and reported as PASS / FAIL.
 - **Builds a library.** Every run is saved under `output/`, organized by problem type, and
-  a topic index lets Learning skip and cross-link what you have already studied.
+  a topic index lets Learning skip and cross-link what you have already studied. A
+  read-only Library panel in the UI browses everything you have saved.
 
 <p align="center">
-  <img src="docs/media/screenshot.png" alt="A completed Answer run: reasoning, highlighted code, Big-O, and a passing sample-I/O check" width="640">
+  <img src="docs/media/screenshot.png" alt="A finished Answer run: syntax-highlighted solution code, an explicit Big-O complexity line, and a passing sample-I/O check" width="640">
 </p>
 
 ## How it works (the `claude` CLI dependency)
@@ -105,7 +107,8 @@ Verification is best-effort and **Python-first**:
 
 - **Python** is first-class: the generated script reads the sample input on stdin and
   prints the result; LeetCoach runs it in a throwaway, secret-free sandbox and diffs stdout
-  against the expected output to report PASS / FAIL.
+  against the expected output to report PASS / FAIL. A failing run saves each failed
+  sample's input, expected, and actual output into the reasoning file.
 - **C++ / Java** are **not auto-verified**. LeetCoach only probes for a compiler (`g++` /
   `javac`); the result is shown as "not auto-verified". Verify those manually.
 - When a problem has no parseable sample I/O, the result is likewise "not auto-verified". A
@@ -121,25 +124,28 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
 | Front end | Vendored `marked` + `highlight.js`, dark single-page UI |
-| Tests / lint | pytest (154 tests, all mocking the subprocess), ruff |
+| Tests / lint | pytest (224 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Configuration
 
-All four settings are environment variables, overridable in your shell or a `.env` file.
+All six settings are environment variables, overridable in your shell or a `.env` file.
 All are optional.
 
 | Variable               | Default                        | What it does                                                        |
 | ---------------------- | ------------------------------ | ------------------------------------------------------------------- |
 | `LEETCOACH_MODEL`      | `claude-opus-4-8`              | Claude model id passed to `claude --model` (e.g. `opus` / `sonnet`).|
+| `LEETCOACH_CLASSIFIER_MODEL` | `haiku`                  | Model for the short classification call that tags each run.        |
 | `LEETCOACH_CLAUDE_BIN` | `claude`                       | Name or absolute path of the `claude` executable.                   |
-| `LEETCOACH_OUTPUT_DIR` | `output`                       | Where the study library is written.                                 |
+| `LEETCOACH_OUTPUT_DIR` | `output` next to the app       | Where the study library is written.                                 |
 | `LEETCOACH_TOPIC_INDEX`| `<output_dir>/topic_index.json`| Path to the persisted topic index JSON.                             |
+| `LEETCOACH_RUN_TIMEOUT`| `600`                          | Wall-clock cap in seconds for a single `claude` run.                |
 
 ## Where outputs are saved
 
-Everything lands under `output/` (gitignored), organized by problem type:
+Everything lands under `output/` next to the app (gitignored, regardless of the
+directory you launch from), organized by problem type:
 
 ```
 output/

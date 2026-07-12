@@ -18,27 +18,15 @@
   var tierEl = $("tier");
   var tierField = $("tier-field");
   var runBtn = $("run");
+  var stopBtn = $("stop");
   var pasteBtn = $("paste");
   var statusEl = $("status");
   var metaEl = $("meta");
   var outputEl = $("output");
 
-  // Configure marked to hand code blocks to highlight.js when available.
-  if (window.marked && window.hljs) {
-    marked.setOptions({
-      breaks: false,
-      highlight: function (code, lang) {
-        try {
-          if (lang && hljs.getLanguage(lang)) {
-            return hljs.highlight(code, { language: lang }).value;
-          }
-          return hljs.highlightAuto(code).value;
-        } catch (e) {
-          return code;
-        }
-      },
-    });
-  }
+  // No marked.setOptions needed: marked v12 ignores the old `highlight`
+  // option (code blocks are highlighted post-render via hljs.highlightElement
+  // in render()), and `breaks: false` is marked's default.
 
   // Defense-in-depth XSS hardening (this is a localhost tool, but Claude's
   // output is still untrusted markdown we render via innerHTML). marked v12
@@ -53,6 +41,16 @@
         html: function (token) {
           var raw = typeof token === "string" ? token : (token && token.text) || "";
           return escapeHtml(raw);
+        },
+        // Links: neutralize non-http(s) protocols (javascript:, data:, ...).
+        // marked v12 renderer signature is positional: link(href, title, text)
+        // where `text` is the already-rendered (escaped) inner HTML.
+        link: function (href, title, text) {
+          var h = String(href || "");
+          if (!/^https?:/i.test(h)) return text || escapeHtml(h);
+          var attr = escapeHtml(h).replace(/"/g, "&quot;");
+          return '<a href="' + attr + '" rel="noopener" target="_blank">' +
+            (text || escapeHtml(h)) + "</a>";
         },
       },
     });
@@ -110,6 +108,24 @@
     }
   }
 
+  // Coalesce streaming re-renders onto animation frames. Re-parsing the full
+  // accumulated markdown (plus re-highlighting every code block) on every SSE
+  // delta is O(n^2) jank on long outputs — instead remember the latest text
+  // and render at most once per frame. A direct render(acc) still runs when
+  // the stream ends, so the final content is always complete (rAF does not
+  // fire in background tabs).
+  var renderPending = false;
+  var renderLatest = "";
+  function scheduleRender(md) {
+    renderLatest = md;
+    if (renderPending) return;
+    renderPending = true;
+    requestAnimationFrame(function () {
+      renderPending = false;
+      render(renderLatest);
+    });
+  }
+
   function showMeta(payload) {
     var paths = (payload.paths || [])
       .map(function (p) { return "<code>" + escapeHtml(p) + "</code>"; })
@@ -136,7 +152,16 @@
   function setRunning(on) {
     runBtn.disabled = on;
     runBtn.textContent = on ? "Running…" : "Run";
+    stopBtn.hidden = !on;
+    stopBtn.disabled = !on;
   }
+
+  // Stop button: aborts the in-flight run (set per-run inside runNow). The
+  // server cancels the Claude subprocess when the connection drops.
+  var activeStop = null;
+  stopBtn.addEventListener("click", function () {
+    if (activeStop) activeStop();
+  });
 
   // Parse the SSE wire format incrementally out of the fetch byte stream.
   // Emits {type:"text", data} for plain `data:` lines and
@@ -195,6 +220,14 @@
     window.addEventListener("pagehide", abortOnUnload);
     window.addEventListener("beforeunload", abortOnUnload);
 
+    // A deliberate Stop is not an error — remember it so the AbortError
+    // handler can show a neutral "Stopped." instead of a warning.
+    var stoppedByUser = false;
+    activeStop = function () {
+      stoppedByUser = true;
+      controller.abort();
+    };
+
     try {
       var resp = await fetch("/run", {
         method: "POST",
@@ -215,7 +248,7 @@
       var feed = makeSseParser(function (ev) {
         if (ev.type === "text") {
           acc += ev.data;
-          render(acc);
+          scheduleRender(acc);
         } else if (ev.name === "done") {
           setStatus("Done. Saved to your study library.", "ok");
           showMeta(ev.data || {});
@@ -230,16 +263,160 @@
         feed(decoder.decode(r.value, { stream: true }));
       }
     } catch (e) {
-      // An AbortError here is an intentional cancel (page unload), not a fault.
-      if (e && e.name !== "AbortError") {
-        setStatus("Network error: " + e.message, "warn");
+      // An AbortError here is an intentional cancel (Stop button or page
+      // unload), not a fault.
+      if (e && e.name === "AbortError") {
+        if (stoppedByUser) setStatus("Stopped.", "");
+      } else {
+        setStatus("Network error: " + (e && e.message), "warn");
       }
     } finally {
       window.removeEventListener("pagehide", abortOnUnload);
       window.removeEventListener("beforeunload", abortOnUnload);
+      activeStop = null;
+      // Final render outside the rAF path so the last chunk is never lost
+      // (and partial output stays visible after a Stop).
+      render(acc);
       setRunning(false);
     }
   }
 
   runBtn.addEventListener("click", runNow);
+
+  // --- Library browser (SP10) ---------------------------------------------
+  // Read-only view of the accumulated output/ study library. The server only
+  // ever returns text/plain; .md files are rendered client-side through the
+  // SAME hardened marked pipeline as run output (raw HTML escaped, non-http
+  // links neutralized), everything else lands in a <pre> as textContent.
+
+  var libToggle = $("library-toggle");
+  var libPanel = $("library");
+  var libTree = $("library-tree");
+  var libCount = $("library-count");
+  var libViewer = $("library-viewer");
+  var libViewerPath = $("library-viewer-path");
+  var libViewerBody = $("library-viewer-body");
+  var libViewerClose = $("library-viewer-close");
+
+  var HLJS_LANG = { py: "python", cpp: "cpp", java: "java", json: "json" };
+
+  function closeViewer() {
+    libViewer.hidden = true;
+    libViewerBody.innerHTML = "";
+    libViewerPath.textContent = "";
+    var open = libTree.querySelector(".lib-file.active");
+    if (open) open.classList.remove("active");
+  }
+
+  function showFile(relPath, text) {
+    libViewerPath.textContent = relPath;
+    libViewerBody.innerHTML = "";
+    var ext = relPath.slice(relPath.lastIndexOf(".") + 1).toLowerCase();
+    if (ext === "md" && window.marked) {
+      libViewerBody.innerHTML = marked.parse(text);
+      if (window.hljs) {
+        libViewerBody.querySelectorAll("pre code").forEach(function (block) {
+          try { hljs.highlightElement(block); } catch (e) { /* noop */ }
+        });
+      }
+    } else {
+      var pre = document.createElement("pre");
+      var code = document.createElement("code");
+      if (HLJS_LANG[ext]) code.className = "language-" + HLJS_LANG[ext];
+      code.textContent = text; // escaped by construction
+      pre.appendChild(code);
+      libViewerBody.appendChild(pre);
+      if (window.hljs && HLJS_LANG[ext]) {
+        try { hljs.highlightElement(code); } catch (e) { /* noop */ }
+      }
+    }
+    libViewer.hidden = false;
+  }
+
+  function openFile(relPath, btn) {
+    fetch("/library/file?path=" + encodeURIComponent(relPath))
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.text();
+      })
+      .then(function (text) {
+        var active = libTree.querySelector(".lib-file.active");
+        if (active) active.classList.remove("active");
+        btn.classList.add("active");
+        showFile(relPath, text);
+      })
+      .catch(function (e) {
+        setStatus("Could not open " + relPath + " (" + e.message + ").", "warn");
+      });
+  }
+
+  function renderTree(files) {
+    libTree.innerHTML = "";
+    libCount.textContent = files.length
+      ? files.length + (files.length === 1 ? " file" : " files")
+      : "";
+    if (!files.length) {
+      var empty = document.createElement("p");
+      empty.className = "lib-empty";
+      empty.textContent =
+        "Nothing here yet — run a problem and it will be saved to your library.";
+      libTree.appendChild(empty);
+      return;
+    }
+    // Group by containing folder ("" for root files), preserving server order
+    // (already sorted by path).
+    var groups = [];
+    var byFolder = {};
+    files.forEach(function (f) {
+      var idx = f.path.lastIndexOf("/");
+      var folder = idx === -1 ? "" : f.path.slice(0, idx);
+      if (!(folder in byFolder)) {
+        byFolder[folder] = [];
+        groups.push(folder);
+      }
+      byFolder[folder].push(f);
+    });
+    groups.forEach(function (folder) {
+      var head = document.createElement("div");
+      head.className = "lib-folder";
+      head.textContent = folder || "(library root)";
+      libTree.appendChild(head);
+      byFolder[folder].forEach(function (f) {
+        var name = f.path.slice(f.path.lastIndexOf("/") + 1);
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "lib-file";
+        btn.textContent = name;
+        btn.title = f.path + " (" + f.size + " bytes)";
+        btn.addEventListener("click", function () { openFile(f.path, btn); });
+        libTree.appendChild(btn);
+      });
+    });
+  }
+
+  function refreshLibrary() {
+    fetch("/library")
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (data) { renderTree((data && data.files) || []); })
+      .catch(function (e) {
+        libTree.innerHTML = "";
+        var err = document.createElement("p");
+        err.className = "lib-empty";
+        err.textContent = "Could not load the library (" + e.message + ").";
+        libTree.appendChild(err);
+      });
+  }
+
+  libToggle.addEventListener("click", function () {
+    var opening = libPanel.hidden;
+    libPanel.hidden = !opening;
+    libToggle.setAttribute("aria-expanded", opening ? "true" : "false");
+    libToggle.classList.toggle("active", opening);
+    if (opening) refreshLibrary(); // re-fetch on every open: fresh after runs
+    else closeViewer();
+  });
+  libViewerClose.addEventListener("click", closeViewer);
 })();

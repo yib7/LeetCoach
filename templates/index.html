@@ -10,9 +10,31 @@
 <body data-claude-available="__CLAUDE_AVAILABLE__">
   <main class="wrap">
     <header class="topbar">
-      <h1>Leet<span class="accent">Coach</span></h1>
-      <p class="tagline">Paste a problem &middot; pick a mode &middot; let Claude coach you.</p>
+      <div>
+        <h1>Leet<span class="accent">Coach</span></h1>
+        <p class="tagline">Paste a problem &middot; pick a mode &middot; let Claude coach you.</p>
+      </div>
+      <button id="library-toggle" type="button" class="ghost" aria-expanded="false">
+        Library
+      </button>
     </header>
+
+    <section id="library" class="library" hidden>
+      <div class="library-head">
+        <h2>Study library</h2>
+        <span id="library-count" class="library-count"></span>
+      </div>
+      <div class="library-body">
+        <nav id="library-tree" class="library-tree" aria-label="Library files"></nav>
+        <div id="library-viewer" class="library-viewer" hidden>
+          <div class="library-viewer-head">
+            <code id="library-viewer-path"></code>
+            <button id="library-viewer-close" type="button" class="ghost">Close</button>
+          </div>
+          <div id="library-viewer-body" class="markdown"></div>
+        </div>
+      </div>
+    </section>
 
     <section id="claude-warning" class="banner banner-warn" hidden>
       The <code>claude</code> CLI was not found on PATH. Runs will fail until
@@ -62,6 +84,7 @@
         </label>
 
         <button id="run" type="button" class="run">Run</button>
+        <button id="stop" type="button" class="ghost stop" hidden disabled>Stop</button>
       </div>
     </section>
 

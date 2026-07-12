@@ -26,6 +26,7 @@ flowchart TD
     Prompts["prompts.py<br/>mode x tier x language templates"]
     Parsing["parsing.py<br/>extract code from markdown"]
     Sandbox["sandbox.py<br/>sample-I/O verify"]
+    Proc["proc_util.py<br/>job caps + tree kill (Windows)"]
     Storage["storage.py<br/>safe-slug writes"]
     Topic["topic_index.py<br/>skip learned topics"]
     Config["config.py<br/>env-overridable settings"]
@@ -42,6 +43,8 @@ flowchart TD
     Classifier --> Cli
     App --> Cli
     Cli --> Claude
+    Sandbox --> Proc
+    Cli --> Proc
     Storage --> Output
     App -.->|reads| Config
     Cli -.->|reads| Config
@@ -60,12 +63,15 @@ sequenceDiagram
 
     U->>F: POST /run {problem, mode, language, tier}
     F->>F: validate against allowlists (400 on bad input)
-    F->>CL: classify(problem)
-    CL->>CC: claude -p (one short call)
-    CC-->>CL: problem_type + topics
-    F->>CC: claude -p (stream the answer)
-    CC-->>F: text deltas (stream-json)
-    F-->>U: SSE data: delta (rendered live)
+    par classification (background thread, cheap model)
+        F->>CL: classify(problem)
+        CL->>CC: claude -p (one short call)
+        CC-->>CL: problem_type + topics
+    and answer stream
+        F->>CC: claude -p (stream the answer)
+        CC-->>F: text deltas (stream-json)
+        F-->>U: SSE data: delta (rendered live)
+    end
     Note over F,SB: Answer and Guided modes only
     F->>SB: verify_answer(code, sample I/O)
     SB-->>F: pass / fail / not_verified
@@ -77,15 +83,16 @@ sequenceDiagram
 
 | Module | Responsibility |
 | --- | --- |
-| `app.py` | Flask app factory and the streaming `/run` endpoint. Validates input, orchestrates classify → prompt → stream → verify → save, and emits SSE events. The Claude runner is injectable so tests never spawn a real process. |
+| `app.py` | Flask app factory, the streaming `/run` endpoint, and the read-only library browser (`GET /library` lists the output tree, `GET /library/file` serves one file as plain text). Validates input (including a loopback Host-header check), orchestrates classify → prompt → stream → verify → save, and emits SSE events. The Claude runner is injectable so tests never spawn a real process. |
 | `claude_cli.py` | The keystone. Wraps `claude -p --output-format stream-json`. The prompt is piped on **stdin** (never argv), and the stream-json output is parsed into incremental text deltas. |
 | `classifier.py` | One short Claude call to label the problem (a `problem_type` slug plus a topic list). Never raises; falls back to `uncategorized`. |
 | `prompts.py` | Prompt templates per mode x tier x language, with the always-on Big-O instruction. |
 | `parsing.py` | Pulls the runnable code block out of Claude's markdown answer. Flask-free so the sandbox can import it. |
-| `sandbox.py` | Best-effort sample-I/O verification: runs the generated Python against the problem's examples in a throwaway, secret-free directory with a timeout. |
+| `sandbox.py` | Best-effort sample-I/O verification: runs the generated Python against the problem's examples in a throwaway, secret-free directory with a timeout, capped output capture, and resource limits (a Windows Job Object caps memory and process count; POSIX rlimits elsewhere). |
+| `proc_util.py` | Windows process containment shared by `sandbox.py` and `claude_cli.py`: Job Object creation (memory / process-count / kill-on-close caps) and whole-tree kill. No-ops cleanly on POSIX. |
 | `storage.py` | Writes outputs under `output/`. The `slug()` function is the single containment chokepoint that keeps every write inside the output tree. |
 | `topic_index.py` | Records what Learning has covered and feeds it back so later runs skip and cross-link known topics. |
-| `config.py` | All machine-specific settings, read from the environment at call time (model id, `claude` binary, output dir, topic-index path). |
+| `config.py` | All machine-specific settings, read from the environment at call time (model ids, `claude` binary, output dir, topic-index path, run timeout). |
 
 ## Design decisions worth knowing
 

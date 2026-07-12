@@ -28,6 +28,7 @@ SSE event protocol (shared by every mode):
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -35,6 +36,7 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 
 import classifier
 import claude_cli
+import config
 import parsing
 import prompts
 import sandbox
@@ -51,10 +53,41 @@ HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE / "templates"
 STATIC = HERE / "static"
 
+# Bind address for `python app.py` (single source of truth — the Host-header
+# allowlist below keys off loopback hostnames, so no port is duplicated here).
+HOST = "127.0.0.1"
+PORT = 5000
+
+# Host-header allowlist (DNS-rebinding defense). Hostnames only, ANY port: a
+# rebinding attacker controls what IP their hostname resolves to, never the
+# hostname the victim's browser sends — so matching the hostname IS the whole
+# defense, and pinning a port would only break `flask run` on a non-default
+# port. Bracketed "[::1]" covers the IPv6 loopback literal.
+ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
+
+# Cap on how many already-learned topics get interpolated into the Learning
+# prompt (audit6 P2-12): the index grows forever, the prompt must not. The
+# stored list is insertion-ordered, so "the most recent N" is its tail.
+LEARNED_TOPICS_CAP = 50
+
+# Extensions the library browser (SP10) will list and serve. Everything the
+# app itself writes (storage._LANG_EXT + .md, .txt fallback, topic_index.json)
+# is covered; anything else in the output dir is invisible to the read path.
+LIBRARY_EXTENSIONS = frozenset({".md", ".py", ".cpp", ".java", ".txt", ".json"})
+
 # Allowlists — never pass an arbitrary string downstream to prompts/storage.
 MODES = ("answer", "learning", "guided")
 LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
 TIERS = prompts.TIERS                  # ("simple", "normal", "complex")
+
+
+def _hostname(host: str) -> str:
+    """The hostname part of a Host header value, port stripped, lowercased.
+    Handles the bracketed IPv6 form ("[::1]:5000" -> "[::1]")."""
+    host = host.strip().lower()
+    if host.startswith("["):
+        return host.partition("]")[0] + "]"
+    return host.rsplit(":", 1)[0]
 
 
 def _sse_text(delta: str) -> str:
@@ -83,22 +116,118 @@ def _verification_line(result) -> str:
     return f"⚠ not auto-verified ({note})" if note else "⚠ not auto-verified"
 
 
-def _verify_code(body: str, problem: str, language: str):
-    """Best-effort sandbox verification of the extracted code. Returns
-    ``(result, verdict_line)``; never raises (a verifier hiccup must not break a
-    run). ``result`` may be ``None`` if verification couldn't even start."""
+def _verify_code(code: str, problem: str, language: str):
+    """Best-effort sandbox verification of pre-extracted ``code`` (the caller
+    extracts exactly once — audit6 P2-13). Returns ``(result, verdict_line)``;
+    never raises (a verifier hiccup must not break a run). ``result`` may be
+    ``None`` if verification couldn't even start."""
     try:
-        code = parsing.extract_code(body, language)
         result = sandbox.verify_answer(code, problem, language)
         return result, _verification_line(result)
     except Exception as exc:  # noqa: BLE001 - verification is strictly best-effort
         return None, f"⚠ not auto-verified (verifier error: {exc})"
 
 
+def _library_files(root: Path) -> list[dict]:
+    """The library listing: every allowlisted file under ``root``, as
+    ``{"path": <relative, forward slashes>, "size": <bytes>}`` dicts, sorted by
+    path. A missing/empty root is an empty list, never an error."""
+    if not root.is_dir():
+        return []
+    files = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in LIBRARY_EXTENSIONS:
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue  # vanished mid-walk — skip, never 500 a listing
+        files.append({"path": path.relative_to(root).as_posix(), "size": size})
+    return files
+
+
+def _resolve_library_file(rel: str) -> Path | None:
+    """Resolve a request's ``path`` param against the output root, or ``None``.
+
+    This is the containment gate for the library's read path — the same rigor
+    as ``storage.slug`` on the write path. ``None`` (-> a uniform 404) unless
+    ALL of the following hold, so a rejection never leaks what exists:
+
+    * non-empty, no NUL, and not absolute / drive-anchored (``C:\\...``,
+      ``\\\\server\\share``, ``/etc``, ``\\foo``);
+    * ``(root / rel).resolve()`` — which collapses ``..`` (in slash OR
+      backslash form; Windows Path treats both as separators) and follows
+      symlinks — stays inside ``root.resolve()`` per ``is_relative_to``;
+    * the suffix is on ``LIBRARY_EXTENSIONS`` (checked on the RESOLVED path);
+    * it is an existing regular file (directories and reserved names fail).
+    """
+    if not rel or "\x00" in rel:
+        return None
+    root = config.output_dir().resolve()
+    try:
+        candidate = Path(rel)
+        if candidate.is_absolute() or candidate.drive:
+            return None
+        resolved = (root / candidate).resolve()
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_relative_to(root):
+        return None
+    if resolved.suffix.lower() not in LIBRARY_EXTENSIONS:
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+def _verification_detail(result) -> str:
+    """A compact markdown block describing each NON-passing sample (audit6
+    P2-9), appended to the SAVED reasoning ``.md`` only — the stream keeps the
+    one-line verdict (which already carries the pass/fail counts).
+
+    Empty string unless ``result`` is a fail/error with per-sample detail.
+    Input/expected/got/stderr are rendered in fenced blocks so multi-line
+    sample bodies (P1-1) stay readable; the sandbox has already truncated and
+    capped every captured field.
+    """
+    if result is None or getattr(result, "status", None) not in ("fail", "error"):
+        return ""
+    blocks = []
+    for entry in getattr(result, "detail", None) or []:
+        status = entry.get("status", result.status)
+        if status == "pass":
+            continue  # the verdict line's counts already cover passing samples
+        header = f"**Sample {entry.get('sample', '?')} — {status}**"
+        rc = entry.get("returncode")
+        if rc is not None:
+            header = header[:-2] + f" (exit code {rc})**"
+        lines = [header, ""]
+        for label, key in (("Input", "stdin"), ("Expected", "expected"), ("Got", "stdout")):
+            value = str(entry.get(key, "")).rstrip("\n")
+            lines += [f"{label}:", "```", value, "```"]
+        stderr = str(entry.get("stderr") or "").rstrip("\n")
+        if stderr:
+            lines += ["Stderr:", "```", stderr, "```"]
+        blocks.append("\n".join(lines))
+    if not blocks:
+        return ""
+    return "\n**Failed samples:**\n\n" + "\n\n".join(blocks) + "\n"
+
+
 def create_app(*, run_fn=claude_cli.run) -> Flask:
     """Build the Flask app. ``run_fn`` is the injectable Claude runner used by
     BOTH the classifier and the answer stream (tests pass a fake)."""
     app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
+
+    @app.before_request
+    def _reject_foreign_hosts():
+        # DNS-rebinding defense (audit P1-3): a malicious page can point its own
+        # hostname at 127.0.0.1 and drive /run (spending subscription budget and
+        # executing generated code in the sandbox). The browser still sends the
+        # attacker's hostname in Host, so rejecting non-loopback hostnames
+        # blocks the attack for every route.
+        if _hostname(request.host) not in ALLOWED_HOSTNAMES:
+            return jsonify({"error": "Forbidden host."}), 403
 
     @app.after_request
     def _no_cache(resp):
@@ -123,6 +252,28 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
         flag = "true" if available else "false"
         html = html.replace("__CLAUDE_AVAILABLE__", flag)
         return Response(html, mimetype="text/html")
+
+    @app.get("/library")
+    def library():
+        # Read-only listing of the study library (SP10). Missing/empty output
+        # dir is an empty listing — the library just hasn't accumulated yet.
+        return jsonify({"files": _library_files(config.output_dir().resolve())})
+
+    @app.get("/library/file")
+    def library_file():
+        # One library file's raw text. Served as text/plain (never HTML) so
+        # nothing in the library can execute in the browser; rendering happens
+        # client-side through the same hardened pipeline as run output. Every
+        # rejection is the same 404 — don't leak which check failed or what
+        # exists outside the root.
+        resolved = _resolve_library_file(request.args.get("path", ""))
+        if resolved is None:
+            return jsonify({"error": "Not found."}), 404
+        try:
+            body = resolved.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return jsonify({"error": "Not found."}), 404
+        return Response(body, mimetype="text/plain")
 
     @app.post("/run")
     def run():
@@ -164,6 +315,14 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     if delta:
                         full.append(delta)
                         yield _sse_text(delta)
+                # A stream that ends without producing any text is a failure,
+                # not an empty success (audit P2-1): raising here — one place
+                # covering all three modes — aborts before any save, and the
+                # last-resort handler turns it into the terminal SSE error.
+                # A client disconnect instead raises GeneratorExit at the yield
+                # above, so it can never reach (or be misreported by) this line.
+                if not full:
+                    raise RuntimeError("Claude returned an empty answer")
             finally:
                 # Publish whatever we accumulated even if the loop raised, so any
                 # cleanup path sees a consistent value (the raise still aborts the
@@ -174,8 +333,41 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
 
         def event_stream():
             try:
-                # 1) classify (same injected run_fn -> tests cover this call too)
-                cls = classifier.classify(problem, run_fn=run_fn)
+                # 1) classify on a background thread (audit6 P2-4). The short
+                #    classification round-trip used to complete BEFORE the first
+                #    answer delta streamed, delaying every run by a full Claude
+                #    call; its result is only needed at save time, so it now
+                #    runs concurrently with the answer stream (same injected
+                #    run_fn -> tests still cover it) on the cheap classifier
+                #    model. The pre-seeded fallback in ``cls_holder`` keeps the
+                #    run alive even if the thread dies: classify never raises by
+                #    contract, but a crash here must degrade to "uncategorized",
+                #    never abort the run.
+                cls_holder = [classifier.Classification(classifier.FALLBACK_TYPE, [])]
+
+                def _classify_in_background():
+                    try:
+                        cls_holder[0] = classifier.classify(
+                            problem, run_fn=run_fn, model=config.classifier_model()
+                        )
+                    except Exception:  # noqa: BLE001 - fallback already seeded above
+                        app.logger.exception("background classification failed")
+
+                cls_thread = threading.Thread(
+                    target=_classify_in_background,
+                    name="leetcoach-classify",
+                    daemon=True,
+                )
+                cls_thread.start()
+
+                def _classification():
+                    """Join the classifier thread and return its result. The
+                    join is deliberately unbounded: classify rides the same
+                    claude_cli machinery as every run, whose wall-clock watchdog
+                    (LEETCOACH_RUN_TIMEOUT) already bounds a hung CLI — a second
+                    timeout here would only mask that one."""
+                    cls_thread.join()
+                    return cls_holder[0]
 
                 # 2) build the mode-specific prompt; 3) stream + accumulate;
                 #    4) save with the mode's own storage call. Only these two
@@ -191,12 +383,17 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     code = parsing.extract_code(body, language)
 
                     # SP5: best-effort sample-I/O verification. Stream a short
-                    # verdict line and fold it into the saved reasoning .md.
-                    result, verdict = _verify_code(body, problem, language)
+                    # verdict line; the saved reasoning .md gets the verdict
+                    # PLUS the per-sample failure detail (audit6 P2-9).
+                    result, verdict = _verify_code(code, problem, language)
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")
-                    reasoning = body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                    reasoning = (
+                        body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                        + _verification_detail(result)
+                    )
 
+                    cls = _classification()  # join before the save needs its result
                     code_path, reasoning_path = storage.save_answer(
                         problem,
                         cls.problem_type,
@@ -209,8 +406,10 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                 elif mode == "learning":
                     # SP5: feed already-learned topics so Claude skips/cross-links
                     # covered tech, then record this run's topics afterward.
+                    # Capped to the most recent LEARNED_TOPICS_CAP so the
+                    # prompt stays bounded as the index grows (audit6 P2-12).
                     try:
-                        learned = topic_index.known_topics()
+                        learned = topic_index.known_topics(limit=LEARNED_TOPICS_CAP)
                     except Exception:  # noqa: BLE001 - index is best-effort
                         learned = []
                     prompt = prompts.build_learning(
@@ -219,6 +418,7 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                         already_learned_topics=learned or None,
                     )
                     yield from _stream_and_accumulate(prompt)
+                    cls = _classification()  # join before the save needs its result
                     paths = [storage.save_learning(problem, cls.problem_type, out[0])]
                     try:
                         topic_index.record(cls.problem_type, cls.topics)
@@ -229,11 +429,18 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     yield from _stream_and_accumulate(prompt)
                     body = out[0]
 
-                    # SP5: verify Guided's answer step the same way as Answer.
-                    result, verdict = _verify_code(body, problem, language)
+                    # SP5: verify Guided's answer step the same way as Answer —
+                    # extract the code from the full piped doc exactly once
+                    # (P2-13), and save verdict + failure detail (P2-9).
+                    code = parsing.extract_code(body, language)
+                    result, verdict = _verify_code(code, problem, language)
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")
-                    saved = body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                    saved = (
+                        body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                        + _verification_detail(result)
+                    )
+                    cls = _classification()  # join before the save needs its result
                     paths = [storage.save_guided(problem, cls.problem_type, saved)]
 
                 # 5) terminal success event
@@ -247,6 +454,9 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     done_payload["verification"] = verification
                 yield _sse_event("done", done_payload)
             except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
+                # Keep the full traceback in the server log (audit P2-8); the
+                # client still gets only the short message below.
+                app.logger.exception("run failed (mode=%s)", mode)
                 yield _sse_event("error", f"Run failed: {exc}")
 
         return Response(
@@ -266,8 +476,8 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    host = "127.0.0.1"
-    port = 5000
+    host = HOST
+    port = PORT
     if not claude_cli.is_available():
         print(
             "WARNING: the `claude` CLI was not found on PATH. The page will load "

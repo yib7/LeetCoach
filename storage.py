@@ -17,6 +17,13 @@ every user-supplied path segment through :func:`slug`, which strips path
 separators and ``..`` entirely before they can be interpreted as a directory.
 ``slug`` is the only thing standing between user input and the filesystem, so it
 is deliberately strict and well-tested.
+
+Second property: **no silent overwrites** (audit6 P2-11). Re-running with
+identical content is idempotent, but a target that already exists with
+*different* content (a re-run producing new material, or two long titles
+sharing the same 80-char slug) shifts the write to ``<stem>__2`` / ``__3`` /
+... instead of clobbering. An Answer's code + reasoning pair always shifts
+together, staying on one shared stem.
 """
 from __future__ import annotations
 
@@ -103,11 +110,56 @@ def _ensure_dir(path: Path) -> Path:
     return path
 
 
+def _same_content(path: Path, body: str) -> bool:
+    """True iff ``path`` already holds exactly ``body`` (UTF-8 text).
+
+    An unreadable/undecodable existing file counts as *different* — when in
+    doubt we suffix rather than risk clobbering something we could not read.
+    """
+    try:
+        return path.read_text(encoding="utf-8") == body
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def _resolve_slot(folder: Path, stem: str, files: list[tuple[str, str]]) -> list[Path]:
+    """Pick the collision-free stem for one logical entry (audit6 P2-11).
+
+    ``files`` is ``[(ext, body), ...]`` — one tuple per sibling file that must
+    share the stem (a Learning/Guided note is one file; an Answer is a
+    code + reasoning pair). Starting from the bare ``stem``, then ``<stem>__2``,
+    ``<stem>__3``, ... the first slot where EVERY sibling is either absent or
+    already identical wins. Resolving the whole group at once is what keeps an
+    Answer pair on one stem: if either sibling collides with different content,
+    both move to the next suffix together.
+    """
+    n = 1
+    while True:
+        s = stem if n == 1 else f"{stem}__{n}"
+        candidates = [folder / f"{s}.{ext}" for ext, _ in files]
+        if all(
+            not path.exists() or _same_content(path, body)
+            for path, (_, body) in zip(candidates, files)
+        ):
+            return candidates
+        n += 1
+
+
 def _write(path: Path, body: str) -> str:
     """Write ``body`` to ``path`` (UTF-8), creating parents; return str path."""
     _ensure_dir(path.parent)
     path.write_text(body, encoding="utf-8")
     return str(path)
+
+
+def _write_entry(folder: Path, stem: str, files: list[tuple[str, str]]) -> list[str]:
+    """Write one logical entry (one or more sibling files) without clobbering.
+
+    Identical re-runs are idempotent (same paths, no duplicates); a collision
+    with different content shifts the whole group to the next ``__N`` stem.
+    """
+    paths = _resolve_slot(folder, stem, files)
+    return [_write(path, body) for path, (_, body) in zip(paths, files)]
 
 
 def save_learning(problem: str, problem_type: str, body: str) -> str:
@@ -116,9 +168,8 @@ def save_learning(problem: str, problem_type: str, body: str) -> str:
     -> ``output/learning/<problem_type>_learning/<problem>.md``
     """
     root = config.output_dir()
-    folder = f"{slug(problem_type)}_learning"
-    path = root / "learning" / folder / f"{_problem_name(problem)}.md"
-    return _write(path, body)
+    folder = root / "learning" / f"{slug(problem_type)}_learning"
+    return _write_entry(folder, _problem_name(problem), [("md", body)])[0]
 
 
 def save_guided(problem: str, problem_type: str, body: str) -> str:
@@ -127,8 +178,8 @@ def save_guided(problem: str, problem_type: str, body: str) -> str:
     -> ``output/guided/<problem_type>/<problem>.md``
     """
     root = config.output_dir()
-    path = root / "guided" / slug(problem_type) / f"{_problem_name(problem)}.md"
-    return _write(path, body)
+    folder = root / "guided" / slug(problem_type)
+    return _write_entry(folder, _problem_name(problem), [("md", body)])[0]
 
 
 def save_answer(
@@ -152,6 +203,9 @@ def save_answer(
     ext = _LANG_EXT.get(slug(language), "txt")
     folder = root / "answers" / slug(problem_type)
     stem = f"{_problem_name(problem)}__{slug(tier)}"
-    code_path = folder / f"{stem}.{ext}"
-    reasoning_path = folder / f"{stem}.md"
-    return _write(code_path, code), _write(reasoning_path, reasoning)
+    # The pair is ONE logical entry: resolve the stem for both siblings at
+    # once so a collision on either moves code AND reasoning together.
+    code_path, reasoning_path = _write_entry(
+        folder, stem, [(ext, code), ("md", reasoning)]
+    )
+    return code_path, reasoning_path
