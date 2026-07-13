@@ -171,7 +171,10 @@
     return m[folder] || humanize(folder);
   }
   function langLabel(ext) {
-    var m = { py: "Python", cpp: "C++", java: "Java" };
+    // Accepts both a file extension (py/cpp/java — deriveRuns) and the run's
+    // wire language value (python/cpp/java — the summary meta); cpp/java are
+    // identical across both, only "python" vs "py" needs the extra key.
+    var m = { py: "Python", python: "Python", cpp: "C++", java: "Java" };
     return m[ext] || "—";
   }
   function relTime(mtime) {
