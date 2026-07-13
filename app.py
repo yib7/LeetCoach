@@ -130,8 +130,11 @@ def _verify_code(code: str, problem: str, language: str):
 
 def _library_files(root: Path) -> list[dict]:
     """The library listing: every allowlisted file under ``root``, as
-    ``{"path": <relative, forward slashes>, "size": <bytes>}`` dicts, sorted by
-    path. A missing/empty root is an empty list, never an error."""
+    ``{"path": <relative, forward slashes>, "size": <bytes>, "mtime": <epoch
+    seconds>}`` dicts, sorted by path. ``mtime`` lets the frontend show real
+    saved dates and derive the recent-runs list; it is an additive field, so
+    older callers that read only ``path``/``size`` are unaffected. A
+    missing/empty root is an empty list, never an error."""
     if not root.is_dir():
         return []
     files = []
@@ -139,10 +142,14 @@ def _library_files(root: Path) -> list[dict]:
         if not path.is_file() or path.suffix.lower() not in LIBRARY_EXTENSIONS:
             continue
         try:
-            size = path.stat().st_size
+            stat = path.stat()
         except OSError:
             continue  # vanished mid-walk — skip, never 500 a listing
-        files.append({"path": path.relative_to(root).as_posix(), "size": size})
+        files.append({
+            "path": path.relative_to(root).as_posix(),
+            "size": stat.st_size,
+            "mtime": stat.st_mtime,
+        })
     return files
 
 
