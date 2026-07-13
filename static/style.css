@@ -185,6 +185,7 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .tb.py{color:var(--mint);background:var(--mint-weak);border-color:var(--mint-line)}
 .tb.cpp{color:#c39bff;background:rgba(163,131,255,.13);border-color:rgba(163,131,255,.34)}
 .tb.java{color:var(--amber);background:var(--amber-weak);border-color:var(--amber-line)}
+.tb.md{color:#8fe0b4;background:var(--grn-weak);border-color:var(--grn-line)}
 .tcell{font:12.5px var(--mono);color:var(--tx3)}
 .tstatus{display:grid;place-items:center;color:var(--mint)}
 .tstatus svg{width:16px;height:16px}
@@ -245,8 +246,8 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .meta-label{font:600 11px var(--sans);letter-spacing:.07em;text-transform:uppercase;color:var(--tx4)}
 .files{display:flex;flex-direction:column;gap:8px}
 .savedrow{display:flex;align-items:center;gap:11px;background:var(--s2);border:1px solid var(--border);border-radius:var(--r2);padding:9px 10px 9px 12px}
-.fpath{flex:1;min-width:0;display:flex;font:12.5px var(--mono);color:var(--mint)}
-.fpath .a{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.fpath .b{white-space:nowrap;flex:0 0 auto}
+.fpath,.fname{flex:1;min-width:0;display:flex;font:12.5px var(--mono)}
+.fpath{color:var(--mint)}
 
 .errbox{margin-top:12px;border:1px solid var(--red-line);border-radius:var(--r2);background:var(--red-weak);padding:13px 15px;display:flex;gap:12px;align-items:flex-start}
 .errbox .ic{width:26px;height:26px;flex:0 0 auto;border-radius:7px;display:grid;place-items:center;background:rgba(242,88,94,.16);border:1px solid var(--red-line);color:var(--red)}
@@ -272,12 +273,16 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .filerow{display:flex;align-items:center;gap:10px;width:100%;text-align:left;cursor:pointer;border:1px solid transparent;background:transparent;border-radius:8px;padding:8px 10px;transition:background var(--d2) var(--ease),border-color var(--d2)}
 .filerow:hover{background:var(--s2)}
 .filerow.on{background:var(--grn-weak);border-color:var(--grn-line)}
-.fname{flex:1;min-width:0;display:flex;font:12.5px var(--mono);color:var(--tx2)}
+.fname{color:var(--tx2)}
 .filerow.on .fname{color:var(--tx)}
-.fname .a{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.fname .b{white-space:nowrap;flex:0 0 auto}
+.fpath .a,.fname .a{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fpath .b,.fname .b{white-space:nowrap;flex:0 0 auto}
 .lib-view{overflow:auto;display:flex;flex-direction:column;min-width:0}
 .vw-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 22px 14px;border-bottom:1px solid var(--border-soft);position:sticky;top:0;background:var(--s1);z-index:1}
-.vw-head code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:12.5px var(--mono);color:var(--mint)}
+.vw-main{flex:1;min-width:0}
+.vw-title{font:800 19px var(--sans);letter-spacing:-.01em;color:var(--tx)}
+.vw-sub{margin-top:9px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.vw-head code{display:block;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:11.5px var(--mono);color:var(--tx3)}
 .md.pad{padding:18px 22px 28px}
 
 @media (max-width:900px){.main{grid-template-columns:1fr}.sidebar{display:none}}

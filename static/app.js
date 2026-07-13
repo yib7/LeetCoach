@@ -161,10 +161,8 @@
     return { a: str.slice(0, str.length - tail), b: str.slice(str.length - tail) };
   }
   function typeBadge(ext) {
-    var e = el("span", "tb " + (ext || ""), ext || "?");
-    // .tb.md isn't in the stylesheet — match the mock's inline green swatch.
-    if (ext === "md") e.style.cssText = "color:#8fe0b4;background:var(--grn-weak);border-color:var(--grn-line)";
-    return e;
+    // Type class (tb md/py/cpp/java) is styled entirely in style.css.
+    return el("span", "tb " + (ext || ""), ext || "?");
   }
   function modeLabel(folder) {
     var m = { answers: "Answer", answer: "Answer", learning: "Learning", guided: "Guided" };
@@ -949,17 +947,12 @@
     var head = libViewer.querySelector(".vw-head");
     if (!head) return;
     var main = document.createElement("div");
-    main.className = "vw-main";
-    main.style.cssText = "flex:1;min-width:0";
+    main.className = "vw-main"; // styled in style.css (.vw-main / .vw-title / .vw-sub)
     vwTitle = el("div", "vw-title");
-    vwTitle.style.cssText = "font:800 19px var(--sans);letter-spacing:-.01em;color:var(--tx)";
     vwSub = el("div", "vw-sub");
-    vwSub.style.cssText = "margin-top:9px;display:flex;align-items:center;gap:8px;flex-wrap:wrap";
     head.insertBefore(main, libViewerPath); // keep close button as the trailing sibling
     main.appendChild(vwTitle);
     main.appendChild(vwSub);
-    libViewerPath.style.cssText =
-      "display:block;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx3);font:11.5px var(--mono)";
     main.appendChild(libViewerPath); // relocate the raw path under the humanized head
   })();
 
