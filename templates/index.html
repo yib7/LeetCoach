@@ -8,96 +8,215 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body data-claude-available="__CLAUDE_AVAILABLE__">
-  <main class="wrap">
+  <div class="app">
+
+    <!-- ===== top bar ===== -->
     <header class="topbar">
-      <div>
-        <h1>Leet<span class="accent">Coach</span></h1>
-        <p class="tagline">Paste a problem &middot; pick a mode &middot; let Claude coach you.</p>
+      <div class="brand">
+        <div class="mark"><span class="bk">[</span><span class="lc">lc</span><span class="bk">]</span></div>
+        <div class="wm">Leet<span class="b">Coach</span></div>
       </div>
-      <button id="library-toggle" type="button" class="ghost" aria-expanded="false">
-        Library
+      <nav class="nav" aria-label="Primary">
+        <a class="on" data-view="console" role="button" tabindex="0">Console</a>
+        <a data-view="library" role="button" tabindex="0">Library</a>
+        <a class="inert" aria-disabled="true">Stats</a>
+      </nav>
+      <div class="tb-spacer"></div>
+      <div class="tb-search inert" aria-hidden="true" title="Search is not available yet">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+        <span class="ph">Search…</span>
+        <span class="k"><kbd>&#8984;</kbd><kbd>K</kbd></span>
+      </div>
+      <span class="tb-status" id="claude-status">
+        <span class="dot"></span>
+        <span class="tb-status-label">claude CLI</span>
+      </span>
+      <button class="iconbtn inert" type="button" title="Keyboard shortcuts" aria-hidden="true" tabindex="-1">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>
       </button>
     </header>
 
-    <section id="library" class="library" hidden>
-      <div class="library-head">
-        <h2>Study library</h2>
-        <span id="library-count" class="library-count"></span>
-      </div>
-      <div class="library-body">
-        <nav id="library-tree" class="library-tree" aria-label="Library files"></nav>
-        <div id="library-viewer" class="library-viewer" hidden>
-          <div class="library-viewer-head">
-            <code id="library-viewer-path"></code>
-            <button id="library-viewer-close" type="button" class="ghost">Close</button>
-          </div>
-          <div id="library-viewer-body" class="markdown"></div>
-        </div>
-      </div>
-    </section>
+    <div class="main">
 
-    <section id="claude-warning" class="banner banner-warn" hidden>
-      The <code>claude</code> CLI was not found on PATH. Runs will fail until
-      Claude Code is installed and authenticated (or set
-      <code>LEETCOACH_CLAUDE_BIN</code>), then reload this page.
-    </section>
-
-    <section class="composer">
-      <div class="problem-head">
-        <label for="problem">Problem</label>
-        <button id="paste" type="button" class="ghost" title="Paste from clipboard">
-          Paste from clipboard
+      <!-- ===== sidebar ===== -->
+      <aside class="sidebar">
+        <button class="newrun" id="new-run" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+          New run
         </button>
-      </div>
-      <textarea
-        id="problem"
-        rows="9"
-        placeholder="Paste the full LeetCode problem here (title, description, examples, constraints)…"
-      ></textarea>
+        <nav class="side-nav" aria-label="Sections">
+          <a class="on" data-view="console" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-4 6 4 6M16 6l4 6-4 6"/></svg> Console</a>
+          <a data-view="library" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4h3v16H5zM10.5 4h3v16h-3z"/><path d="m16 5 3 .8-3.2 14-3-.8z"/></svg> Library</a>
+          <a class="inert" aria-disabled="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10l2 2h6.5A1.5 1.5 0 0 1 20 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18Z"/></svg> Bookmarks</a>
+          <a class="inert" aria-disabled="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-3"/></svg> Stats</a>
+        </nav>
+        <div class="side-lbl">Recent runs <a class="inert" aria-disabled="true">Clear</a></div>
+        <div class="recents" id="recents" aria-label="Recent runs"></div>
+        <div class="side-foot">
+          <div class="t"><span class="dot"></span> Local &amp; offline</div>
+          <div class="d">Runs stream from the claude CLI on your machine. <kbd>?</kbd> for shortcuts.</div>
+        </div>
+      </aside>
 
-      <div class="controls">
-        <label class="field">
-          <span>Mode</span>
-          <select id="mode">
-            <option value="answer" selected>Answer</option>
-            <option value="learning">Learning</option>
-            <option value="guided">Guided Learning</option>
-          </select>
-        </label>
+      <!-- ===== content ===== -->
+      <main class="content">
 
-        <label class="field">
-          <span>Language</span>
-          <select id="language">
-            <option value="python" selected>Python</option>
-            <option value="cpp">C++</option>
-            <option value="java">Java</option>
-          </select>
-        </label>
+        <!-- claude CLI availability warning (JS reveals from body flag) -->
+        <section id="claude-warning" class="banner" hidden>
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 4 3 19h18Z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg></div>
+          <div>
+            <div class="bt">The <code>claude</code> CLI was not found on PATH</div>
+            <div class="bd">Runs will fail until Claude Code is installed and authenticated (or set
+              <code>LEETCOACH_CLAUDE_BIN</code>), then reload this page.</div>
+          </div>
+        </section>
 
-        <label class="field" id="tier-field">
-          <span>Tier</span>
-          <select id="tier">
-            <option value="simple">Simple</option>
-            <option value="normal" selected>Normal</option>
-            <option value="complex">Complex</option>
-          </select>
-        </label>
+        <!-- ===== CONSOLE VIEW ===== -->
+        <section id="view-console">
+          <div class="ctx">
+            <div>
+              <h1>Console</h1>
+              <div class="sub">Paste a problem, pick a mode, and <b>run</b> — coaching streams in and saves to your library.</div>
+            </div>
+            <div class="r">
+              <span class="hint"><span class="kbd"><kbd>&#8984;</kbd><kbd>&#8629;</kbd></span> to run</span>
+            </div>
+          </div>
 
-        <button id="run" type="button" class="run">Run</button>
-        <button id="stop" type="button" class="ghost stop" hidden disabled>Stop</button>
-      </div>
-    </section>
+          <!-- topic chip strip (JS fills from the real library) -->
+          <div class="topics" id="topics"></div>
 
-    <section class="results">
-      <div id="status" class="status" hidden></div>
-      <div id="meta" class="meta" hidden></div>
-      <article id="output" class="output markdown" aria-live="polite"></article>
-    </section>
+          <!-- composer -->
+          <section class="panel">
+            <div class="p-head">
+              <span class="p-title">Problem <span class="tag">input</span></span>
+              <div class="p-tools">
+                <button class="btn ghost" id="sample" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3h6l1 4H8zM8 7h8l1 14H7z"/></svg> Sample: Two Sum</button>
+                <button class="btn ghost" id="clear" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6 6 18"/></svg> Clear</button>
+                <button class="btn green" id="paste" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/></svg> Paste</button>
+              </div>
+            </div>
+            <div class="editor" id="editor">
+              <div class="gutter" aria-hidden="true"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span></div>
+              <textarea id="problem" class="problem" spellcheck="false"
+                placeholder="Paste the full LeetCode problem here — title, description, examples, and constraints…"></textarea>
+            </div>
+            <div class="toolbar">
+              <div class="tgroup" data-seg="mode">
+                <span class="tlabel">Mode</span>
+                <div class="seg" data-seg="mode" role="group" aria-label="Mode">
+                  <button class="seg-btn on" type="button" data-val="answer">Answer</button>
+                  <button class="seg-btn" type="button" data-val="learning">Learning</button>
+                  <button class="seg-btn" type="button" data-val="guided">Guided</button>
+                </div>
+              </div>
+              <div class="tgroup" data-seg="lang">
+                <span class="tlabel">Lang</span>
+                <div class="seg" data-seg="lang" role="group" aria-label="Language">
+                  <button class="seg-btn on" type="button" data-val="python">Python</button>
+                  <button class="seg-btn" type="button" data-val="cpp">C++</button>
+                  <button class="seg-btn" type="button" data-val="java">Java</button>
+                </div>
+              </div>
+              <div class="tgroup" data-seg="tier">
+                <span class="tlabel">Tier</span>
+                <div class="seg" data-seg="tier" role="group" aria-label="Tier">
+                  <button class="seg-btn" type="button" data-val="simple">Simple</button>
+                  <button class="seg-btn on" type="button" data-val="normal">Normal</button>
+                  <button class="seg-btn" type="button" data-val="complex">Complex</button>
+                </div>
+              </div>
+              <div class="tb-spacer"></div>
+              <button class="btn-run" id="run" type="button">Run <span class="g">&#9656;</span></button>
+            </div>
+          </section>
 
-    <footer class="foot">
-      Output is saved to your local <code>output/</code> study library.
-    </footer>
-  </main>
+          <!-- ===== session lifecycle (JS shows/hides these) ===== -->
+          <div id="session">
+            <div class="section-h">
+              <div class="l"><h2>Session</h2><span class="n" data-session-state>idle</span></div>
+            </div>
+
+            <!-- idle placeholder -->
+            <div class="console-idle">
+              <div class="prompt"><span class="p">leetcoach</span> &#9656; waiting for a run<span class="c"></span></div>
+              <div class="steps">
+                <div class="st"><span class="k">1</span> Paste</div>
+                <div class="st"><span class="k">2</span> Configure</div>
+                <div class="st"><span class="k">3</span> Run &amp; save</div>
+              </div>
+            </div>
+
+            <!-- run header (sibling ABOVE #output; JS writes label/chips/timer, toggles state class) -->
+            <div class="runhead" hidden>
+              <span class="rh-state"><span class="pulse"></span> <span class="rh-label">Running</span></span>
+              <div class="rh-chips"></div>
+              <span class="spacer"></span>
+              <span class="timer"></span>
+              <button id="stop" class="btn-stop" type="button" hidden disabled><span class="sq"></span> Stop</button>
+            </div>
+
+            <!-- streamed output node (its innerHTML is replaced every frame; keep chrome OUTSIDE it) -->
+            <div class="outwrap" hidden>
+              <div class="obody">
+                <article id="output" class="output md" aria-live="polite"></article>
+              </div>
+            </div>
+
+            <!-- streaming caret (sibling BELOW #output) -->
+            <div class="stream-foot" hidden><span class="caret"></span> <span class="stream-note">streaming…</span></div>
+
+            <!-- terminal states (JS fills + reveals) -->
+            <div class="summary" hidden></div>
+            <div class="errbox" hidden></div>
+            <div class="stopmark" hidden></div>
+          </div>
+
+          <!-- recent runs table (JS appends .trow rows into #recent-table) -->
+          <div class="section-h">
+            <div class="l"><h2>Recent runs</h2><span class="n" data-recent-count>output/</span></div>
+            <div class="filterpills" data-filter-group="recent">
+              <button class="fp on" type="button" data-recent-filter="all">All</button>
+              <button class="fp" type="button" data-recent-filter="answer">Answer</button>
+              <button class="fp" type="button" data-recent-filter="learning">Learning</button>
+              <button class="fp" type="button" data-recent-filter="guided">Guided</button>
+            </div>
+          </div>
+          <div id="recent-table" class="table">
+            <div class="thead"><span>Diff.</span><span>Problem</span><span>Topic</span><span>Mode</span><span>Lang</span><span>Saved</span><span></span></div>
+          </div>
+        </section>
+
+        <!-- ===== LIBRARY VIEW ===== -->
+        <section id="view-library" hidden>
+          <div class="ctx">
+            <div>
+              <h1>Study Library</h1>
+              <div class="sub">Saved runs in <b>output/</b> — grouped by problem type.</div>
+            </div>
+            <div class="r">
+              <div class="filterpills" data-filter-group="library">
+                <button class="fp on" type="button" data-lib-filter="all">All</button>
+                <button class="fp" type="button" data-lib-filter="md">Markdown</button>
+                <button class="fp" type="button" data-lib-filter="code">Code</button>
+              </div>
+            </div>
+          </div>
+          <div class="lib">
+            <nav id="library-tree" class="lib-tree" aria-label="Library files"></nav>
+            <div id="library-viewer" class="lib-view" hidden>
+              <div class="vw-head">
+                <code id="library-viewer-path"></code>
+                <button id="library-viewer-close" class="mini" type="button">Close</button>
+              </div>
+              <div id="library-viewer-body" class="md pad"></div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
 
   <script src="/static/vendor/marked.min.js"></script>
   <script src="/static/vendor/highlight.min.js"></script>
