@@ -740,10 +740,14 @@
       // Final full render outside the rAF path so the last chunk is never lost
       // and the last code block loses its `.partial` marker.
       render(acc);
-      // Stream closed without a terminal event (shouldn't happen per the server
-      // contract) — settle to a sensible state instead of a stuck spinner.
+      // Stream closed without a terminal event — settle to a sensible state
+      // instead of a stuck spinner. A user Stop can end the stream *gracefully*
+      // (reader resolves done rather than rejecting AbortError), so the catch
+      // above never fires; check stoppedByUser here so Stop still reads as
+      // "stopped", not a spurious "done".
       if (!terminal) {
-        if (acc) enterDone({ paths: [], topics: [] }, meta);
+        if (stoppedByUser) enterStopped();
+        else if (acc) enterDone({ paths: [], topics: [] }, meta);
         else enterIdle();
       }
       setRunBtn(false);
