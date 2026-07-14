@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-14
+
+### Changed
+- **UI restructured into an application shell.** The single-column page became a fixed
+  top bar, a left sidebar, and a fluid content column with two views: a **Console** (paste,
+  configure, run, and watch the answer stream) and a **Library** (browse everything saved
+  under `output/`). Mode, language, and tier are now segmented button controls.
+- The run header shows a live elapsed timer, the run's mode/language/tier chips, and the
+  Stop button while a run streams; a caret marks the live stream; finishing renders a
+  summary card with the problem type, topics, verification result, and saved-file paths.
+- The Console sidebar's recent-runs list, the recent-runs table, and the topic strip are
+  derived live from your real `output/` library. Difficulty renders neutral (the tool has
+  no LeetCode difficulty signal).
+
+### Added
+- `GET /library` now includes each file's modification time (`mtime`) so the UI can show
+  real saved dates. Backward-compatible additive field.
+
+### Notes
+- Runs work exactly as before: the `claude` CLI dependency, the SSE streaming pipeline,
+  Answer-mode sandbox verification, the `output/` storage layout, and the `/run` request
+  contract are all unchanged. The suite stays at 224 tests, still mocking the subprocess.
+
 ## [1.1.0] - 2026-07-10
 
 ### Added

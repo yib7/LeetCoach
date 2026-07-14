@@ -10,7 +10,7 @@ generated Python against the problem's own sample I/O to tell you whether the so
 actually passes. No API key: it drives your existing Claude Code subscription through the
 CLI.
 
-![LeetCoach streaming an Answer, verifying it against the problem's sample I/O, and browsing the saved study library](docs/media/demo.gif)
+![LeetCoach in the Console streaming an Answer token by token, then the Library showing a saved solution with its walkthrough, Big-O line, and syntax-highlighted code](docs/media/demo.gif)
 
 ## What it does
 
@@ -24,10 +24,11 @@ CLI.
   `Output:` examples in a throwaway sandbox and reported as PASS / FAIL.
 - **Builds a library.** Every run is saved under `output/`, organized by problem type, and
   a topic index lets Learning skip and cross-link what you have already studied. A
-  read-only Library panel in the UI browses everything you have saved.
+  read-only Library tab browses everything you have saved, and the Console sidebar lists
+  your recent runs.
 
 <p align="center">
-  <img src="docs/media/screenshot.png" alt="A finished Answer run: syntax-highlighted solution code, an explicit Big-O complexity line, and a passing sample-I/O check" width="640">
+  <img src="docs/media/screenshot.png" alt="The Library viewer showing a saved Answer for Squares of a Sorted Array: its two-pointer walkthrough, an explicit Big-O complexity line, and the syntax-highlighted Python solution" width="760">
 </p>
 
 ## How it works (the `claude` CLI dependency)
@@ -123,7 +124,7 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Language | Python 3.12+ |
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
-| Front end | Vendored `marked` + `highlight.js`, dark single-page UI |
+| Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console + Library) |
 | Tests / lint | pytest (224 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
