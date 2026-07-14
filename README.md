@@ -24,7 +24,8 @@ CLI.
   `Output:` examples in a throwaway sandbox and reported as PASS / FAIL.
 - **Builds a library.** Every run is saved under `output/`, organized by problem type, and
   a topic index lets Learning skip and cross-link what you have already studied. A
-  read-only Library panel in the UI browses everything you have saved.
+  read-only Library tab browses everything you have saved, and the Console sidebar lists
+  your recent runs.
 
 <p align="center">
   <img src="docs/media/screenshot.png" alt="A finished Answer run: syntax-highlighted solution code, an explicit Big-O complexity line, and a passing sample-I/O check" width="640">
@@ -123,7 +124,7 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Language | Python 3.12+ |
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
-| Front end | Vendored `marked` + `highlight.js`, dark single-page UI |
+| Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console + Library) |
 | Tests / lint | pytest (224 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
