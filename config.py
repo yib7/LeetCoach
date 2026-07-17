@@ -8,6 +8,10 @@ These knobs are the only machine-specific settings the app needs:
 - ``LEETCOACH_CLASSIFIER_MODEL`` — model for the short classification call (default
                               ``haiku`` — classifying a problem is trivial, so the
                               cheapest model saves budget on every run).
+- ``LEETCOACH_QUICK_ASK_MODEL`` — model for the Quick Ask lookup (default
+                              ``haiku`` — a syntax/stdlib question is a trivial
+                              lookup, so the cheapest model keeps the feature
+                              near-free and spares the subscription budget).
 - ``LEETCOACH_CLAUDE_BIN``  — name/path of the ``claude`` executable (default
                               ``claude``; set an absolute path if it is not on PATH).
 - ``LEETCOACH_OUTPUT_DIR``  — where the study library is written (default: the
@@ -29,6 +33,7 @@ from pathlib import Path
 # Defaults live here so they are documented in one place and referenced by name.
 DEFAULT_MODEL = "claude-opus-4-8"
 DEFAULT_CLASSIFIER_MODEL = "haiku"  # classification is trivial; cheapest model wins
+DEFAULT_QUICK_ASK_MODEL = "haiku"  # a syntax lookup is trivial; cheapest model wins
 DEFAULT_CLAUDE_BIN = "claude"
 # Anchored next to this file (audit6 P2-10): a CWD-relative default would let
 # `flask run` (or any launch from another directory) silently fork the study
@@ -50,6 +55,17 @@ def classifier_model() -> str:
     alias (``haiku``) regardless of which model produces the study material.
     """
     return os.environ.get("LEETCOACH_CLASSIFIER_MODEL", DEFAULT_CLASSIFIER_MODEL)
+
+
+def quick_ask_model() -> str:
+    """Model id/alias for the Quick Ask lookup call.
+
+    Separate from :func:`model` for the same reason as :func:`classifier_model`:
+    a Quick Ask is a trivial syntax/stdlib question, so it defaults to the
+    cheapest alias (``haiku``) regardless of which model produces the study
+    material. Override with ``LEETCOACH_QUICK_ASK_MODEL``.
+    """
+    return os.environ.get("LEETCOACH_QUICK_ASK_MODEL", DEFAULT_QUICK_ASK_MODEL)
 
 
 def claude_bin() -> str:

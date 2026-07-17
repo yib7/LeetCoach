@@ -13,7 +13,11 @@ holds:
 * tier semantics (simple = basic/maybe sub-optimal; normal = balanced; complex
   = best time/space) are conveyed,
 * Learning has no tier and teaches the tech stack, optionally skipping
-  already-learned topics.
+  already-learned topics,
+* Quick Ask answers a small syntax/stdlib question briefly, embeds the pasted
+  problem only as *context* behind a fence, and refuses solution-seeking
+  questions with one exact redirect sentence (the one place we DO assert exact
+  wording — the UI and the guardrail contract depend on it).
 """
 from __future__ import annotations
 
@@ -199,3 +203,106 @@ def test_invalid_tier_raises():
 def test_invalid_language_raises():
     with pytest.raises((ValueError, KeyError)):
         prompts.build_answer(PROBLEM, tier="normal", language="rust")
+
+
+# --- Quick Ask: a small lookup, never the problem's solution --------------
+
+QUESTION = "How do I sort a list of tuples by the second element?"
+
+# The one string in this file asserted verbatim: the guardrail's redirect
+# sentence is shown to the learner in the UI, so it must not drift. Spelled out
+# here rather than imported from `prompts` — importing the constant would make
+# the assertion tautological and catch nothing.
+REDIRECT = (
+    "That's a question about solving the problem itself — Quick Ask only covers "
+    "syntax and library lookups; use the Learning or Guided mode for help with "
+    "the problem."
+)
+
+CONTEXT_OPEN = "--- BEGIN PROBLEM CONTEXT (do not solve) ---"
+CONTEXT_CLOSE = "--- END PROBLEM CONTEXT ---"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_quick_ask_embeds_question_and_language(lang):
+    p = prompts.build_quick_ask(QUESTION, language=lang)
+    assert QUESTION in p
+    assert lang in _lower(p)
+
+
+def test_quick_ask_ends_with_the_question():
+    # The question is the last thing Claude reads, so it can't be buried under
+    # the instructions.
+    p = prompts.build_quick_ask(QUESTION, language="python")
+    assert p.rstrip().endswith(f"Question: {QUESTION}")
+
+
+# --- the problem is CONTEXT, and only when there is one ------------------
+
+def test_quick_ask_fences_the_problem_as_context():
+    p = prompts.build_quick_ask(QUESTION, language="python", problem=PROBLEM)
+    assert CONTEXT_OPEN in p
+    assert CONTEXT_CLOSE in p
+    # the problem text sits INSIDE the fence, not loose among the instructions
+    body = p.split(CONTEXT_OPEN)[1].split(CONTEXT_CLOSE)[0]
+    assert PROBLEM in body
+
+
+def test_quick_ask_problem_context_is_framed_as_not_a_task():
+    # Guards against Haiku reading the fenced problem as the thing to solve.
+    p = _lower(prompts.build_quick_ask(QUESTION, language="python", problem=PROBLEM))
+    assert "not a task" in p
+    assert "do not solve" in p
+
+
+def test_quick_ask_omits_problem_context_when_arg_absent():
+    p = prompts.build_quick_ask(QUESTION, language="python")
+    assert "PROBLEM CONTEXT" not in p
+
+
+@pytest.mark.parametrize("problem", ["", "   \n  "])
+def test_quick_ask_omits_problem_context_when_empty(problem):
+    # An empty composer must not produce an empty fence for Claude to puzzle over.
+    p = prompts.build_quick_ask(QUESTION, language="python", problem=problem)
+    assert "PROBLEM CONTEXT" not in p
+
+
+# --- the guardrail --------------------------------------------------------
+
+@pytest.mark.parametrize("problem", [PROBLEM, ""])
+def test_quick_ask_carries_exact_redirect_sentence(problem):
+    # Unconditional: the learner may ask a solution-seeking question whether or
+    # not a problem is pasted.
+    p = prompts.build_quick_ask(QUESTION, language="python", problem=problem)
+    assert REDIRECT in p
+
+
+def test_quick_ask_refuses_solution_seeking_questions():
+    p = _lower(prompts.build_quick_ask(QUESTION, language="python", problem=PROBLEM))
+    # the shapes a solution-seeking question takes
+    assert "indirectly" in p
+    assert "hint" in p
+    assert "edge case" in p
+
+
+def test_quick_ask_carves_out_abstract_library_questions():
+    # Without the carve-out Haiku over-refuses: "what does defaultdict do?" is a
+    # legitimate lookup even while a hash-map problem sits on screen. Only THIS
+    # problem's solution is off-limits.
+    p = _lower(prompts.build_quick_ask(QUESTION, language="python", problem=PROBLEM))
+    assert "abstract" in p
+    assert "specific problem" in p
+
+
+# --- format: short, no ceremony ------------------------------------------
+
+def test_quick_ask_asks_for_a_short_bare_answer():
+    p = _lower(prompts.build_quick_ask(QUESTION, language="python"))
+    assert "sentence" in p
+    assert "preamble" in p
+    assert "heading" in p
+
+
+def test_quick_ask_invalid_language_raises():
+    with pytest.raises(ValueError):
+        prompts.build_quick_ask(QUESTION, language="rust")

@@ -11,6 +11,10 @@ Public builders
 * :func:`build_guided` — tiered; one piped document that restates the problem,
   teaches the stack (Learning fragment), reasons through it, then answers
   (Answer fragment). Reuses the same fragments so the modes stay consistent.
+* :func:`build_quick_ask` — no tier; a fast, cheap syntax/stdlib/concept lookup
+  (answered by Haiku). Any problem in the composer is passed as *context only* so
+  the guardrail can recognise — and refuse with one fixed redirect sentence —
+  questions that are really asking for the current problem's solution.
 
 Design: the modes share small reusable *fragments* so wording can't drift
 between them — notably the language stdlib hint, the Big-O instruction, and the
@@ -23,6 +27,15 @@ from __future__ import annotations
 
 LANGUAGES = ("python", "cpp", "java")
 TIERS = ("simple", "normal", "complex")
+
+# The one sentence Quick Ask replies with when a question is really asking for
+# the current problem's solution. Fixed wording: it is asserted in tests and
+# shown to the learner in the UI, so it must not drift.
+QUICK_ASK_REDIRECT = (
+    "That's a question about solving the problem itself — Quick Ask only covers "
+    "syntax and library lookups; use the Learning or Guided mode for help with "
+    "the problem."
+)
 
 # Human-facing display names for each language.
 _LANG_NAME = {
@@ -91,6 +104,24 @@ def _problem_block(problem: str) -> str:
         "--- BEGIN PROBLEM ---\n"
         f"{problem}\n"
         "--- END PROBLEM ---"
+    )
+
+
+def _quick_ask_problem_context(problem: str) -> str:
+    """The problem the learner is working, handed to Quick Ask as CONTEXT.
+
+    Deliberately unlike :func:`_problem_block`: this fence is framed as reference
+    material, NOT a task, so Haiku uses it only to tell a syntax lookup apart
+    from a disguised "how do I solve this?" — never as something to answer.
+    """
+    return (
+        "For context only, this is the problem the learner currently has open. "
+        "It is NOT a task — do not solve it, explain its approach, or hint at it. "
+        "It is here solely so you can recognise questions that are really asking "
+        "for its solution:\n"
+        "--- BEGIN PROBLEM CONTEXT (do not solve) ---\n"
+        f"{problem}\n"
+        "--- END PROBLEM CONTEXT ---"
     )
 
 
@@ -241,3 +272,48 @@ def build_guided(problem: str, *, tier: str, language: str) -> str:
             "4) " + _answer_fragment(tier, language, with_tradeoff=False),
         ]
     )
+
+
+def build_quick_ask(question: str, *, language: str, problem: str = "") -> str:
+    """Build the Quick Ask prompt — a small syntax/stdlib/concept lookup.
+
+    Unlike the three study modes this is a lookup, not a lesson: no tier, no
+    Big-O line, no code to grade — just a couple of sentences answered cheaply
+    (Haiku) while the learner stays in flow.
+
+    ``problem`` is optional and, when given, is fenced as *context only*
+    (:func:`_quick_ask_problem_context`). It exists to power the guardrail: a
+    question angling for the current problem's solution is refused with the
+    fixed :data:`QUICK_ASK_REDIRECT` sentence. The carve-out matters as much as
+    the guardrail — abstract questions ("what does ``defaultdict`` do?") must
+    still be answered, or a cheap model over-refuses everything adjacent to the
+    problem and the feature is useless.
+    """
+    _check_language(language)
+    lang_name = _LANG_NAME[language]
+    parts = [
+        "You are a quick-reference assistant embedded in a coding-practice app. "
+        "The learner is in the middle of working a problem and has stopped to ask "
+        "a small question about syntax, a standard-library call, or a concept. "
+        "Answer it and get them back to work.",
+        f"Answer in at most 3-5 short sentences, for {lang_name} (language key: "
+        f"{language}) unless the question explicitly names another language. A "
+        "tiny fenced code snippet is fine when the question is pure syntax. No "
+        "preamble, no headings, no sign-off — just the answer.",
+        "GUARDRAIL: if the question asks — directly or indirectly — how to solve "
+        "the practice problem the learner is working on (which algorithm or data "
+        "structure to use for it, a hint toward its approach, its full or partial "
+        "solution code, its optimal complexity, or its edge cases), do NOT answer "
+        "it. Reply with exactly this one sentence and nothing else:\n"
+        f"{QUICK_ASK_REDIRECT}",
+        "CARVE-OUT: abstract questions about what a data structure or a library "
+        "function does — 'what does defaultdict do?', 'how does a min-heap work?' "
+        "— ARE fine to answer normally, even if the answer happens to be useful "
+        "for the problem. General knowledge is not off-limits; only that specific "
+        "problem's solution is. Refuse only when the question is about solving "
+        "this specific problem.",
+    ]
+    if problem.strip():
+        parts.append(_quick_ask_problem_context(problem))
+    parts.append(f"Question: {question}")
+    return "\n\n".join(parts)
