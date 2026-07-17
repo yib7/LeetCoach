@@ -779,6 +779,9 @@
   var qaPanel = $("quickask");
   var qaBusy = false;
 
+  // Same one-time delegated Copy listener the other markdown surfaces get.
+  if (qaAnswer) qaAnswer.addEventListener("click", handleCopyCode);
+
   function showQaAnswer(md) {
     qaAnswer.classList.remove("err");
     if (window.marked) {
