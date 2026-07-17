@@ -766,6 +766,108 @@
   });
 
   // =========================================================================
+  // Quick Ask — one-shot Haiku Q&A, fully independent of the run stream.
+  // Answers are ephemeral (each replaces the last); errors render as PLAIN
+  // TEXT via textContent, success through the same hardened marked pipeline
+  // as render().
+  // =========================================================================
+  var qaInput = $("qa-input");
+  var qaAskBtn = $("qa-ask");
+  var qaAnswer = $("qa-answer");
+  var qaToggle = $("qa-toggle");
+  var qaBody = $("qa-body");
+  var qaPanel = $("quickask");
+  var qaBusy = false;
+
+  function showQaAnswer(md) {
+    qaAnswer.classList.remove("err");
+    if (window.marked) {
+      qaAnswer.innerHTML = marked.parse(md); // hardened renderer (see marked.use above)
+      if (window.hljs) {
+        qaAnswer.querySelectorAll("pre code").forEach(function (b) {
+          try { hljs.highlightElement(b); } catch (e) { /* noop */ }
+        });
+      }
+      decorateCode(qaAnswer, false);
+    } else {
+      qaAnswer.textContent = md;
+    }
+    qaAnswer.hidden = false;
+  }
+
+  function showQaError(msg) {
+    qaAnswer.classList.add("err");
+    qaAnswer.textContent = msg; // server/network strings NEVER hit innerHTML
+    qaAnswer.hidden = false;
+  }
+
+  async function quickAsk() {
+    if (qaBusy) return; // one quick-ask in flight at a time
+    var question = qaInput.value.trim();
+    if (!question) return;
+
+    qaBusy = true;
+    qaAskBtn.disabled = true;
+    qaAskBtn.textContent = "Asking…";
+
+    // Own controller — completely independent of the main run's abort state.
+    var controller = new AbortController();
+    function abortOnUnload() { controller.abort(); }
+    window.addEventListener("pagehide", abortOnUnload);
+    window.addEventListener("beforeunload", abortOnUnload);
+
+    try {
+      var resp = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: question,
+          language: activeVal("lang"),
+          problem: problemEl.value.trim(),
+        }),
+        signal: controller.signal,
+      });
+      var data = await resp.json().catch(function () { return {}; });
+      if (resp.ok) {
+        showQaAnswer(String(data.answer || ""));
+      } else {
+        showQaError(data.error || "Request rejected (" + resp.status + ").");
+      }
+    } catch (e) {
+      if (!(e && e.name === "AbortError")) {
+        showQaError("Network error: " + (e && e.message));
+      }
+    } finally {
+      window.removeEventListener("pagehide", abortOnUnload);
+      window.removeEventListener("beforeunload", abortOnUnload);
+      qaBusy = false;
+      qaAskBtn.disabled = false;
+      qaAskBtn.textContent = "Ask";
+    }
+  }
+
+  if (qaAskBtn) qaAskBtn.addEventListener("click", quickAsk);
+  if (qaInput) {
+    // Plain Enter asks; modified Enter falls through to the global ⌘/Ctrl+Enter
+    // run shortcut untouched.
+    qaInput.addEventListener("keydown", function (e) {
+      if ((e.key === "Enter" || e.keyCode === 13) && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        quickAsk();
+      }
+    });
+  }
+  if (qaToggle && qaBody) {
+    qaToggle.addEventListener("click", function () {
+      var collapsed = !qaBody.hidden;
+      qaBody.hidden = collapsed;
+      if (qaPanel) qaPanel.classList.toggle("collapsed", collapsed);
+      qaToggle.textContent = collapsed ? "Show" : "Hide";
+      qaToggle.setAttribute("aria-expanded", String(!collapsed));
+    });
+  }
+
+  // =========================================================================
   // Derived real data from /library ( recents · table · topics · tree ).
   // =========================================================================
   var libFiles = [];

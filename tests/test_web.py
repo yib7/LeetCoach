@@ -115,6 +115,14 @@ def test_index_serves_page(client):
     assert "<textarea" in html.lower()
 
 
+def test_index_has_quick_ask_panel(client):
+    c, _ = client
+    resp = c.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert 'id="quickask"' in html
+
+
 # --- POST /run, Answer mode end-to-end -----------------------------------
 
 def test_run_answer_streams_and_saves(client):
