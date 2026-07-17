@@ -1,4 +1,5 @@
-"""Flask web layer for LeetCoach: a single page + an SSE `/run` endpoint.
+"""Flask web layer for LeetCoach: a single page, an SSE `/run` endpoint, the
+read-only `/library` pair, and the plain-JSON Quick Ask `/ask` endpoint.
 
 Design mirrors the Xeno RAG pattern, in Flask flavour:
 
@@ -74,6 +75,12 @@ LEARNED_TOPICS_CAP = 50
 # app itself writes (storage._LANG_EXT + .md, .txt fallback, topic_index.json)
 # is covered; anything else in the output dir is invisible to the read path.
 LIBRARY_EXTENSIONS = frozenset({".md", ".py", ".cpp", ".java", ".txt", ".json"})
+
+# Quick Ask bounds: the question stays small (it's a syntax lookup, not an
+# essay), and the optional problem CONTEXT is capped server-side so a pasted
+# novel can't balloon the Haiku prompt.
+QUICK_ASK_MAX_QUESTION = 500
+QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
 
 # Allowlists — never pass an arbitrary string downstream to prompts/storage.
 MODES = ("answer", "learning", "guided")
@@ -474,6 +481,42 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                 "X-Accel-Buffering": "no",  # disable proxy buffering if present
             },
         )
+
+    @app.post("/ask")
+    def ask():
+        # Quick Ask (SP2): a small syntax/stdlib question answered by the cheap
+        # quick-ask model via the SAME injected run_fn as /run. The answer is
+        # ephemeral — plain JSON, no SSE, nothing saved to the library.
+        data = request.get_json(silent=True) or {}
+        question = (data.get("question") or "").strip()
+        language = (data.get("language") or "").strip().lower() or "python"
+        problem = data.get("problem") or ""
+
+        # --- validation (reject before any Claude call, mirroring /run)
+        if not question:
+            return jsonify({"error": "A question is required."}), 400
+        if len(question) > QUICK_ASK_MAX_QUESTION:
+            return jsonify(
+                {"error": f"Question too long (max {QUICK_ASK_MAX_QUESTION} chars)."}
+            ), 400
+        if language not in LANGUAGES:
+            return jsonify({"error": f"Unknown language {language!r}."}), 400
+
+        prompt = prompts.build_quick_ask(
+            question,
+            language=language,
+            problem=problem[:QUICK_ASK_PROBLEM_CONTEXT_CAP],
+        )
+        try:
+            answer = "".join(run_fn(prompt, model=config.quick_ask_model())).strip()
+        except Exception as exc:  # noqa: BLE001 - surface as a clean 502, log the rest
+            app.logger.exception("quick ask failed")
+            return jsonify({"error": f"Quick Ask failed: {exc}"}), 502
+        if not answer:
+            # Same stance as /run's empty-stream guard: no text is a failure,
+            # not an empty success.
+            return jsonify({"error": "Claude returned an empty answer."}), 502
+        return jsonify({"answer": answer})
 
     return app
 

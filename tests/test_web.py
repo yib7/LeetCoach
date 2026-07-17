@@ -45,11 +45,24 @@ ANSWER_MARKDOWN = (
 )
 
 
+QUICK_ASK_ANSWER = (
+    "`heapq.heappush(heap, item)` pushes onto a min-heap.\n\n"
+    "```python\nimport heapq\nheapq.heappush(h, 3)\n```"
+)
+
+# Quick Ask calls recorded as (prompt, model) so tests can assert on both;
+# reset per-test by the `client` fixture (and directly by standalone tests).
+QA_CALLS: list[tuple[str, str | None]] = []
+
+
 def fake_run(prompt, **kwargs):
     """Mirror claude_cli.run: yield text deltas. Branch on the prompt so one
-    fake serves both the classifier call and the answer call."""
+    fake serves the classifier, answer, and quick-ask calls."""
     if "Classify the following" in prompt and "Respond with ONLY a tiny" in prompt:
         text = json.dumps(CLASSIFY_JSON)
+    elif "You are a quick-reference assistant" in prompt:
+        QA_CALLS.append((prompt, kwargs.get("model")))
+        text = QUICK_ASK_ANSWER
     else:
         text = ANSWER_MARKDOWN
     # chunk it so the stream is genuinely incremental
@@ -60,6 +73,7 @@ def fake_run(prompt, **kwargs):
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+    QA_CALLS.clear()
     application = app_module.create_app(run_fn=fake_run)
     application.config.update(TESTING=True)
     return application.test_client(), tmp_path
@@ -362,6 +376,120 @@ def test_run_failure_logs_traceback(tmp_path, monkeypatch, caplog):
     assert records[0].exc_info, "log record should carry exc_info (traceback)"
     assert "Traceback" in caplog.text
     assert "boom from claude" in caplog.text
+
+
+# --- POST /ask (Quick Ask, SP2) -------------------------------------------
+
+def test_ask_returns_answer(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "How does heapq.heappush work?"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"answer": QUICK_ASK_ANSWER}
+
+
+def test_ask_uses_quick_ask_model(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "syntax of heappush?"})
+    assert resp.status_code == 200
+    assert QA_CALLS, "expected the quick-ask prompt to reach run_fn"
+    _, model = QA_CALLS[0]
+    assert model == "haiku"
+
+
+@pytest.mark.parametrize("question", [None, "", "   "])
+def test_ask_rejects_missing_or_blank_question(client, question):
+    c, _ = client
+    payload = {} if question is None else {"question": question}
+    resp = c.post("/ask", json=payload)
+    assert resp.status_code == 400
+    assert "question" in resp.get_json()["error"].lower()
+
+
+def test_ask_rejects_oversized_question_but_allows_500(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "x" * 501})
+    assert resp.status_code == 400
+    resp = c.post("/ask", json={"question": "x" * 500})
+    assert resp.status_code == 200
+
+
+def test_ask_rejects_unknown_language(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "q?", "language": "rust"})
+    assert resp.status_code == 400
+    assert "language" in resp.get_json()["error"].lower()
+
+
+def test_ask_defaults_language_to_python(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "what does zip do?"})
+    assert resp.status_code == 200
+    prompt, _ = QA_CALLS[0]
+    assert "Python" in prompt
+
+
+def test_ask_run_failure_returns_502(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+
+    def failing_run(prompt, **kwargs):
+        raise app_module.claude_cli.ClaudeUnavailableError("claude fell over")
+        yield  # pragma: no cover - makes this a generator like the real runner
+
+    application = app_module.create_app(run_fn=failing_run)
+    application.config.update(TESTING=True)
+    resp = application.test_client().post("/ask", json={"question": "q?"})
+    assert resp.status_code == 502
+    assert "error" in resp.get_json()
+
+
+@pytest.mark.parametrize("chunks", [[], ["  ", "\n"]])
+def test_ask_empty_answer_returns_502(tmp_path, monkeypatch, chunks):
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+
+    def empty_run(prompt, **kwargs):
+        yield from chunks
+
+    application = app_module.create_app(run_fn=empty_run)
+    application.config.update(TESTING=True)
+    resp = application.test_client().post("/ask", json={"question": "q?"})
+    assert resp.status_code == 502
+    assert "error" in resp.get_json()
+
+
+def test_ask_problem_lands_inside_context_fence(client):
+    c, _ = client
+    resp = c.post(
+        "/ask",
+        json={"question": "q?", "problem": "Two Sum: find indices."},
+    )
+    assert resp.status_code == 200
+    prompt, _ = QA_CALLS[0]
+    open_fence = "--- BEGIN PROBLEM CONTEXT (do not solve) ---"
+    close_fence = "--- END PROBLEM CONTEXT ---"
+    assert open_fence in prompt and close_fence in prompt
+    inside = prompt.split(open_fence, 1)[1].split(close_fence, 1)[0]
+    assert "Two Sum: find indices." in inside
+
+
+def test_ask_truncates_oversized_problem(client):
+    c, _ = client
+    big = "A" * 7000
+    resp = c.post("/ask", json={"question": "q?", "problem": big})
+    assert resp.status_code == 200
+    prompt, _ = QA_CALLS[0]
+    assert "A" * app_module.QUICK_ASK_PROBLEM_CONTEXT_CAP in prompt
+    assert big not in prompt
+
+
+# --- config knob: quick_ask_model (tested next to its consumer) ------------
+
+def test_quick_ask_model_knob_defaults_to_haiku(monkeypatch):
+    import config
+
+    monkeypatch.delenv("LEETCOACH_QUICK_ASK_MODEL", raising=False)
+    assert config.quick_ask_model() == "haiku"
+    monkeypatch.setenv("LEETCOACH_QUICK_ASK_MODEL", "sonnet")
+    assert config.quick_ask_model() == "sonnet"
 
 
 # --- app constructs without a live claude --------------------------------
