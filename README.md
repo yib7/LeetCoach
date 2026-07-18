@@ -10,7 +10,7 @@ generated Python against the problem's own sample I/O to tell you whether the so
 actually passes. No API key: it drives your existing Claude Code subscription through the
 CLI.
 
-![LeetCoach in the Console streaming an Answer token by token, then the Library showing a saved solution with its walkthrough, Big-O line, and syntax-highlighted code](docs/media/demo.gif)
+![The LeetCoach Console: asking "how do I make a min-heap in Python with heapq?" in the Quick Ask box and getting a short answer with a highlighted code block, then opening the study library to a saved solution with its walkthrough and Big-O line](docs/media/demo.gif)
 
 ## What it does
 
@@ -26,6 +26,10 @@ CLI.
   a topic index lets Learning skip and cross-link what you have already studied. A
   read-only Library tab browses everything you have saved, and the Console sidebar lists
   your recent runs.
+- **Quick Ask.** A side box answers a small syntax or stdlib question with Haiku, without
+  streaming or saving anything, so you never break focus to look something up. It refuses to
+  hand over the current problem's solution and points you back to a mode, but still answers
+  abstract questions like "what does `defaultdict` do?".
 
 <p align="center">
   <img src="docs/media/screenshot.png" alt="The Library viewer showing a saved Answer for Squares of a Sorted Array: its two-pointer walkthrough, an explicit Big-O complexity line, and the syntax-highlighted Python solution" width="760">
@@ -125,19 +129,20 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
 | Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console + Library) |
-| Tests / lint | pytest (224 tests, all mocking the subprocess), ruff |
+| Tests / lint | pytest (265 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Configuration
 
-All six settings are environment variables, overridable in your shell or a `.env` file.
+All seven settings are environment variables, overridable in your shell or a `.env` file.
 All are optional.
 
 | Variable               | Default                        | What it does                                                        |
 | ---------------------- | ------------------------------ | ------------------------------------------------------------------- |
 | `LEETCOACH_MODEL`      | `claude-opus-4-8`              | Claude model id passed to `claude --model` (e.g. `opus` / `sonnet`).|
 | `LEETCOACH_CLASSIFIER_MODEL` | `haiku`                  | Model for the short classification call that tags each run.        |
+| `LEETCOACH_QUICK_ASK_MODEL`  | `haiku`                  | Model for the Quick Ask box (short syntax / stdlib lookups).       |
 | `LEETCOACH_CLAUDE_BIN` | `claude`                       | Name or absolute path of the `claude` executable.                   |
 | `LEETCOACH_OUTPUT_DIR` | `output` next to the app       | Where the study library is written.                                 |
 | `LEETCOACH_TOPIC_INDEX`| `<output_dir>/topic_index.json`| Path to the persisted topic index JSON.                             |
@@ -163,7 +168,7 @@ All tests mock the `claude` subprocess, so the suite runs offline with no real C
 
 ```sh
 pip install -r requirements-dev.txt
-py -m pytest -q
+python -m pytest -q
 ```
 
 ## License
