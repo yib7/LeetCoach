@@ -105,6 +105,22 @@
           return '<a href="' + attr + '" rel="noopener" target="_blank">' +
             (text || escapeHtml(h)) + "</a>";
         },
+        // LeetCoach is a local, offline tool with NO legitimate remote-image
+        // use case. A network-loading <img> the browser auto-fetches on render
+        // is a data-egress / tracking channel reachable via prompt-injected
+        // problem text through Claude (incl. Haiku Quick Ask), and breaks the
+        // "Local & offline" promise. So allow ONLY inline data:image/... sources
+        // (SVG loaded via <img> can't run script and makes no request); render
+        // ANY other src — http(s), protocol-relative //, javascript:, relative,
+        // empty — as the alt text, never an <img>. marked v12 passes positional
+        // (href, title, text) like `link` above and pre-escapes `text` (alt),
+        // so it is emitted as-is exactly as `link` emits its `text`.
+        image: function (href, title, text) {
+          var h = String(href || "");
+          if (!/^data:image\//i.test(h)) return text || "";
+          var attr = escapeHtml(h).replace(/"/g, "&quot;");
+          return '<img src="' + attr + '" alt="' + (text || "") + '">';
+        },
       },
     });
   }

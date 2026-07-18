@@ -88,6 +88,22 @@ LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
 TIERS = prompts.TIERS                  # ("simple", "normal", "complex")
 
 
+def _non_string_field_error(data: dict, fields) -> str | None:
+    """Return a 400-worthy message if any named field is PRESENT but not a
+    string, else ``None``. ``fields`` is an iterable of ``(key, Label)`` pairs.
+
+    These endpoints are unauthenticated local routes any script/curl can hit,
+    so a JSON number/list/object in a text field must yield a clean 400 — not an
+    ``AttributeError``/``TypeError`` 500 from a downstream ``.strip()`` or slice
+    (checklist 3.12). A missing field (``None``) and a real string both pass, so
+    the existing missing/string handling downstream is untouched."""
+    for key, label in fields:
+        value = data.get(key)
+        if value is not None and not isinstance(value, str):
+            return f"{label} must be text."
+    return None
+
+
 def _hostname(host: str) -> str:
     """The hostname part of a Host header value, port stripped, lowercased.
     Handles the bracketed IPv6 form ("[::1]:5000" -> "[::1]")."""
@@ -292,6 +308,17 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
     @app.post("/run")
     def run():
         data = request.get_json(silent=True) or {}
+
+        # Type-check before any .strip()/.lower(): a non-string field (a script
+        # posting a JSON number/list) must be a clean 400, not a 500 (3.12).
+        type_err = _non_string_field_error(
+            data,
+            (("problem", "Problem"), ("mode", "Mode"),
+             ("language", "Language"), ("tier", "Tier")),
+        )
+        if type_err:
+            return jsonify({"error": type_err}), 400
+
         problem = (data.get("problem") or "").strip()
         mode = (data.get("mode") or "").strip().lower()
         language = (data.get("language") or "").strip().lower()
@@ -488,6 +515,18 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
         # quick-ask model via the SAME injected run_fn as /run. The answer is
         # ephemeral — plain JSON, no SSE, nothing saved to the library.
         data = request.get_json(silent=True) or {}
+
+        # Type-check before any .strip()/.lower() OR the problem-context slice
+        # below (which sits outside the try/except): a non-string field must be
+        # a clean 400, not a 500 (3.12), mirroring /run.
+        type_err = _non_string_field_error(
+            data,
+            (("question", "Question"), ("language", "Language"),
+             ("problem", "Problem")),
+        )
+        if type_err:
+            return jsonify({"error": type_err}), 400
+
         question = (data.get("question") or "").strip()
         language = (data.get("language") or "").strip().lower() or "python"
         problem = data.get("problem") or ""

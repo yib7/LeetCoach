@@ -205,6 +205,31 @@ def test_run_rejects_empty_problem(client):
     assert resp.status_code == 400
 
 
+# --- non-string JSON fields -> clean 400, not a 500 stack trace (3.12) ------
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # problem is not a string -> the .strip()/slice used to blow up with 500
+        {"problem": 123, "mode": "answer", "language": "python", "tier": "normal"},
+        {"problem": ["x"], "mode": "answer", "language": "python", "tier": "normal"},
+        # mode / language / tier are not strings
+        {"problem": "x", "mode": 5, "language": "python", "tier": "normal"},
+        {"problem": "x", "mode": "answer", "language": 5, "tier": "normal"},
+        {"problem": "x", "mode": "answer", "language": "python", "tier": ["normal"]},
+    ],
+)
+def test_run_rejects_non_string_fields(client, payload):
+    """A script/curl sending a non-string JSON field must get a clean 400 with an
+    ``error`` message, never a 500 stack trace (unauthenticated local endpoint)."""
+    c, tmp_path = client
+    resp = c.post("/run", json=payload)
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+    # a bad-type request must not spend Claude budget or save anything
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
 # --- mid-stream subprocess failure -> SSE error event --------------------
 
 def test_run_answer_midstream_failure_emits_error_event(tmp_path, monkeypatch):
@@ -487,6 +512,28 @@ def test_ask_truncates_oversized_problem(client):
     prompt, _ = QA_CALLS[0]
     assert "A" * app_module.QUICK_ASK_PROBLEM_CONTEXT_CAP in prompt
     assert big not in prompt
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # question is not a string -> the .strip() used to blow up with 500
+        {"question": 123},
+        {"question": ["a"]},
+        # problem is not a string -> the CAP slice (outside try/except) used to 500
+        {"question": "hi", "problem": 999},
+        {"question": "hi", "problem": ["x"]},
+        # language is not a string -> the .strip().lower() used to 500
+        {"question": "hi", "language": 5},
+    ],
+)
+def test_ask_rejects_non_string_fields(client, payload):
+    """Non-string JSON fields to /ask must return a clean 400 with an ``error``
+    message, never a 500 (the problem-context slice sits outside the try/except)."""
+    c, _ = client
+    resp = c.post("/ask", json=payload)
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
 
 
 # --- config knob: quick_ask_model (tested next to its consumer) ------------
