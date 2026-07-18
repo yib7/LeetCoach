@@ -65,7 +65,7 @@ the runtime dependencies:
 .\setup.ps1
 ```
 
-(Not on Windows? Run `py -m venv .venv`, activate it, then `pip install -r requirements.txt`.)
+(Not on Windows? Run `python3 -m venv .venv`, activate it, then `pip install -r requirements.txt`.)
 
 **Step 3: run.**
 
