@@ -18,8 +18,8 @@ topic_index.json
 .autopilot/
 CLAUDE.md
 .claude/
+# superpowers plugin work dir; absent now but ignored so a future run never commits it
 .superpowers/
-fable_5_plan.md
 NEW_UPDATES.md
 
 # IDE / editor
