@@ -15,4 +15,4 @@ packaging==26.2
 pluggy==1.6.0
 pytest==9.1.1
 python-dotenv==1.2.2
-ruff==0.15.20
+ruff==0.15.22
