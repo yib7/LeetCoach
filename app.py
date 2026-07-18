@@ -260,11 +260,23 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
             return jsonify({"error": "Forbidden host."}), 403
 
     @app.after_request
-    def _no_cache(resp):
+    def _response_headers(resp):
         # Force revalidation of the frontend code so an edited app.js/style.css
         # is never silently served stale during local iteration.
         if request.path == "/" or request.path.startswith("/static/"):
             resp.headers["Cache-Control"] = "no-cache"
+        # Defense-in-depth for the untrusted-markdown surface (Claude's output,
+        # incl. the cheaper Quick Ask model, is rendered into the page). Every
+        # script/style/font is a self-hosted file and the only images the
+        # renderer emits are inline data: URIs, so a strict policy holds without
+        # 'unsafe-inline'. connect-src 'self' keeps /run, /ask, /library fetches
+        # same-origin. nosniff protects the text/plain /library/file route.
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+            "base-uri 'none'; form-action 'none'"
+        )
+        resp.headers["X-Content-Type-Options"] = "nosniff"
         return resp
 
     @app.get("/")

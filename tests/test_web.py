@@ -123,6 +123,19 @@ def test_index_has_quick_ask_panel(client):
     assert 'id="quickask"' in html
 
 
+def test_security_headers_present(client):
+    c, _ = client
+    resp = c.get("/")
+    csp = resp.headers.get("Content-Security-Policy", "")
+    # Strict policy holds because every script/style/font is self-hosted and the
+    # renderer only emits inline data: images (defense-in-depth for the
+    # untrusted-markdown surface, incl. Quick Ask).
+    assert "default-src 'none'" in csp
+    assert "script-src 'self'" in csp
+    assert "img-src 'self' data:" in csp
+    assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+
+
 # --- POST /run, Answer mode end-to-end -----------------------------------
 
 def test_run_answer_streams_and_saves(client):
