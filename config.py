@@ -21,6 +21,9 @@ These knobs are the only machine-specific settings the app needs:
                               stays relative — that is the user's explicit choice).
 - ``LEETCOACH_RUN_TIMEOUT`` — wall-clock cap in seconds for a single ``claude`` run
                               (default ``600``); a hung CLI is killed after this long.
+- ``LEETCOACH_VERIFY_TIMEOUT`` — wall-clock cap in seconds for each Answer-mode
+                              sample-verification subprocess (default ``10``); a
+                              wedged solution is tree-killed after this long.
 
 Reading env at *call time* (not import time) keeps tests able to monkeypatch the
 environment without re-importing the module.
@@ -40,6 +43,7 @@ DEFAULT_CLAUDE_BIN = "claude"
 # library and its topic index.
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 DEFAULT_RUN_TIMEOUT = 600.0  # seconds; generous — Opus study material can be slow
+DEFAULT_VERIFY_TIMEOUT = 10.0  # seconds; per sample-verification subprocess
 
 
 def model() -> str:
@@ -90,6 +94,25 @@ def run_timeout() -> float:
         return DEFAULT_RUN_TIMEOUT
     if not value > 0:  # rejects 0, negatives, and NaN in one comparison
         return DEFAULT_RUN_TIMEOUT
+    return value
+
+
+def verify_timeout() -> float:
+    """Wall-clock cap (seconds) for each Answer-mode sample-verification run.
+
+    The sandbox tree-kills a generated solution after this long so a wedged or
+    infinite-looping answer can't hang a run (each parsed sample is bounded
+    independently). Override with ``LEETCOACH_VERIFY_TIMEOUT``; invalid or
+    non-positive values fall back to the default (a broken knob must never
+    disable the containment timeout).
+    """
+    raw = os.environ.get("LEETCOACH_VERIFY_TIMEOUT", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_VERIFY_TIMEOUT
+    if not value > 0:  # rejects 0, negatives, and NaN in one comparison
+        return DEFAULT_VERIFY_TIMEOUT
     return value
 
 

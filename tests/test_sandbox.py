@@ -486,6 +486,69 @@ def test_unsupported_language_is_not_verified():
     assert r.status == "not_verified", r
 
 
+# --- P2-2: mixed pass/error aggregation surfaces the error distinctly ------
+
+def test_aggregation_mixed_pass_and_error_names_the_errored_count():
+    """A run that both passes a sample AND crashes another must not be reported
+    as a plain wrong-answer `fail` — the note has to name the errored count."""
+    code = (
+        "import sys\n"
+        "n = int(sys.stdin.readline())\n"   # crashes on non-numeric stdin
+        "print(n * 2)\n"
+    )
+    samples = [
+        sandbox.Sample(stdin="21\n", expected_stdout="42"),   # -> pass
+        sandbox.Sample(stdin="oops\n", expected_stdout="42"),  # -> error (ValueError)
+    ]
+    r = sandbox._verify_python_samples(code, samples, timeout=5)
+    assert r.status == "fail", r
+    assert r.samples_passed == 1
+    assert "1 errored" in r.note, r.note
+
+
+def test_aggregation_all_errored_is_a_pure_error():
+    code = "import sys\nn = int(sys.stdin.readline())\nprint(n)\n"
+    samples = [
+        sandbox.Sample(stdin="a\n", expected_stdout="1"),  # error
+        sandbox.Sample(stdin="b\n", expected_stdout="2"),  # error
+    ]
+    r = sandbox._verify_python_samples(code, samples, timeout=5)
+    assert r.status == "error", r
+    assert "2/2" in r.note, r.note
+
+
+# --- P2-4: LEETCOACH_VERIFY_TIMEOUT knob -----------------------------------
+
+def test_verify_timeout_env_knob_defaults_and_invalid_values_fall_back(monkeypatch):
+    import config
+    monkeypatch.delenv("LEETCOACH_VERIFY_TIMEOUT", raising=False)
+    assert config.verify_timeout() == 10.0
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "not-a-number")
+    assert config.verify_timeout() == 10.0
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "0")
+    assert config.verify_timeout() == 10.0
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "-3")
+    assert config.verify_timeout() == 10.0
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "4")
+    assert config.verify_timeout() == 4.0
+
+
+def test_verify_answer_threads_the_configured_timeout(monkeypatch):
+    """`verify_answer` must feed each sample-verify subprocess the configured
+    timeout, not a hardcoded 10s — so the knob actually bounds runaway code."""
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "3")
+    seen = []
+
+    def spy_verify_python(code, stdin_text, expected_stdout, *, timeout):
+        seen.append(timeout)
+        return sandbox.VerifyResult(status="pass", note="ok")
+
+    monkeypatch.setattr(sandbox, "verify_python", spy_verify_python)
+    r = sandbox.verify_answer("print('x')\n", SINGLE_SAMPLE_PROBLEM, "python")
+    assert r.status == "pass", r
+    assert seen and all(t == 3 for t in seen), seen
+
+
 # --- temp dir cleanup ----------------------------------------------------
 
 def test_run_dir_is_cleaned_up(tmp_path, monkeypatch):

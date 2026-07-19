@@ -135,7 +135,7 @@ A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 
 ## Configuration
 
-All seven settings are environment variables, overridable in your shell or a `.env` file.
+All eight settings are environment variables, overridable in your shell or a `.env` file.
 All are optional.
 
 | Variable               | Default                        | What it does                                                        |
@@ -147,6 +147,7 @@ All are optional.
 | `LEETCOACH_OUTPUT_DIR` | `output` next to the app       | Where the study library is written.                                 |
 | `LEETCOACH_TOPIC_INDEX`| `<output_dir>/topic_index.json`| Path to the persisted topic index JSON.                             |
 | `LEETCOACH_RUN_TIMEOUT`| `600`                          | Wall-clock cap in seconds for a single `claude` run.                |
+| `LEETCOACH_VERIFY_TIMEOUT`| `10`                        | Wall-clock cap in seconds for each Answer-mode sample verification. |
 
 ## Where outputs are saved
 
