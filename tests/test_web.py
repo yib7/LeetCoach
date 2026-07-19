@@ -560,6 +560,62 @@ def test_quick_ask_model_knob_defaults_to_haiku(monkeypatch):
     assert config.quick_ask_model() == "sonnet"
 
 
+# --- P2-3: oversized POST rejected with 413 ------------------------------
+
+def test_oversized_run_post_is_rejected_413(client):
+    c, _ = client
+    big = "x" * (2 * 1024 * 1024 + 1024)  # just over the 2 MiB cap
+    resp = c.post(
+        "/run",
+        json={"problem": big, "mode": "answer", "language": "python", "tier": "normal"},
+    )
+    assert resp.status_code == 413, resp.status_code
+
+
+# --- P2-12: in-flight /run de-duplication (409) --------------------------
+
+_RUN_PAYLOAD = {
+    "problem": "Two Sum: return indices adding to target.",
+    "mode": "answer",
+    "language": "python",
+    "tier": "normal",
+}
+
+
+def test_duplicate_inflight_run_is_rejected_409_then_freed(client):
+    """A second identical run while the first is still streaming gets a 409;
+    once the first stream is drained the key frees and an identical run works."""
+    c, _ = client
+    # First request: the view registers the in-flight key and returns a streaming
+    # Response whose body generator has NOT run yet (lazy — consumed on get_data).
+    r1 = c.post("/run", json=_RUN_PAYLOAD)
+    assert r1.status_code == 200
+    # Second identical request while r1 is in-flight -> 409.
+    r2 = c.post("/run", json=_RUN_PAYLOAD)
+    assert r2.status_code == 409, r2.status_code
+    assert "already in progress" in r2.get_json()["error"]
+    # Drain r1 -> its generator finally releases the key.
+    r1.get_data(as_text=True)
+    # A later identical request now succeeds (key was freed).
+    r3 = c.post("/run", json=_RUN_PAYLOAD)
+    assert r3.status_code == 200, r3.status_code
+    r3.get_data(as_text=True)  # drain so it saves + releases
+
+
+def test_distinct_keys_do_not_collide(client):
+    """Different (problem/mode/language/tier) tuples never dedupe each other."""
+    c, _ = client
+    r1 = c.post("/run", json=_RUN_PAYLOAD)
+    assert r1.status_code == 200
+    other = dict(_RUN_PAYLOAD, tier="complex")  # distinct valid key
+    r2 = c.post("/run", json=other)
+    assert r2.status_code == 200, r2.status_code  # no false 409 across distinct keys
+    # Drain LIFO — two stream_with_context responses held open share one request-
+    # context stack in the test client, so pop them last-in-first-out.
+    r2.get_data(as_text=True)
+    r1.get_data(as_text=True)
+
+
 # --- app constructs without a live claude --------------------------------
 
 def test_create_app_does_not_require_claude(monkeypatch):

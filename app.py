@@ -249,6 +249,19 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
     BOTH the classifier and the answer stream (tests pass a fake)."""
     app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
 
+    # Reject oversized request bodies with a clean 413 instead of buffering an
+    # unbounded POST into memory (P2-3). A LeetCode problem is a few KB; 2 MiB is
+    # generous headroom while still capping a hostile/accidental flood.
+    app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+
+    # In-flight /run de-duplication (P2-12): a single-user local tool should not
+    # fan the same (problem, mode, language, tier) into N concurrent Claude runs
+    # (double-click, impatient re-submit). Keyed set guarded by a lock; the key
+    # is registered after validation and released when the stream ends — on
+    # normal completion, client disconnect (GeneratorExit), or error.
+    _inflight_runs: set = set()
+    _inflight_lock = threading.Lock()
+
     @app.before_request
     def _reject_foreign_hosts():
         # DNS-rebinding defense (audit P1-3): a malicious page can point its own
@@ -346,6 +359,16 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
         # Learning has no tier; Answer/Guided require a valid one.
         if mode != "learning" and tier not in TIERS:
             return jsonify({"error": f"Unknown tier {tier!r}."}), 400
+
+        # De-dup identical in-flight runs (P2-12). Register atomically after
+        # validation; an exact duplicate that's still streaming gets a 409.
+        run_key = (problem, mode, language, tier)
+        with _inflight_lock:
+            if run_key in _inflight_runs:
+                return jsonify(
+                    {"error": "An identical run is already in progress."}
+                ), 409
+            _inflight_runs.add(run_key)
 
         def _stream_and_accumulate(prompt):
             """Stream ``run_fn(prompt)`` deltas to the client (yielding SSE text
@@ -511,6 +534,13 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                 # client still gets only the short message below.
                 app.logger.exception("run failed (mode=%s)", mode)
                 yield _sse_event("error", f"Run failed: {exc}")
+            finally:
+                # Release the in-flight key no matter how the stream ends —
+                # normal completion, error, or a client disconnect (which raises
+                # GeneratorExit here, bypassing the except above). Frees an
+                # identical run to start again.
+                with _inflight_lock:
+                    _inflight_runs.discard(run_key)
 
         return Response(
             stream_with_context(event_stream()),
