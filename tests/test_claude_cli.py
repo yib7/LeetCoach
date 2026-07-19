@@ -255,6 +255,33 @@ def test_real_runner_large_stderr_does_not_deadlock():
     assert [ln.strip() for ln in lines] == ["hello", "world"]
 
 
+def test_real_runner_large_stdout_before_draining_stdin_does_not_deadlock():
+    """audit P1-1: the child floods stdout (~300KB, past a 64KB OS pipe buffer)
+    BEFORE it finishes reading a large stdin payload (~2MB, past the stdin pipe
+    buffer). If the runner wrote all of stdin on the main thread *before*
+    starting to drain stdout, both sides would block: the parent stuck writing
+    stdin (child not yet reading it) while the child is stuck writing stdout
+    (parent not yet draining it) — a classic pipe deadlock.
+
+    Feeding stdin on its own daemon thread lets the main thread drain stdout
+    immediately, so both pipes keep flowing and the run completes. A regression
+    would wedge here; `_drive_real_runner`'s join-timeout turns that into a
+    failed assert instead of a hung suite.
+    """
+    script = (
+        "import sys\n"
+        "sys.stdout.write('X' * 300000)\n"  # fills stdout pipe before reading stdin
+        "sys.stdout.flush()\n"
+        "sys.stdin.read()\n"                 # only now drains the large stdin
+        "sys.stdout.write('\\nDONE\\n')\n"
+    )
+    big_prompt = "p" * (2 * 1024 * 1024)     # >2MB: overflows the stdin pipe buffer
+    lines = _drive_real_runner([sys.executable, "-c", script], big_prompt)
+    joined = "".join(lines)
+    assert joined.count("X") == 300000
+    assert joined.rstrip().endswith("DONE")
+
+
 def test_real_runner_kills_subprocess_on_early_close():
     """Closing the generator early (the SSE client disconnected) must terminate
     the child instead of leaving it running to completion. Regression guard for
