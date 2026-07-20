@@ -20,12 +20,12 @@ from __future__ import annotations
 import json
 
 import pytest
+from _helpers import CLASSIFY_JSON
+from _helpers import parse_sse as _parse_sse
 
 import app as app_module
 import parsing
 import topic_index
-
-CLASSIFY_JSON = {"problem_type": "two_pointers", "topics": ["arrays"]}
 
 # A problem with one parseable sample (mirrors test_sandbox.py's fixture).
 PROBLEM_WITH_SAMPLE = (
@@ -82,28 +82,6 @@ def _make_client(tmp_path, monkeypatch, mode_markdown, prompt_log=None):
     application = app_module.create_app(run_fn=make_fake_run(mode_markdown, prompt_log))
     application.config.update(TESTING=True)
     return application.test_client()
-
-
-def _parse_sse(body: str):
-    text_chunks = []
-    events = []
-    for block in body.split("\n\n"):
-        block = block.strip("\n")
-        if not block:
-            continue
-        event_name = None
-        data_lines = []
-        for line in block.split("\n"):
-            if line.startswith("event:"):
-                event_name = line[len("event:"):].strip()
-            elif line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
-        data = "\n".join(data_lines)
-        if event_name is None:
-            text_chunks.append(json.loads(data))
-        else:
-            events.append((event_name, json.loads(data) if data else None))
-    return text_chunks, events
 
 
 def _post_run(client, mode):

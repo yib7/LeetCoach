@@ -22,10 +22,11 @@ from __future__ import annotations
 import json
 import threading
 
+from _helpers import CLASSIFY_JSON
+from _helpers import parse_sse as _parse_sse
+
 import app as app_module
 import config
-
-CLASSIFY_JSON = {"problem_type": "two_pointers", "topics": ["arrays"]}
 
 ANSWER_MARKDOWN = (
     "Reasoning first.\n\n"
@@ -49,28 +50,6 @@ RUN_PAYLOAD = {
 
 def _is_classify(prompt: str) -> bool:
     return "Classify the following" in prompt and "Respond with ONLY a tiny" in prompt
-
-
-def _parse_sse(body: str):
-    text_chunks = []
-    events = []
-    for block in body.split("\n\n"):
-        block = block.strip("\n")
-        if not block:
-            continue
-        event_name = None
-        data_lines = []
-        for line in block.split("\n"):
-            if line.startswith("event:"):
-                event_name = line[len("event:"):].strip()
-            elif line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
-        data = "\n".join(data_lines)
-        if event_name is None:
-            text_chunks.append(json.loads(data))
-        else:
-            events.append((event_name, json.loads(data) if data else None))
-    return text_chunks, events
 
 
 def _make_client(tmp_path, monkeypatch, run_fn):

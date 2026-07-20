@@ -24,12 +24,12 @@ import json
 import logging
 
 import pytest
+from _helpers import CLASSIFY_JSON
+from _helpers import parse_sse as _parse_sse
 
 import app as app_module
 
 # --- a fake Claude that answers both the classify and the answer prompt ---
-
-CLASSIFY_JSON = {"problem_type": "two_pointers", "topics": ["arrays"]}
 
 ANSWER_MARKDOWN = (
     "Here is the reasoning. We use a hash map.\n\n"
@@ -77,32 +77,6 @@ def client(tmp_path, monkeypatch):
     application = app_module.create_app(run_fn=fake_run)
     application.config.update(TESTING=True)
     return application.test_client(), tmp_path
-
-
-def _parse_sse(body: str):
-    """Split a raw SSE body into (text_chunks, events) where events is a list of
-    (event_name, payload)."""
-    text_chunks = []
-    events = []
-    for block in body.split("\n\n"):
-        block = block.strip("\n")
-        if not block:
-            continue
-        lines = block.split("\n")
-        event_name = None
-        data_lines = []
-        for line in lines:
-            if line.startswith("event:"):
-                event_name = line[len("event:"):].strip()
-            elif line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
-        data = "\n".join(data_lines)
-        if event_name is None:
-            # plain data: event => a text delta (json-encoded string)
-            text_chunks.append(json.loads(data))
-        else:
-            events.append((event_name, json.loads(data) if data else None))
-    return text_chunks, events
 
 
 # --- GET / ---------------------------------------------------------------
