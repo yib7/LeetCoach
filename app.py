@@ -262,6 +262,33 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
     _inflight_runs: set = set()
     _inflight_lock = threading.Lock()
 
+    # Library-listing cache (P2-6): the read-only /library walk (rglob + a stat
+    # per file) reran on every tab-open and post-run refresh. Cache the result
+    # behind a cheap freshness signature — an app-owned version counter (bumped
+    # whenever the app itself saves or deletes a library file) combined with the
+    # output-root mtime (catches a top-level change made outside the app). On a
+    # hit /library returns without touching the filesystem tree.
+    _lib_cache: dict = {"sig": None, "files": None}
+    _lib_version = [0]
+    _lib_lock = threading.Lock()
+
+    def _invalidate_library_cache():
+        with _lib_lock:
+            _lib_version[0] += 1
+
+    def _cached_library_files() -> list[dict]:
+        root = config.output_dir().resolve()
+        try:
+            root_mtime = root.stat().st_mtime if root.is_dir() else None
+        except OSError:
+            root_mtime = None
+        with _lib_lock:
+            sig = (_lib_version[0], root_mtime)
+            if _lib_cache["files"] is None or _lib_cache["sig"] != sig:
+                _lib_cache["files"] = _library_files(root)
+                _lib_cache["sig"] = sig
+            return _lib_cache["files"]
+
     @app.before_request
     def _reject_foreign_hosts():
         # DNS-rebinding defense (audit P1-3): a malicious page can point its own
@@ -312,7 +339,8 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
     def library():
         # Read-only listing of the study library (SP10). Missing/empty output
         # dir is an empty listing — the library just hasn't accumulated yet.
-        return jsonify({"files": _library_files(config.output_dir().resolve())})
+        # Served from the freshness-keyed cache (P2-6).
+        return jsonify({"files": _cached_library_files()})
 
     @app.get("/library/file")
     def library_file():
@@ -329,6 +357,25 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
         except OSError:
             return jsonify({"error": "Not found."}), 404
         return Response(body, mimetype="text/plain")
+
+    @app.delete("/library/file")
+    def delete_library_file():
+        # Delete ONE library file (P2-11). Reuses the exact containment gate as
+        # the read path, so a traversal / escape / absolute path / non-library
+        # suffix / missing file is the SAME uniform 404 — a rejection never
+        # leaks whether a target exists or where the root sits, matching the
+        # GET /library/file no-leak design. There is deliberately no mass-delete.
+        resolved = _resolve_library_file(request.args.get("path", ""))
+        if resolved is None:
+            return jsonify({"error": "Not found."}), 404
+        try:
+            resolved.unlink()
+        except OSError:
+            # Vanished between the resolve and the unlink, or a permission/lock
+            # issue — never 500 the caller; the file is effectively gone.
+            return jsonify({"error": "Not found."}), 404
+        _invalidate_library_cache()  # next /library reflects the removal
+        return jsonify({"deleted": True})
 
     @app.post("/run")
     def run():
@@ -518,6 +565,11 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     )
                     cls = _classification()  # join before the save needs its result
                     paths = [storage.save_guided(problem, cls.problem_type, saved)]
+
+                # A new artifact just landed under output/ — drop the library
+                # cache so the next /library (the frontend refreshes right after
+                # a run) reflects it even for a nested save the root mtime misses.
+                _invalidate_library_cache()
 
                 # 5) terminal success event
                 done_payload = {

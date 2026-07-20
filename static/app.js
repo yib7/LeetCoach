@@ -86,6 +86,8 @@
   var libViewerPath = $("library-viewer-path");
   var libViewerBody = $("library-viewer-body");
   var libViewerClose = $("library-viewer-close");
+  var libViewerDelete = $("library-viewer-delete");
+  var currentViewPath = null; // the library file currently open in the viewer
 
   // ---- marked XSS hardening (KEEP EXACTLY) --------------------------------
   // Defense-in-depth: Claude's output is untrusted markdown rendered via
@@ -1115,6 +1117,7 @@
       if (meta.mtime) vwSub.appendChild(chipEl("saved " + savedDate(meta.mtime), "mono"));
     }
     if (libViewerPath) libViewerPath.textContent = relPath;
+    currentViewPath = relPath;
 
     libViewerBody.innerHTML = "";
     if (meta.ext === "md" && window.marked) {
@@ -1251,12 +1254,36 @@
       });
   }
 
+  function closeViewer() {
+    libViewer.hidden = true;
+    libViewerBody.innerHTML = "";
+    currentViewPath = null;
+    var on = libTree.querySelector(".filerow.on");
+    if (on) on.classList.remove("on");
+  }
+
   if (libViewerClose) {
-    libViewerClose.addEventListener("click", function () {
-      libViewer.hidden = true;
-      libViewerBody.innerHTML = "";
-      var on = libTree.querySelector(".filerow.on");
-      if (on) on.classList.remove("on");
+    libViewerClose.addEventListener("click", closeViewer);
+  }
+
+  if (libViewerDelete) {
+    libViewerDelete.addEventListener("click", function () {
+      var path = currentViewPath;
+      if (!path) return;
+      var name = path.slice(path.lastIndexOf("/") + 1);
+      if (!window.confirm("Delete " + name + " from your library? This can't be undone.")) return;
+      libViewerDelete.disabled = true;
+      fetch("/library/file?path=" + encodeURIComponent(path), { method: "DELETE" })
+        .then(function (resp) {
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          closeViewer();
+          loadLibrary(); // listing refreshes without the deleted file (cache invalidated server-side)
+        })
+        .catch(function (e) {
+          console.warn("Could not delete " + path + " (" + (e && e.message) + ").");
+          window.alert("Could not delete that file.");
+        })
+        .then(function () { libViewerDelete.disabled = false; });
     });
   }
 

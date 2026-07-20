@@ -616,6 +616,80 @@ def test_distinct_keys_do_not_collide(client):
     r1.get_data(as_text=True)
 
 
+# --- P2-6: /library listing is cached and invalidates on change ----------
+
+def test_library_listing_is_cached_and_invalidates_on_change(client, monkeypatch):
+    import os
+    c, tmp = client
+    calls = []
+    real = app_module._library_files
+
+    def counting(root):
+        calls.append(1)
+        return real(root)
+
+    monkeypatch.setattr(app_module, "_library_files", counting)
+
+    (tmp / "a.md").write_text("x", encoding="utf-8")
+    assert c.get("/library").status_code == 200          # miss -> walks
+    n1 = len(calls)
+    assert n1 >= 1
+    c.get("/library")                                    # same sig -> cache hit
+    assert len(calls) == n1, "unchanged library should serve from cache"
+
+    (tmp / "b.md").write_text("y", encoding="utf-8")
+    os.utime(tmp)  # bump root mtime deterministically (coarse-clock safety)
+    c.get("/library")                                    # sig changed -> re-walk
+    assert len(calls) == n1 + 1, "a change must invalidate the cache"
+
+
+# --- P2-11: DELETE /library/file -----------------------------------------
+
+def test_delete_removes_contained_file_and_refreshes_listing(client):
+    c, tmp = client
+    f = tmp / "answers" / "hash_map" / "two_sum__normal.md"
+    f.parent.mkdir(parents=True)
+    f.write_text("# solution", encoding="utf-8")
+
+    listed = c.get("/library").get_json()["files"]
+    rel = "answers/hash_map/two_sum__normal.md"
+    assert any(x["path"] == rel for x in listed)
+
+    resp = c.delete("/library/file?path=" + rel)
+    assert resp.status_code == 200, resp.status_code
+    assert resp.get_json()["deleted"] is True
+    assert not f.exists()
+
+    # listing refreshes (cache invalidated) — the file is gone
+    listed2 = c.get("/library").get_json()["files"]
+    assert all(x["path"] != rel for x in listed2)
+
+
+def test_delete_rejects_path_traversal(client):
+    c, tmp = client
+    victim = tmp.parent / "leetcoach_delete_victim.md"
+    victim.write_text("keep me", encoding="utf-8")
+    try:
+        resp = c.delete("/library/file?path=" + "../leetcoach_delete_victim.md")
+        assert resp.status_code == 404, resp.status_code   # uniform no-leak reject
+        assert victim.exists(), "a traversal must never delete outside the root"
+    finally:
+        if victim.exists():
+            victim.unlink()
+
+
+def test_delete_missing_or_bad_suffix_is_404(client):
+    c, tmp = client
+    # nonexistent library file
+    assert c.delete("/library/file?path=answers/none.md").status_code == 404
+    # a real file but a non-library suffix (.log ∉ LIBRARY_EXTENSIONS) must not
+    # be deletable through the library endpoint
+    bad = tmp / "notes.log"
+    bad.write_text("x", encoding="utf-8")
+    assert c.delete("/library/file?path=notes.log").status_code == 404
+    assert bad.exists()
+
+
 # --- app constructs without a live claude --------------------------------
 
 def test_create_app_does_not_require_claude(monkeypatch):

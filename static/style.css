@@ -232,6 +232,9 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .mini{cursor:pointer;display:inline-flex;align-items:center;gap:6px;font:600 12px var(--sans);color:var(--tx3);background:var(--s1);border:1px solid var(--border);border-radius:7px;padding:6px 10px;transition:color var(--d2) var(--ease),border-color var(--d2),background var(--d2)}
 .mini:hover{color:var(--tx);border-color:var(--border-2);background:var(--s3)}
 .mini.ok{color:var(--mint);border-color:var(--mint-line);background:var(--mint-weak)}
+.mini.danger{color:var(--red)}
+.mini.danger:hover{color:#ffd9da;border-color:var(--red-line);background:var(--red-weak)}
+.mini[disabled]{opacity:.5;cursor:default}
 .mini svg{width:13px;height:13px}
 .hljs{background:transparent;color:#cad8ce}
 
