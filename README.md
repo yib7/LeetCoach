@@ -23,9 +23,9 @@ CLI.
 - **Self-checking.** Generated Python solutions are run against the problem's `Input:` /
   `Output:` examples in a throwaway sandbox and reported as PASS / FAIL.
 - **Builds a library.** Every run is saved under `output/`, organized by problem type, and
-  a topic index lets Learning skip and cross-link what you have already studied. A
-  read-only Library tab browses everything you have saved, and the Console sidebar lists
-  your recent runs.
+  a topic index lets Learning skip and cross-link what you have already studied. The
+  Library tab browses everything you have saved and lets you delete a file you no longer
+  want, and the Console sidebar lists your recent runs.
 - **Quick Ask.** A side box answers a small syntax or stdlib question with Haiku, without
   streaming or saving anything, so you never break focus to look something up. It refuses to
   hand over the current problem's solution and points you back to a mode, but still answers
@@ -129,7 +129,7 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
 | Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console + Library) |
-| Tests / lint | pytest (265 tests, all mocking the subprocess), ruff |
+| Tests / lint | pytest (281 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
