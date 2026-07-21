@@ -15,9 +15,18 @@ import re
 
 # A fenced block: ```lang\n ... \n``` . The language tag is optional and the
 # closing fence may sit at end-of-string without a trailing newline.
+#
+# The closing fence is anchored to the START OF A LINE (``^`` under MULTILINE):
+# a real markdown closing fence begins its own line at column 0, whereas a nested
+# triple-backtick *inside* the code (e.g. a fenced example in a docstring) is
+# almost always indented. Anchoring to line-start lets the non-greedy body skip
+# those indented inner fences and run on to the true closing fence (P2-5),
+# instead of truncating the code at the first ``` it sees. Residual known
+# limitation: a nested fence that itself sits at column 0 inside the block would
+# still close it early — vanishingly rare in runnable solution code.
 _FENCE = re.compile(
-    r"```[ \t]*([A-Za-z0-9_+#-]*)[ \t]*\r?\n(.*?)```",
-    re.DOTALL,
+    r"```[ \t]*([A-Za-z0-9_+#-]*)[ \t]*\r?\n(.*?)^```",
+    re.DOTALL | re.MULTILINE,
 )
 
 # Map our language keys (and common aliases Claude might emit) to a canonical

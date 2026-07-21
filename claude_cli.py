@@ -113,6 +113,7 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
     drained = False
     stdin_ok = True      # False -> the child died before consuming stdin (P2-3)
     disconnected = False  # True -> consumer close()d us (SSE client went away)
+    stdin_thread: Optional[threading.Thread] = None  # daemon feeding stdin (P1-1)
 
     # Wall-clock watchdog (audit6 P2-2): a hung `claude` (network stall, stuck
     # auth prompt, wedged node) would otherwise block the stdout read loop —
@@ -143,21 +144,33 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
     watchdog.start()
     try:
         assert proc.stdin is not None and proc.stdout is not None
-        try:
-            proc.stdin.write(stdin_text)
-            proc.stdin.close()
-        except OSError:
-            # audit6 P2-3: the child exited at startup (bad flag, corrupt
-            # install) before consuming stdin, so the pipe write broke before
-            # any stdout existed. The real diagnostics are on the child's
-            # stderr — swallow the BrokenPipeError, drain whatever stdout
-            # there is (immediate EOF), and let the nonzero-exit branch below
-            # read stderr back and raise it instead of a bare "[Errno 32]".
-            stdin_ok = False
+        # audit P1-1: feed stdin on its own daemon thread so the main thread can
+        # start draining stdout IMMEDIATELY. Writing the whole (potentially
+        # multi-MB) prompt synchronously here first would deadlock a child that
+        # floods stdout before it finishes reading stdin: the parent blocks on
+        # stdin.write (child not yet reading) while the child blocks on
+        # stdout.write (parent not yet draining). Mirrors sandbox._feed_stdin.
+        #
+        # `stdin_ok` records whether the child consumed stdin cleanly. A broken
+        # pipe means the child exited at startup (bad flag, corrupt install)
+        # before reading stdin — the real diagnostics are on its stderr, which
+        # the nonzero-exit branch below reads back and raises instead of a bare
+        # "[Errno 32]". The main thread only reads this flag after joining the
+        # feeder (below), so no lock is needed.
+        def _feed_stdin() -> None:
+            nonlocal stdin_ok
             try:
-                proc.stdin.close()
+                proc.stdin.write(stdin_text)
             except OSError:
-                pass
+                stdin_ok = False
+            finally:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+
+        stdin_thread = threading.Thread(target=_feed_stdin, daemon=True)
+        stdin_thread.start()
         for line in proc.stdout:
             yield line
         with watchdog_lock:
@@ -188,6 +201,13 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()  # last resort if terminate/taskkill was ignored
+        # Reap the stdin feeder before reading `stdin_ok`/returncode below. Once
+        # the child has exited (drained to EOF, killed, or crashed) the write
+        # unblocks — broken-pipe on a dead child, or completed on a clean run —
+        # so the join returns promptly. Guarded in case an error unwound the try
+        # before the thread was even started.
+        if stdin_thread is not None:
+            stdin_thread.join(timeout=5)
         if proc.stdout is not None:
             proc.stdout.close()
         returncode = proc.wait()

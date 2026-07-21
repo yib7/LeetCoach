@@ -24,12 +24,12 @@ import json
 import logging
 
 import pytest
+from _helpers import CLASSIFY_JSON
+from _helpers import parse_sse as _parse_sse
 
 import app as app_module
 
 # --- a fake Claude that answers both the classify and the answer prompt ---
-
-CLASSIFY_JSON = {"problem_type": "two_pointers", "topics": ["arrays"]}
 
 ANSWER_MARKDOWN = (
     "Here is the reasoning. We use a hash map.\n\n"
@@ -45,11 +45,24 @@ ANSWER_MARKDOWN = (
 )
 
 
+QUICK_ASK_ANSWER = (
+    "`heapq.heappush(heap, item)` pushes onto a min-heap.\n\n"
+    "```python\nimport heapq\nheapq.heappush(h, 3)\n```"
+)
+
+# Quick Ask calls recorded as (prompt, model) so tests can assert on both;
+# reset per-test by the `client` fixture (and directly by standalone tests).
+QA_CALLS: list[tuple[str, str | None]] = []
+
+
 def fake_run(prompt, **kwargs):
     """Mirror claude_cli.run: yield text deltas. Branch on the prompt so one
-    fake serves both the classifier call and the answer call."""
+    fake serves the classifier, answer, and quick-ask calls."""
     if "Classify the following" in prompt and "Respond with ONLY a tiny" in prompt:
         text = json.dumps(CLASSIFY_JSON)
+    elif "You are a quick-reference assistant" in prompt:
+        QA_CALLS.append((prompt, kwargs.get("model")))
+        text = QUICK_ASK_ANSWER
     else:
         text = ANSWER_MARKDOWN
     # chunk it so the stream is genuinely incremental
@@ -60,35 +73,10 @@ def fake_run(prompt, **kwargs):
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+    QA_CALLS.clear()
     application = app_module.create_app(run_fn=fake_run)
     application.config.update(TESTING=True)
     return application.test_client(), tmp_path
-
-
-def _parse_sse(body: str):
-    """Split a raw SSE body into (text_chunks, events) where events is a list of
-    (event_name, payload)."""
-    text_chunks = []
-    events = []
-    for block in body.split("\n\n"):
-        block = block.strip("\n")
-        if not block:
-            continue
-        lines = block.split("\n")
-        event_name = None
-        data_lines = []
-        for line in lines:
-            if line.startswith("event:"):
-                event_name = line[len("event:"):].strip()
-            elif line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
-        data = "\n".join(data_lines)
-        if event_name is None:
-            # plain data: event => a text delta (json-encoded string)
-            text_chunks.append(json.loads(data))
-        else:
-            events.append((event_name, json.loads(data) if data else None))
-    return text_chunks, events
 
 
 # --- GET / ---------------------------------------------------------------
@@ -99,6 +87,27 @@ def test_index_serves_page(client):
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
     assert "<textarea" in html.lower()
+
+
+def test_index_has_quick_ask_panel(client):
+    c, _ = client
+    resp = c.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert 'id="quickask"' in html
+
+
+def test_security_headers_present(client):
+    c, _ = client
+    resp = c.get("/")
+    csp = resp.headers.get("Content-Security-Policy", "")
+    # Strict policy holds because every script/style/font is self-hosted and the
+    # renderer only emits inline data: images (defense-in-depth for the
+    # untrusted-markdown surface, incl. Quick Ask).
+    assert "default-src 'none'" in csp
+    assert "script-src 'self'" in csp
+    assert "img-src 'self' data:" in csp
+    assert resp.headers.get("X-Content-Type-Options") == "nosniff"
 
 
 # --- POST /run, Answer mode end-to-end -----------------------------------
@@ -181,6 +190,31 @@ def test_run_rejects_empty_problem(client):
         json={"problem": "   ", "mode": "answer", "language": "python", "tier": "normal"},
     )
     assert resp.status_code == 400
+
+
+# --- non-string JSON fields -> clean 400, not a 500 stack trace (3.12) ------
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # problem is not a string -> the .strip()/slice used to blow up with 500
+        {"problem": 123, "mode": "answer", "language": "python", "tier": "normal"},
+        {"problem": ["x"], "mode": "answer", "language": "python", "tier": "normal"},
+        # mode / language / tier are not strings
+        {"problem": "x", "mode": 5, "language": "python", "tier": "normal"},
+        {"problem": "x", "mode": "answer", "language": 5, "tier": "normal"},
+        {"problem": "x", "mode": "answer", "language": "python", "tier": ["normal"]},
+    ],
+)
+def test_run_rejects_non_string_fields(client, payload):
+    """A script/curl sending a non-string JSON field must get a clean 400 with an
+    ``error`` message, never a 500 stack trace (unauthenticated local endpoint)."""
+    c, tmp_path = client
+    resp = c.post("/run", json=payload)
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+    # a bad-type request must not spend Claude budget or save anything
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
 
 
 # --- mid-stream subprocess failure -> SSE error event --------------------
@@ -362,6 +396,272 @@ def test_run_failure_logs_traceback(tmp_path, monkeypatch, caplog):
     assert records[0].exc_info, "log record should carry exc_info (traceback)"
     assert "Traceback" in caplog.text
     assert "boom from claude" in caplog.text
+
+
+# --- POST /ask (Quick Ask, SP2) -------------------------------------------
+
+def test_ask_returns_answer(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "How does heapq.heappush work?"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"answer": QUICK_ASK_ANSWER}
+
+
+def test_ask_uses_quick_ask_model(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "syntax of heappush?"})
+    assert resp.status_code == 200
+    assert QA_CALLS, "expected the quick-ask prompt to reach run_fn"
+    _, model = QA_CALLS[0]
+    assert model == "haiku"
+
+
+@pytest.mark.parametrize("question", [None, "", "   "])
+def test_ask_rejects_missing_or_blank_question(client, question):
+    c, _ = client
+    payload = {} if question is None else {"question": question}
+    resp = c.post("/ask", json=payload)
+    assert resp.status_code == 400
+    assert "question" in resp.get_json()["error"].lower()
+
+
+def test_ask_rejects_oversized_question_but_allows_500(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "x" * 501})
+    assert resp.status_code == 400
+    resp = c.post("/ask", json={"question": "x" * 500})
+    assert resp.status_code == 200
+
+
+def test_ask_rejects_unknown_language(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "q?", "language": "rust"})
+    assert resp.status_code == 400
+    assert "language" in resp.get_json()["error"].lower()
+
+
+def test_ask_defaults_language_to_python(client):
+    c, _ = client
+    resp = c.post("/ask", json={"question": "what does zip do?"})
+    assert resp.status_code == 200
+    prompt, _ = QA_CALLS[0]
+    assert "Python" in prompt
+
+
+def test_ask_run_failure_returns_502(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+
+    def failing_run(prompt, **kwargs):
+        raise app_module.claude_cli.ClaudeUnavailableError("claude fell over")
+        yield  # pragma: no cover - makes this a generator like the real runner
+
+    application = app_module.create_app(run_fn=failing_run)
+    application.config.update(TESTING=True)
+    resp = application.test_client().post("/ask", json={"question": "q?"})
+    assert resp.status_code == 502
+    assert "error" in resp.get_json()
+
+
+@pytest.mark.parametrize("chunks", [[], ["  ", "\n"]])
+def test_ask_empty_answer_returns_502(tmp_path, monkeypatch, chunks):
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+
+    def empty_run(prompt, **kwargs):
+        yield from chunks
+
+    application = app_module.create_app(run_fn=empty_run)
+    application.config.update(TESTING=True)
+    resp = application.test_client().post("/ask", json={"question": "q?"})
+    assert resp.status_code == 502
+    assert "error" in resp.get_json()
+
+
+def test_ask_problem_lands_inside_context_fence(client):
+    c, _ = client
+    resp = c.post(
+        "/ask",
+        json={"question": "q?", "problem": "Two Sum: find indices."},
+    )
+    assert resp.status_code == 200
+    prompt, _ = QA_CALLS[0]
+    open_fence = "--- BEGIN PROBLEM CONTEXT (do not solve) ---"
+    close_fence = "--- END PROBLEM CONTEXT ---"
+    assert open_fence in prompt and close_fence in prompt
+    inside = prompt.split(open_fence, 1)[1].split(close_fence, 1)[0]
+    assert "Two Sum: find indices." in inside
+
+
+def test_ask_truncates_oversized_problem(client):
+    c, _ = client
+    big = "A" * 7000
+    resp = c.post("/ask", json={"question": "q?", "problem": big})
+    assert resp.status_code == 200
+    prompt, _ = QA_CALLS[0]
+    assert "A" * app_module.QUICK_ASK_PROBLEM_CONTEXT_CAP in prompt
+    assert big not in prompt
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # question is not a string -> the .strip() used to blow up with 500
+        {"question": 123},
+        {"question": ["a"]},
+        # problem is not a string -> the CAP slice (outside try/except) used to 500
+        {"question": "hi", "problem": 999},
+        {"question": "hi", "problem": ["x"]},
+        # language is not a string -> the .strip().lower() used to 500
+        {"question": "hi", "language": 5},
+    ],
+)
+def test_ask_rejects_non_string_fields(client, payload):
+    """Non-string JSON fields to /ask must return a clean 400 with an ``error``
+    message, never a 500 (the problem-context slice sits outside the try/except)."""
+    c, _ = client
+    resp = c.post("/ask", json=payload)
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+
+# --- config knob: quick_ask_model (tested next to its consumer) ------------
+
+def test_quick_ask_model_knob_defaults_to_haiku(monkeypatch):
+    import config
+
+    monkeypatch.delenv("LEETCOACH_QUICK_ASK_MODEL", raising=False)
+    assert config.quick_ask_model() == "haiku"
+    monkeypatch.setenv("LEETCOACH_QUICK_ASK_MODEL", "sonnet")
+    assert config.quick_ask_model() == "sonnet"
+
+
+# --- P2-3: oversized POST rejected with 413 ------------------------------
+
+def test_oversized_run_post_is_rejected_413(client):
+    c, _ = client
+    big = "x" * (2 * 1024 * 1024 + 1024)  # just over the 2 MiB cap
+    resp = c.post(
+        "/run",
+        json={"problem": big, "mode": "answer", "language": "python", "tier": "normal"},
+    )
+    assert resp.status_code == 413, resp.status_code
+
+
+# --- P2-12: in-flight /run de-duplication (409) --------------------------
+
+_RUN_PAYLOAD = {
+    "problem": "Two Sum: return indices adding to target.",
+    "mode": "answer",
+    "language": "python",
+    "tier": "normal",
+}
+
+
+def test_duplicate_inflight_run_is_rejected_409_then_freed(client):
+    """A second identical run while the first is still streaming gets a 409;
+    once the first stream is drained the key frees and an identical run works."""
+    c, _ = client
+    # First request: the view registers the in-flight key and returns a streaming
+    # Response whose body generator has NOT run yet (lazy — consumed on get_data).
+    r1 = c.post("/run", json=_RUN_PAYLOAD)
+    assert r1.status_code == 200
+    # Second identical request while r1 is in-flight -> 409.
+    r2 = c.post("/run", json=_RUN_PAYLOAD)
+    assert r2.status_code == 409, r2.status_code
+    assert "already in progress" in r2.get_json()["error"]
+    # Drain r1 -> its generator finally releases the key.
+    r1.get_data(as_text=True)
+    # A later identical request now succeeds (key was freed).
+    r3 = c.post("/run", json=_RUN_PAYLOAD)
+    assert r3.status_code == 200, r3.status_code
+    r3.get_data(as_text=True)  # drain so it saves + releases
+
+
+def test_distinct_keys_do_not_collide(client):
+    """Different (problem/mode/language/tier) tuples never dedupe each other."""
+    c, _ = client
+    r1 = c.post("/run", json=_RUN_PAYLOAD)
+    assert r1.status_code == 200
+    other = dict(_RUN_PAYLOAD, tier="complex")  # distinct valid key
+    r2 = c.post("/run", json=other)
+    assert r2.status_code == 200, r2.status_code  # no false 409 across distinct keys
+    # Drain LIFO — two stream_with_context responses held open share one request-
+    # context stack in the test client, so pop them last-in-first-out.
+    r2.get_data(as_text=True)
+    r1.get_data(as_text=True)
+
+
+# --- P2-6: /library listing is cached and invalidates on change ----------
+
+def test_library_listing_is_cached_and_invalidates_on_change(client, monkeypatch):
+    import os
+    c, tmp = client
+    calls = []
+    real = app_module._library_files
+
+    def counting(root):
+        calls.append(1)
+        return real(root)
+
+    monkeypatch.setattr(app_module, "_library_files", counting)
+
+    (tmp / "a.md").write_text("x", encoding="utf-8")
+    assert c.get("/library").status_code == 200          # miss -> walks
+    n1 = len(calls)
+    assert n1 >= 1
+    c.get("/library")                                    # same sig -> cache hit
+    assert len(calls) == n1, "unchanged library should serve from cache"
+
+    (tmp / "b.md").write_text("y", encoding="utf-8")
+    os.utime(tmp)  # bump root mtime deterministically (coarse-clock safety)
+    c.get("/library")                                    # sig changed -> re-walk
+    assert len(calls) == n1 + 1, "a change must invalidate the cache"
+
+
+# --- P2-11: DELETE /library/file -----------------------------------------
+
+def test_delete_removes_contained_file_and_refreshes_listing(client):
+    c, tmp = client
+    f = tmp / "answers" / "hash_map" / "two_sum__normal.md"
+    f.parent.mkdir(parents=True)
+    f.write_text("# solution", encoding="utf-8")
+
+    listed = c.get("/library").get_json()["files"]
+    rel = "answers/hash_map/two_sum__normal.md"
+    assert any(x["path"] == rel for x in listed)
+
+    resp = c.delete("/library/file?path=" + rel)
+    assert resp.status_code == 200, resp.status_code
+    assert resp.get_json()["deleted"] is True
+    assert not f.exists()
+
+    # listing refreshes (cache invalidated) — the file is gone
+    listed2 = c.get("/library").get_json()["files"]
+    assert all(x["path"] != rel for x in listed2)
+
+
+def test_delete_rejects_path_traversal(client):
+    c, tmp = client
+    victim = tmp.parent / "leetcoach_delete_victim.md"
+    victim.write_text("keep me", encoding="utf-8")
+    try:
+        resp = c.delete("/library/file?path=" + "../leetcoach_delete_victim.md")
+        assert resp.status_code == 404, resp.status_code   # uniform no-leak reject
+        assert victim.exists(), "a traversal must never delete outside the root"
+    finally:
+        if victim.exists():
+            victim.unlink()
+
+
+def test_delete_missing_or_bad_suffix_is_404(client):
+    c, tmp = client
+    # nonexistent library file
+    assert c.delete("/library/file?path=answers/none.md").status_code == 404
+    # a real file but a non-library suffix (.log ∉ LIBRARY_EXTENSIONS) must not
+    # be deletable through the library endpoint
+    bad = tmp / "notes.log"
+    bad.write_text("x", encoding="utf-8")
+    assert c.delete("/library/file?path=notes.log").status_code == 404
+    assert bad.exists()
 
 
 # --- app constructs without a live claude --------------------------------

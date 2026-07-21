@@ -28,6 +28,7 @@ together, staying on one shared stem.
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
 
 import config
@@ -56,6 +57,19 @@ _WIN_RESERVED = (
 # Cap a single path segment so a long input (e.g. a whole pasted problem) can't
 # build a filename that blows past the OS path limit — Windows MAX_PATH is ~260.
 _MAX_SLUG = 80
+
+# Serializes resolve-slot-then-write in `_write_entry` (audit P1-2). Flask runs
+# `threaded=True`, so two concurrent identical-shaped saves (same problem,
+# problem_type, tier/language) could otherwise both observe "slot N is free"
+# in `_resolve_slot` before either has written, and the second write would
+# silently clobber the first's saved material — violating the "no silent
+# overwrites" guarantee above. This mirrors `topic_index._RECORD_LOCK`: a
+# single module-level lock is sufficient for a single-process personal tool
+# (no per-path locking needed); contention is trivial. The lock must cover
+# BOTH the slot resolution AND the write(s) as one critical section — a lock
+# that only guarded `_resolve_slot` and released before writing would still
+# let two threads resolve to the same free slot before either had written.
+_WRITE_LOCK = threading.Lock()
 
 
 def slug(name: str) -> str:
@@ -157,9 +171,12 @@ def _write_entry(folder: Path, stem: str, files: list[tuple[str, str]]) -> list[
 
     Identical re-runs are idempotent (same paths, no duplicates); a collision
     with different content shifts the whole group to the next ``__N`` stem.
+    Resolving the slot and writing to it happen inside one lock (audit P1-2)
+    so the whole check-then-write is atomic under concurrent callers.
     """
-    paths = _resolve_slot(folder, stem, files)
-    return [_write(path, body) for path, (_, body) in zip(paths, files)]
+    with _WRITE_LOCK:
+        paths = _resolve_slot(folder, stem, files)
+        return [_write(path, body) for path, (_, body) in zip(paths, files)]
 
 
 def save_learning(problem: str, problem_type: str, body: str) -> str:

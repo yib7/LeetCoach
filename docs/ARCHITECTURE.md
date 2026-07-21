@@ -79,11 +79,24 @@ sequenceDiagram
     F-->>U: SSE event: done {paths, verification}
 ```
 
+## Quick Ask
+
+Alongside the main study flow there is a lightweight side channel. `POST /ask`
+takes a small syntax, standard-library, or concept question and answers it in a
+few sentences using the same injected Claude runner as `/run`, but pointed at the
+cheap quick-ask model (Haiku by default, see `config.quick_ask_model()`). It is a
+lookup, not a lesson: the reply is plain JSON rather than an SSE stream, and
+nothing is written to the library. `prompts.build_quick_ask` carries a guardrail
+so the cheap model refuses questions that are really asking how to solve the
+current problem, with a deliberate carve-out that keeps genuinely abstract
+questions ("what does `defaultdict` do?") answerable. The pasted problem, when
+present, is fenced as context only to power that guardrail.
+
 ## The modules
 
 | Module | Responsibility |
 | --- | --- |
-| `app.py` | Flask app factory, the streaming `/run` endpoint, and the read-only library browser (`GET /library` lists the output tree, `GET /library/file` serves one file as plain text). Validates input (including a loopback Host-header check), orchestrates classify → prompt → stream → verify → save, and emits SSE events. The Claude runner is injectable so tests never spawn a real process. |
+| `app.py` | Flask app factory, the streaming `/run` endpoint, and the read-only library browser (`GET /library` lists the output tree, `GET /library/file` serves one file as plain text), and the plain-JSON Quick Ask endpoint (`POST /ask`, see above). Validates input (including a loopback Host-header check), orchestrates classify → prompt → stream → verify → save, and emits SSE events. The Claude runner is injectable so tests never spawn a real process. |
 | `claude_cli.py` | The keystone. Wraps `claude -p --output-format stream-json`. The prompt is piped on **stdin** (never argv), and the stream-json output is parsed into incremental text deltas. |
 | `classifier.py` | One short Claude call to label the problem (a `problem_type` slug plus a topic list). Never raises; falls back to `uncategorized`. |
 | `prompts.py` | Prompt templates per mode x tier x language, with the always-on Big-O instruction. |

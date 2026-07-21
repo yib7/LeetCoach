@@ -138,9 +138,11 @@ def classify(problem: str, *, run_fn=claude_cli.run, **run_kwargs) -> Classifica
     raw_type = obj.get("problem_type")
     if isinstance(raw_type, str) and raw_type.strip():
         problem_type = storage.slug(raw_type)
-        # slug("untitled") fallback would mask a real-but-odd label; only treat
-        # genuinely empty/garbage labels as a miss.
-        if not problem_type:
+        # slug() never returns ""; all-garbage/punctuation labels collapse to its
+        # "untitled" sentinel. A legitimate problem_type is always a snake_case
+        # technique slug, never "untitled", so treat that sentinel as a miss and
+        # route it to the real fallback bucket rather than a stray "untitled" one.
+        if problem_type == "untitled":
             problem_type = FALLBACK_TYPE
     else:
         problem_type = FALLBACK_TYPE

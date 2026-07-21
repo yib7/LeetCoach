@@ -1,4 +1,5 @@
-"""Flask web layer for LeetCoach: a single page + an SSE `/run` endpoint.
+"""Flask web layer for LeetCoach: a single page, an SSE `/run` endpoint, the
+read-only `/library` pair, and the plain-JSON Quick Ask `/ask` endpoint.
 
 Design mirrors the Xeno RAG pattern, in Flask flavour:
 
@@ -75,10 +76,32 @@ LEARNED_TOPICS_CAP = 50
 # is covered; anything else in the output dir is invisible to the read path.
 LIBRARY_EXTENSIONS = frozenset({".md", ".py", ".cpp", ".java", ".txt", ".json"})
 
+# Quick Ask bounds: the question stays small (it's a syntax lookup, not an
+# essay), and the optional problem CONTEXT is capped server-side so a pasted
+# novel can't balloon the Haiku prompt.
+QUICK_ASK_MAX_QUESTION = 500
+QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
+
 # Allowlists — never pass an arbitrary string downstream to prompts/storage.
 MODES = ("answer", "learning", "guided")
 LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
 TIERS = prompts.TIERS                  # ("simple", "normal", "complex")
+
+
+def _non_string_field_error(data: dict, fields) -> str | None:
+    """Return a 400-worthy message if any named field is PRESENT but not a
+    string, else ``None``. ``fields`` is an iterable of ``(key, Label)`` pairs.
+
+    These endpoints are unauthenticated local routes any script/curl can hit,
+    so a JSON number/list/object in a text field must yield a clean 400 — not an
+    ``AttributeError``/``TypeError`` 500 from a downstream ``.strip()`` or slice
+    (checklist 3.12). A missing field (``None``) and a real string both pass, so
+    the existing missing/string handling downstream is untouched."""
+    for key, label in fields:
+        value = data.get(key)
+        if value is not None and not isinstance(value, str):
+            return f"{label} must be text."
+    return None
 
 
 def _hostname(host: str) -> str:
@@ -226,6 +249,46 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
     BOTH the classifier and the answer stream (tests pass a fake)."""
     app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
 
+    # Reject oversized request bodies with a clean 413 instead of buffering an
+    # unbounded POST into memory (P2-3). A LeetCode problem is a few KB; 2 MiB is
+    # generous headroom while still capping a hostile/accidental flood.
+    app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+
+    # In-flight /run de-duplication (P2-12): a single-user local tool should not
+    # fan the same (problem, mode, language, tier) into N concurrent Claude runs
+    # (double-click, impatient re-submit). Keyed set guarded by a lock; the key
+    # is registered after validation and released when the stream ends — on
+    # normal completion, client disconnect (GeneratorExit), or error.
+    _inflight_runs: set = set()
+    _inflight_lock = threading.Lock()
+
+    # Library-listing cache (P2-6): the read-only /library walk (rglob + a stat
+    # per file) reran on every tab-open and post-run refresh. Cache the result
+    # behind a cheap freshness signature — an app-owned version counter (bumped
+    # whenever the app itself saves or deletes a library file) combined with the
+    # output-root mtime (catches a top-level change made outside the app). On a
+    # hit /library returns without touching the filesystem tree.
+    _lib_cache: dict = {"sig": None, "files": None}
+    _lib_version = [0]
+    _lib_lock = threading.Lock()
+
+    def _invalidate_library_cache():
+        with _lib_lock:
+            _lib_version[0] += 1
+
+    def _cached_library_files() -> list[dict]:
+        root = config.output_dir().resolve()
+        try:
+            root_mtime = root.stat().st_mtime if root.is_dir() else None
+        except OSError:
+            root_mtime = None
+        with _lib_lock:
+            sig = (_lib_version[0], root_mtime)
+            if _lib_cache["files"] is None or _lib_cache["sig"] != sig:
+                _lib_cache["files"] = _library_files(root)
+                _lib_cache["sig"] = sig
+            return _lib_cache["files"]
+
     @app.before_request
     def _reject_foreign_hosts():
         # DNS-rebinding defense (audit P1-3): a malicious page can point its own
@@ -237,11 +300,23 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
             return jsonify({"error": "Forbidden host."}), 403
 
     @app.after_request
-    def _no_cache(resp):
+    def _response_headers(resp):
         # Force revalidation of the frontend code so an edited app.js/style.css
         # is never silently served stale during local iteration.
         if request.path == "/" or request.path.startswith("/static/"):
             resp.headers["Cache-Control"] = "no-cache"
+        # Defense-in-depth for the untrusted-markdown surface (Claude's output,
+        # incl. the cheaper Quick Ask model, is rendered into the page). Every
+        # script/style/font is a self-hosted file and the only images the
+        # renderer emits are inline data: URIs, so a strict policy holds without
+        # 'unsafe-inline'. connect-src 'self' keeps /run, /ask, /library fetches
+        # same-origin. nosniff protects the text/plain /library/file route.
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+            "base-uri 'none'; form-action 'none'"
+        )
+        resp.headers["X-Content-Type-Options"] = "nosniff"
         return resp
 
     @app.get("/")
@@ -264,7 +339,8 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
     def library():
         # Read-only listing of the study library (SP10). Missing/empty output
         # dir is an empty listing — the library just hasn't accumulated yet.
-        return jsonify({"files": _library_files(config.output_dir().resolve())})
+        # Served from the freshness-keyed cache (P2-6).
+        return jsonify({"files": _cached_library_files()})
 
     @app.get("/library/file")
     def library_file():
@@ -282,9 +358,39 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
             return jsonify({"error": "Not found."}), 404
         return Response(body, mimetype="text/plain")
 
+    @app.delete("/library/file")
+    def delete_library_file():
+        # Delete ONE library file (P2-11). Reuses the exact containment gate as
+        # the read path, so a traversal / escape / absolute path / non-library
+        # suffix / missing file is the SAME uniform 404 — a rejection never
+        # leaks whether a target exists or where the root sits, matching the
+        # GET /library/file no-leak design. There is deliberately no mass-delete.
+        resolved = _resolve_library_file(request.args.get("path", ""))
+        if resolved is None:
+            return jsonify({"error": "Not found."}), 404
+        try:
+            resolved.unlink()
+        except OSError:
+            # Vanished between the resolve and the unlink, or a permission/lock
+            # issue — never 500 the caller; the file is effectively gone.
+            return jsonify({"error": "Not found."}), 404
+        _invalidate_library_cache()  # next /library reflects the removal
+        return jsonify({"deleted": True})
+
     @app.post("/run")
     def run():
         data = request.get_json(silent=True) or {}
+
+        # Type-check before any .strip()/.lower(): a non-string field (a script
+        # posting a JSON number/list) must be a clean 400, not a 500 (3.12).
+        type_err = _non_string_field_error(
+            data,
+            (("problem", "Problem"), ("mode", "Mode"),
+             ("language", "Language"), ("tier", "Tier")),
+        )
+        if type_err:
+            return jsonify({"error": type_err}), 400
+
         problem = (data.get("problem") or "").strip()
         mode = (data.get("mode") or "").strip().lower()
         language = (data.get("language") or "").strip().lower()
@@ -300,6 +406,16 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
         # Learning has no tier; Answer/Guided require a valid one.
         if mode != "learning" and tier not in TIERS:
             return jsonify({"error": f"Unknown tier {tier!r}."}), 400
+
+        # De-dup identical in-flight runs (P2-12). Register atomically after
+        # validation; an exact duplicate that's still streaming gets a 409.
+        run_key = (problem, mode, language, tier)
+        with _inflight_lock:
+            if run_key in _inflight_runs:
+                return jsonify(
+                    {"error": "An identical run is already in progress."}
+                ), 409
+            _inflight_runs.add(run_key)
 
         def _stream_and_accumulate(prompt):
             """Stream ``run_fn(prompt)`` deltas to the client (yielding SSE text
@@ -450,6 +566,11 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                     cls = _classification()  # join before the save needs its result
                     paths = [storage.save_guided(problem, cls.problem_type, saved)]
 
+                # A new artifact just landed under output/ — drop the library
+                # cache so the next /library (the frontend refreshes right after
+                # a run) reflects it even for a nested save the root mtime misses.
+                _invalidate_library_cache()
+
                 # 5) terminal success event
                 done_payload = {
                     "mode": mode,
@@ -465,6 +586,13 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                 # client still gets only the short message below.
                 app.logger.exception("run failed (mode=%s)", mode)
                 yield _sse_event("error", f"Run failed: {exc}")
+            finally:
+                # Release the in-flight key no matter how the stream ends —
+                # normal completion, error, or a client disconnect (which raises
+                # GeneratorExit here, bypassing the except above). Frees an
+                # identical run to start again.
+                with _inflight_lock:
+                    _inflight_runs.discard(run_key)
 
         return Response(
             stream_with_context(event_stream()),
@@ -474,6 +602,54 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
                 "X-Accel-Buffering": "no",  # disable proxy buffering if present
             },
         )
+
+    @app.post("/ask")
+    def ask():
+        # Quick Ask (SP2): a small syntax/stdlib question answered by the cheap
+        # quick-ask model via the SAME injected run_fn as /run. The answer is
+        # ephemeral — plain JSON, no SSE, nothing saved to the library.
+        data = request.get_json(silent=True) or {}
+
+        # Type-check before any .strip()/.lower() OR the problem-context slice
+        # below (which sits outside the try/except): a non-string field must be
+        # a clean 400, not a 500 (3.12), mirroring /run.
+        type_err = _non_string_field_error(
+            data,
+            (("question", "Question"), ("language", "Language"),
+             ("problem", "Problem")),
+        )
+        if type_err:
+            return jsonify({"error": type_err}), 400
+
+        question = (data.get("question") or "").strip()
+        language = (data.get("language") or "").strip().lower() or "python"
+        problem = data.get("problem") or ""
+
+        # --- validation (reject before any Claude call, mirroring /run)
+        if not question:
+            return jsonify({"error": "A question is required."}), 400
+        if len(question) > QUICK_ASK_MAX_QUESTION:
+            return jsonify(
+                {"error": f"Question too long (max {QUICK_ASK_MAX_QUESTION} chars)."}
+            ), 400
+        if language not in LANGUAGES:
+            return jsonify({"error": f"Unknown language {language!r}."}), 400
+
+        prompt = prompts.build_quick_ask(
+            question,
+            language=language,
+            problem=problem[:QUICK_ASK_PROBLEM_CONTEXT_CAP],
+        )
+        try:
+            answer = "".join(run_fn(prompt, model=config.quick_ask_model())).strip()
+        except Exception as exc:  # noqa: BLE001 - surface as a clean 502, log the rest
+            app.logger.exception("quick ask failed")
+            return jsonify({"error": f"Quick Ask failed: {exc}"}), 502
+        if not answer:
+            # Same stance as /run's empty-stream guard: no text is a failure,
+            # not an empty success.
+            return jsonify({"error": "Claude returned an empty answer."}), 502
+        return jsonify({"answer": answer})
 
     return app
 

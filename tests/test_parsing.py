@@ -52,6 +52,31 @@ def test_falls_back_to_first_fence_when_no_language_match():
     assert parsing.extract_code(md, "python") == "just code no tag"
 
 
+def test_nested_indented_fence_does_not_truncate_code():
+    # P2-5: a solution whose docstring embeds a fenced markdown example (the
+    # inner ``` is indented) must NOT truncate at that inner fence — the whole
+    # function body, including code AFTER the nested example, is extracted.
+    md = (
+        "Here is the solution.\n\n"
+        "```python\n"
+        "def solve():\n"
+        '    doc = """\n'
+        "    Example usage:\n"
+        "    ```\n"
+        "    solve()\n"
+        "    ```\n"
+        '    """\n'
+        "    return 42\n"
+        "```\n\n"
+        "Complexity: O(1)."
+    )
+    code = parsing.extract_code(md, "python")
+    assert "def solve():" in code
+    assert "return 42" in code          # not truncated at the inner fence
+    assert "    ```" in code            # the indented inner fences are preserved
+    assert "Complexity" not in code     # prose after the real close is excluded
+
+
 def test_returns_empty_when_no_fence():
     md = "Pure prose, no code at all."
     assert parsing.extract_code(md, "python") == ""

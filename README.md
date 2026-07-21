@@ -10,7 +10,7 @@ generated Python against the problem's own sample I/O to tell you whether the so
 actually passes. No API key: it drives your existing Claude Code subscription through the
 CLI.
 
-![LeetCoach in the Console streaming an Answer token by token, then the Library showing a saved solution with its walkthrough, Big-O line, and syntax-highlighted code](docs/media/demo.gif)
+![The LeetCoach Console: asking "how do I make a min-heap in Python with heapq?" in the Quick Ask box and getting a short answer with a highlighted code block, then opening the study library to a saved solution with its walkthrough and Big-O line](docs/media/demo.gif)
 
 ## What it does
 
@@ -23,9 +23,13 @@ CLI.
 - **Self-checking.** Generated Python solutions are run against the problem's `Input:` /
   `Output:` examples in a throwaway sandbox and reported as PASS / FAIL.
 - **Builds a library.** Every run is saved under `output/`, organized by problem type, and
-  a topic index lets Learning skip and cross-link what you have already studied. A
-  read-only Library tab browses everything you have saved, and the Console sidebar lists
-  your recent runs.
+  a topic index lets Learning skip and cross-link what you have already studied. The
+  Library tab browses everything you have saved and lets you delete a file you no longer
+  want, and the Console sidebar lists your recent runs.
+- **Quick Ask.** A side box answers a small syntax or stdlib question with Haiku, without
+  streaming or saving anything, so you never break focus to look something up. It refuses to
+  hand over the current problem's solution and points you back to a mode, but still answers
+  abstract questions like "what does `defaultdict` do?".
 
 <p align="center">
   <img src="docs/media/screenshot.png" alt="The Library viewer showing a saved Answer for Squares of a Sorted Array: its two-pointer walkthrough, an explicit Big-O complexity line, and the syntax-highlighted Python solution" width="760">
@@ -65,7 +69,7 @@ the runtime dependencies:
 .\setup.ps1
 ```
 
-(Not on Windows? Run `py -m venv .venv`, activate it, then `pip install -r requirements.txt`.)
+(Not on Windows? Run `python3 -m venv .venv`, activate it, then `pip install -r requirements.txt`.)
 
 **Step 3: run.**
 
@@ -125,23 +129,25 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
 | Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console + Library) |
-| Tests / lint | pytest (224 tests, all mocking the subprocess), ruff |
+| Tests / lint | pytest (281 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Configuration
 
-All six settings are environment variables, overridable in your shell or a `.env` file.
+All eight settings are environment variables, overridable in your shell or a `.env` file.
 All are optional.
 
 | Variable               | Default                        | What it does                                                        |
 | ---------------------- | ------------------------------ | ------------------------------------------------------------------- |
 | `LEETCOACH_MODEL`      | `claude-opus-4-8`              | Claude model id passed to `claude --model` (e.g. `opus` / `sonnet`).|
 | `LEETCOACH_CLASSIFIER_MODEL` | `haiku`                  | Model for the short classification call that tags each run.        |
+| `LEETCOACH_QUICK_ASK_MODEL`  | `haiku`                  | Model for the Quick Ask box (short syntax / stdlib lookups).       |
 | `LEETCOACH_CLAUDE_BIN` | `claude`                       | Name or absolute path of the `claude` executable.                   |
 | `LEETCOACH_OUTPUT_DIR` | `output` next to the app       | Where the study library is written.                                 |
 | `LEETCOACH_TOPIC_INDEX`| `<output_dir>/topic_index.json`| Path to the persisted topic index JSON.                             |
 | `LEETCOACH_RUN_TIMEOUT`| `600`                          | Wall-clock cap in seconds for a single `claude` run.                |
+| `LEETCOACH_VERIFY_TIMEOUT`| `10`                        | Wall-clock cap in seconds for each Answer-mode sample verification. |
 
 ## Where outputs are saved
 
@@ -163,7 +169,7 @@ All tests mock the `claude` subprocess, so the suite runs offline with no real C
 
 ```sh
 pip install -r requirements-dev.txt
-py -m pytest -q
+python -m pytest -q
 ```
 
 ## License

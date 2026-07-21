@@ -232,6 +232,9 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .mini{cursor:pointer;display:inline-flex;align-items:center;gap:6px;font:600 12px var(--sans);color:var(--tx3);background:var(--s1);border:1px solid var(--border);border-radius:7px;padding:6px 10px;transition:color var(--d2) var(--ease),border-color var(--d2),background var(--d2)}
 .mini:hover{color:var(--tx);border-color:var(--border-2);background:var(--s3)}
 .mini.ok{color:var(--mint);border-color:var(--mint-line);background:var(--mint-weak)}
+.mini.danger{color:var(--red)}
+.mini.danger:hover{color:#ffd9da;border-color:var(--red-line);background:var(--red-weak)}
+.mini[disabled]{opacity:.5;cursor:default}
 .mini svg{width:13px;height:13px}
 .hljs{background:transparent;color:#cad8ce}
 
@@ -287,3 +290,14 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 
 @media (max-width:900px){.main{grid-template-columns:1fr}.sidebar{display:none}}
 @media (prefers-reduced-motion:reduce){*{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}.console-idle .prompt .c{opacity:1 !important}}
+
+/* ---- quick ask (Cycle 5) ---- */
+.qa{margin-top:14px}
+.qa.collapsed .p-head{border-bottom:0}
+.qa-row{display:flex;gap:10px;padding:13px 15px}
+#qa-input{flex:1;min-width:0;background:var(--inset);border:1px solid var(--border);border-radius:var(--r2);padding:8px 12px;color:var(--tx);font:13px var(--mono);outline:none;transition:border-color var(--d2) var(--ease),box-shadow var(--d2)}
+#qa-input::placeholder{color:var(--tx4)}
+#qa-input:focus-visible{border-color:var(--grn-line);box-shadow:var(--ring)}
+#qa-ask{flex:0 0 auto}
+.qa-answer{margin:0 15px 14px;padding:13px 16px;border:1px solid var(--border-soft);border-radius:var(--r2);background:var(--inset);font-size:14px}
+.qa-answer.err{color:var(--tx3);font:12.5px var(--mono)}

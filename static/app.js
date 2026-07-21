@@ -86,6 +86,8 @@
   var libViewerPath = $("library-viewer-path");
   var libViewerBody = $("library-viewer-body");
   var libViewerClose = $("library-viewer-close");
+  var libViewerDelete = $("library-viewer-delete");
+  var currentViewPath = null; // the library file currently open in the viewer
 
   // ---- marked XSS hardening (KEEP EXACTLY) --------------------------------
   // Defense-in-depth: Claude's output is untrusted markdown rendered via
@@ -104,6 +106,22 @@
           var attr = escapeHtml(h).replace(/"/g, "&quot;");
           return '<a href="' + attr + '" rel="noopener" target="_blank">' +
             (text || escapeHtml(h)) + "</a>";
+        },
+        // LeetCoach is a local, offline tool with NO legitimate remote-image
+        // use case. A network-loading <img> the browser auto-fetches on render
+        // is a data-egress / tracking channel reachable via prompt-injected
+        // problem text through Claude (incl. Haiku Quick Ask), and breaks the
+        // "Local & offline" promise. So allow ONLY inline data:image/... sources
+        // (SVG loaded via <img> can't run script and makes no request); render
+        // ANY other src — http(s), protocol-relative //, javascript:, relative,
+        // empty — as the alt text, never an <img>. marked v12 passes positional
+        // (href, title, text) like `link` above and pre-escapes `text` (alt),
+        // so it is emitted as-is exactly as `link` emits its `text`.
+        image: function (href, title, text) {
+          var h = String(href || "");
+          if (!/^data:image\//i.test(h)) return text || "";
+          var attr = escapeHtml(h).replace(/"/g, "&quot;");
+          return '<img src="' + attr + '" alt="' + (text || "") + '">';
         },
       },
     });
@@ -766,6 +784,111 @@
   });
 
   // =========================================================================
+  // Quick Ask — one-shot Haiku Q&A, fully independent of the run stream.
+  // Answers are ephemeral (each replaces the last); errors render as PLAIN
+  // TEXT via textContent, success through the same hardened marked pipeline
+  // as render().
+  // =========================================================================
+  var qaInput = $("qa-input");
+  var qaAskBtn = $("qa-ask");
+  var qaAnswer = $("qa-answer");
+  var qaToggle = $("qa-toggle");
+  var qaBody = $("qa-body");
+  var qaPanel = $("quickask");
+  var qaBusy = false;
+
+  // Same one-time delegated Copy listener the other markdown surfaces get.
+  if (qaAnswer) qaAnswer.addEventListener("click", handleCopyCode);
+
+  function showQaAnswer(md) {
+    qaAnswer.classList.remove("err");
+    if (window.marked) {
+      qaAnswer.innerHTML = marked.parse(md); // hardened renderer (see marked.use above)
+      if (window.hljs) {
+        qaAnswer.querySelectorAll("pre code").forEach(function (b) {
+          try { hljs.highlightElement(b); } catch (e) { /* noop */ }
+        });
+      }
+      decorateCode(qaAnswer, false);
+    } else {
+      qaAnswer.textContent = md;
+    }
+    qaAnswer.hidden = false;
+  }
+
+  function showQaError(msg) {
+    qaAnswer.classList.add("err");
+    qaAnswer.textContent = msg; // server/network strings NEVER hit innerHTML
+    qaAnswer.hidden = false;
+  }
+
+  async function quickAsk() {
+    if (qaBusy) return; // one quick-ask in flight at a time
+    var question = qaInput.value.trim();
+    if (!question) return;
+
+    qaBusy = true;
+    qaAskBtn.disabled = true;
+    qaAskBtn.textContent = "Asking…";
+
+    // Own controller — completely independent of the main run's abort state.
+    var controller = new AbortController();
+    function abortOnUnload() { controller.abort(); }
+    window.addEventListener("pagehide", abortOnUnload);
+    window.addEventListener("beforeunload", abortOnUnload);
+
+    try {
+      var resp = await fetch("/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: question,
+          language: activeVal("lang"),
+          problem: problemEl.value.trim(),
+        }),
+        signal: controller.signal,
+      });
+      var data = await resp.json().catch(function () { return {}; });
+      if (resp.ok) {
+        showQaAnswer(String(data.answer || ""));
+      } else {
+        showQaError(data.error || "Request rejected (" + resp.status + ").");
+      }
+    } catch (e) {
+      if (!(e && e.name === "AbortError")) {
+        showQaError("Network error: " + (e && e.message));
+      }
+    } finally {
+      window.removeEventListener("pagehide", abortOnUnload);
+      window.removeEventListener("beforeunload", abortOnUnload);
+      qaBusy = false;
+      qaAskBtn.disabled = false;
+      qaAskBtn.textContent = "Ask";
+    }
+  }
+
+  if (qaAskBtn) qaAskBtn.addEventListener("click", quickAsk);
+  if (qaInput) {
+    // Plain Enter asks; modified Enter falls through to the global ⌘/Ctrl+Enter
+    // run shortcut untouched.
+    qaInput.addEventListener("keydown", function (e) {
+      if ((e.key === "Enter" || e.keyCode === 13) && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        e.preventDefault();
+        quickAsk();
+      }
+    });
+  }
+  if (qaToggle && qaBody) {
+    qaToggle.addEventListener("click", function () {
+      var collapsed = !qaBody.hidden;
+      qaBody.hidden = collapsed;
+      if (qaPanel) qaPanel.classList.toggle("collapsed", collapsed);
+      qaToggle.textContent = collapsed ? "Show" : "Hide";
+      qaToggle.setAttribute("aria-expanded", String(!collapsed));
+    });
+  }
+
+  // =========================================================================
   // Derived real data from /library ( recents · table · topics · tree ).
   // =========================================================================
   var libFiles = [];
@@ -994,6 +1117,7 @@
       if (meta.mtime) vwSub.appendChild(chipEl("saved " + savedDate(meta.mtime), "mono"));
     }
     if (libViewerPath) libViewerPath.textContent = relPath;
+    currentViewPath = relPath;
 
     libViewerBody.innerHTML = "";
     if (meta.ext === "md" && window.marked) {
@@ -1130,12 +1254,36 @@
       });
   }
 
+  function closeViewer() {
+    libViewer.hidden = true;
+    libViewerBody.innerHTML = "";
+    currentViewPath = null;
+    var on = libTree.querySelector(".filerow.on");
+    if (on) on.classList.remove("on");
+  }
+
   if (libViewerClose) {
-    libViewerClose.addEventListener("click", function () {
-      libViewer.hidden = true;
-      libViewerBody.innerHTML = "";
-      var on = libTree.querySelector(".filerow.on");
-      if (on) on.classList.remove("on");
+    libViewerClose.addEventListener("click", closeViewer);
+  }
+
+  if (libViewerDelete) {
+    libViewerDelete.addEventListener("click", function () {
+      var path = currentViewPath;
+      if (!path) return;
+      var name = path.slice(path.lastIndexOf("/") + 1);
+      if (!window.confirm("Delete " + name + " from your library? This can't be undone.")) return;
+      libViewerDelete.disabled = true;
+      fetch("/library/file?path=" + encodeURIComponent(path), { method: "DELETE" })
+        .then(function (resp) {
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          closeViewer();
+          loadLibrary(); // listing refreshes without the deleted file (cache invalidated server-side)
+        })
+        .catch(function (e) {
+          console.warn("Could not delete " + path + " (" + (e && e.message) + ").");
+          window.alert("Could not delete that file.");
+        })
+        .then(function () { libViewerDelete.disabled = false; });
     });
   }
 

@@ -4,6 +4,49 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-20
+
+### Added
+- **Quick Ask**: an inline box for a short syntax, standard-library, or concept
+  question, answered by a cheap model (Haiku by default) without leaving the page.
+  It refuses to solve the problem you are composing, so it stays a lookup helper.
+  Backed by a new `POST /ask` endpoint and the `LEETCOACH_QUICK_ASK_MODEL` setting.
+- **Delete a library file** from the Library viewer. A per-file Delete button
+  removes one saved file; the new `DELETE /library/file` endpoint enforces the
+  same path containment as the read endpoint (no traversal, no mass-delete).
+- `LEETCOACH_VERIFY_TIMEOUT` (default 10s) caps each Answer-mode sample
+  verification independently of the overall run timeout.
+- Security headers on every response: a strict Content-Security-Policy and
+  `X-Content-Type-Options: nosniff`.
+
+### Changed
+- `/run` now rejects an oversized request body with 413, and a duplicate
+  in-flight run (same problem, mode, language, tier) with 409 instead of fanning
+  out concurrent Claude calls.
+- `/run` and `/ask` return 400, not 500, when a JSON field is the wrong type.
+- The `/library` listing is cached behind a freshness key, so opening the Library
+  tab or refreshing after a run no longer re-walks the whole tree each time.
+- The markdown renderer no longer auto-loads remote images (alt text only for
+  non-inline image sources), closing an egress channel.
+
+### Fixed
+- A large prompt could deadlock the `claude` subprocess when its output filled
+  the OS pipe before it finished reading stdin; stdin is now written on its own
+  thread while stdout drains.
+- Concurrent saves of distinct answers for the same problem no longer overwrite
+  each other (storage writes are serialized behind a lock).
+- Code extraction no longer truncates at a nested triple-backtick inside a fenced
+  block; the closing fence is anchored to the start of a line.
+- A garbage `problem_type` from the classifier now falls back to the
+  `uncategorized` bucket instead of a stray `untitled` one.
+- Answer verification distinguishes an errored sample from a wrong-answer sample
+  in the reported status and note.
+
+### Notes
+- The `claude` CLI dependency, the SSE streaming pipeline, the Answer-mode
+  sandbox, the `output/` storage layout, and the `/run` request contract are all
+  unchanged. The suite is now 281 tests, still mocking the subprocess.
+
 ## [1.2.0] - 2026-07-14
 
 ### Changed

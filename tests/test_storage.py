@@ -14,6 +14,7 @@ tests never touch the real ``output/`` tree.
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -289,3 +290,88 @@ def test_answer_pair_moves_together_when_one_sibling_collides(out_root):
     assert (folder / "two_sum__normal.py").read_text(encoding="utf-8") == "old code"
     assert Path(code_path).read_text(encoding="utf-8") == "new code"
     assert Path(reasoning_path).read_text(encoding="utf-8") == "why"
+
+
+# --- concurrency: parallel writes lose no material (P1-2 / P2-8) ----------
+
+def test_concurrent_save_learning_loses_no_bodies(out_root):
+    """Flask runs ``threaded=True``. Many concurrent identical-shaped Learning
+    saves (same problem/type, distinct bodies) must not lose material via a
+    check-then-write race: resolving the collision-free slot and writing to it
+    must be one atomic step, so every distinct body survives under some
+    ``__N`` suffix.
+
+    Regression guard for P1-2: without a lock, threads can all observe "slot 1
+    is free" before any of them writes, so later writes silently clobber
+    earlier ones and most bodies never make it to disk.
+    """
+    n_threads = 24
+    bodies = [f"body_{i}" for i in range(n_threads)]
+    barrier = threading.Barrier(n_threads)
+
+    def worker(i):
+        # Line every thread up at the barrier so they hammer save_learning()
+        # together, maximizing the interleave that would trigger the race.
+        barrier.wait()
+        storage.save_learning("Two Sum", "arrays", bodies[i])
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert all(not t.is_alive() for t in threads), "a save_learning worker hung"
+
+    folder = out_root / "learning" / "arrays_learning"
+    on_disk_files = list(folder.iterdir())
+    on_disk_bodies = {f.read_text(encoding="utf-8") for f in on_disk_files}
+    missing = set(bodies) - on_disk_bodies
+    assert not missing, f"lost {len(missing)} bodies under concurrency: {sorted(missing)}"
+    # Every distinct body must have landed on its OWN file — if two threads
+    # had shared (and clobbered) a slot, this count would be lower than
+    # n_threads even though the "missing" check above happened to pass.
+    assert len(on_disk_files) == n_threads
+
+
+def test_concurrent_save_answer_pairs_stay_matched(out_root):
+    """Same race as above, but for the code+reasoning PAIR that ``save_answer``
+    writes as one logical entry. This proves the lock covers ``_resolve_slot``
+    AND both writes together as a single critical section — a lock that only
+    wrapped ``_resolve_slot`` and released before writing would still let two
+    threads resolve to the same free slot before either had written, which
+    would surface here as a missing pair or a code/reasoning mismatch.
+    """
+    n_threads = 24
+    barrier = threading.Barrier(n_threads)
+
+    def worker(i):
+        barrier.wait()
+        storage.save_answer(
+            "Two Sum", "arrays", tier="normal", language="python",
+            code=f"code_{i}", reasoning=f"reasoning_{i}",
+        )
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert all(not t.is_alive() for t in threads), "a save_answer worker hung"
+
+    folder = out_root / "answers" / "arrays"
+    py_files = sorted(folder.glob("*.py"))
+    md_files = sorted(folder.glob("*.md"))
+    assert len(py_files) == n_threads, (
+        f"expected {n_threads} code files, found {len(py_files)} "
+        "(a shared slot means a pair was clobbered)"
+    )
+    assert len(md_files) == n_threads
+
+    # Every code file's sibling reasoning file must carry the MATCHING index —
+    # proving the pair moved to its slot together, not as two independent
+    # writes that could land on different slots.
+    for py in py_files:
+        i = py.read_text(encoding="utf-8").removeprefix("code_")
+        sibling_md = py.with_suffix(".md")
+        assert sibling_md.exists(), f"{py.name} has no sibling reasoning file"
+        assert sibling_md.read_text(encoding="utf-8") == f"reasoning_{i}"

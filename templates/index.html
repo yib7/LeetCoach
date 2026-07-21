@@ -131,6 +131,22 @@
             </div>
           </section>
 
+          <!-- quick ask (Haiku one-shot; independent of the run stream) -->
+          <section class="panel qa" id="quickask">
+            <div class="p-head">
+              <span class="p-title">Quick Ask <span class="tag">haiku</span></span>
+              <button class="btn ghost" id="qa-toggle" type="button" aria-expanded="true">Hide</button>
+            </div>
+            <div id="qa-body">
+              <div class="qa-row">
+                <input id="qa-input" type="text" maxlength="500" spellcheck="false"
+                       placeholder="Syntax / stdlib lookup — e.g. &#8220;C++ syntax for a min-heap?&#8221; (Enter to ask)">
+                <button class="btn green" id="qa-ask" type="button">Ask</button>
+              </div>
+              <div class="qa-answer md" id="qa-answer" hidden></div>
+            </div>
+          </section>
+
           <!-- ===== session lifecycle (JS shows/hides these) ===== -->
           <div id="session">
             <div class="section-h">
@@ -207,6 +223,7 @@
             <div id="library-viewer" class="lib-view" hidden>
               <div class="vw-head">
                 <code id="library-viewer-path"></code>
+                <button id="library-viewer-delete" class="mini danger" type="button">Delete</button>
                 <button id="library-viewer-close" class="mini" type="button">Close</button>
               </div>
               <div id="library-viewer-body" class="md pad"></div>

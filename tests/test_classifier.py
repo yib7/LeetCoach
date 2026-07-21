@@ -104,6 +104,19 @@ def test_falls_back_when_json_has_no_problem_type():
     assert result.topics == ["arrays"]
 
 
+def test_punctuation_problem_type_falls_back_not_untitled():
+    """A syntactically valid reply whose problem_type is pure punctuation must
+    land in the real fallback bucket, not the ``slug()`` sentinel ``untitled``.
+    ``slug("!!!")`` collapses to ``"untitled"`` (it never returns ""), so the
+    classifier has to recognise that sentinel and map it to ``FALLBACK_TYPE``."""
+    run_fn, _ = make_run_fn(
+        json_deltas({"problem_type": "!!!", "topics": []})
+    )
+    result = classifier.classify("text", run_fn=run_fn)
+    assert result.problem_type == "uncategorized"
+    assert result.problem_type != "untitled"
+
+
 # --- the problem actually reaches the prompt -----------------------------
 
 def test_problem_text_is_in_the_prompt():

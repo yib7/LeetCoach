@@ -49,6 +49,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+import config
 from proc_util import assign_to_job, close_job, create_job_with_caps, kill_process_tree
 
 # Cap captured child output so a runaway print loop can't blow up memory / the
@@ -548,7 +549,7 @@ def verify_answer(code: str, problem_text: str, language: str) -> VerifyResult:
                 return VerifyResult(
                     status="not_verified", note="no sample I/O found in problem"
                 )
-            return _verify_python_samples(code, samples)
+            return _verify_python_samples(code, samples, timeout=config.verify_timeout())
 
         if lang in _COMPILERS:
             compiler, label = _COMPILERS[lang]
@@ -576,14 +577,23 @@ def verify_answer(code: str, problem_text: str, language: str) -> VerifyResult:
         return VerifyResult(status="not_verified", note=f"verifier error: {exc}")
 
 
-def _verify_python_samples(code: str, samples: list) -> VerifyResult:
-    """Run ``code`` against each parsed sample and aggregate the verdict."""
+def _verify_python_samples(
+    code: str, samples: list, *, timeout: float = 10.0
+) -> VerifyResult:
+    """Run ``code`` against each parsed sample and aggregate the verdict.
+
+    Aggregation keeps three verdicts — ``pass`` (all matched), ``error`` (every
+    non-pass sample crashed), ``fail`` (at least one wrong-answer). A mixed run
+    that both fails and errors reports ``fail`` but the note names the errored
+    count too (``"X/Y passed, Z errored"``), so a crash is never silently folded
+    into a plain wrong-answer verdict.
+    """
     total = len(samples)
     passed = 0
+    errored = 0
     detail: list = []
-    saw_error = False
     for idx, s in enumerate(samples, start=1):
-        r = verify_python(code, s.stdin, s.expected_stdout)
+        r = verify_python(code, s.stdin, s.expected_stdout, timeout=int(timeout))
         entry = {"sample": idx, "status": r.status}
         if r.detail:
             entry.update(r.detail[0])
@@ -591,12 +601,16 @@ def _verify_python_samples(code: str, samples: list) -> VerifyResult:
         if r.status == "pass":
             passed += 1
         elif r.status == "error":
-            saw_error = True
+            errored += 1
 
     if passed == total:
         status, note = "pass", f"all {total} sample(s) passed"
-    elif saw_error and passed == 0:
-        status, note = "error", "code errored on sample input"
+    elif errored and passed == 0 and errored == total - passed:
+        # every non-passing sample crashed — a pure error, not a wrong answer
+        status, note = "error", f"code errored on {errored}/{total} sample(s)"
+    elif errored:
+        # mixed: some wrong answers AND some crashes — surface both counts
+        status, note = "fail", f"{passed}/{total} sample(s) passed, {errored} errored"
     else:
         status, note = "fail", f"{passed}/{total} sample(s) passed"
 
