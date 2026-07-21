@@ -41,7 +41,7 @@ button{font-family:inherit}
 
 .topbar{display:flex;align-items:center;gap:16px;padding:0 18px;background:linear-gradient(180deg,#0b110d,#080d0a);border-bottom:1px solid var(--border);box-shadow:0 1px 0 rgba(0,0,0,.4)}
 .brand{display:flex;align-items:center;gap:11px;padding-right:8px}
-.mark{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:linear-gradient(180deg,#123a26,#0a2417);border:1px solid var(--grn-line);box-shadow:inset 0 1px 0 rgba(255,255,255,.08);font:700 12px var(--mono);letter-spacing:-.5px}
+.mark{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#123a26,#0a2417);border:1px solid var(--grn-line);box-shadow:inset 0 1px 0 rgba(255,255,255,.08);font:700 12px var(--mono);letter-spacing:-.5px}
 .mark .bk{color:var(--grn-3)} .mark .lc{color:var(--grn-2)}
 .wm{font:800 17px/1 var(--sans);letter-spacing:-.02em}
 .wm .b{color:var(--grn)}
