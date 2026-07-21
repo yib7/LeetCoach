@@ -21,6 +21,8 @@ CLAUDE.md
 # superpowers plugin work dir; absent now but ignored so a future run never commits it
 .superpowers/
 NEW_UPDATES.md
+# code-audit report (dev scaffolding — findings are fixed in-tree, report never ships)
+LeetCoach_Code_Audit_Report.md
 
 # IDE / editor
 .vscode/
