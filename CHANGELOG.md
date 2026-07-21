@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-07-21
+
+### Fixed
+- The `[lc]` header logo stacked its brackets and letters vertically. The badge
+  used a CSS grid whose default row flow put each span on its own line; it now
+  lays them out inline so the mark reads `[ lc ]`.
+
 ## [1.3.0] - 2026-07-20
 
 ### Added
