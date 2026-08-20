@@ -529,6 +529,10 @@ def test_verify_timeout_env_knob_defaults_and_invalid_values_fall_back(monkeypat
     assert config.verify_timeout() == 10.0
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "-3")
     assert config.verify_timeout() == 10.0
+    # "nan" parses as a float but must still fall back (NaN > 0 is False), so a
+    # NaN knob can't silently disable the sample-verification containment timeout.
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "nan")
+    assert config.verify_timeout() == 10.0
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "4")
     assert config.verify_timeout() == 4.0
 
