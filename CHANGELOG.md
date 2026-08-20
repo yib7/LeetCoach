@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] - 2026-08-19
+
+### Fixed
+- README setup now activates the virtual environment before running the app.
+  Following the steps verbatim on a clean clone previously ran the system Python
+  and failed with a missing-Flask error.
+
+### Changed
+- Refreshed the README screenshot and demo GIF. Both predated the v1.3.1 logo fix
+  and still showed the old stacked `[lc]` mark; they now match the current UI
+  (and show the per-file Delete button added in v1.3.0).
+- Added a Limitations section to the README: single-user localhost, Python-only
+  answer verification, the sandbox as a convenience rather than a security
+  boundary, and the `claude` CLI dependency.
+
+### Internal
+- Pinned Pygments, python-dotenv, and packaging to current patch releases, and
+  capped ruff below 0.16 so CI installs a linter matching the lockfile.
+- Added coverage for the NaN branch of the run and verify timeout settings.
+
 ## [1.3.1] - 2026-07-21
 
 ### Fixed
