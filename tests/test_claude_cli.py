@@ -450,6 +450,12 @@ def test_run_timeout_env_knob_defaults_and_invalid_values_fall_back(monkeypatch)
     assert config.run_timeout() == 600.0
     monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "-5")
     assert config.run_timeout() == 600.0
+    # "nan" parses as a float (bypassing the ValueError path) but must still be
+    # rejected: the guard is `not value > 0`, which the config comment documents
+    # as rejecting NaN too (NaN > 0 is False). A NaN timeout would make the
+    # watchdog Timer wait forever — i.e. silently disable it — so lock it down.
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "nan")
+    assert config.run_timeout() == 600.0
     monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "45")
     assert config.run_timeout() == 45.0
 
