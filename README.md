@@ -164,6 +164,19 @@ output/
   topic_index.json
 ```
 
+## Limitations
+
+Honest about what it does not do:
+
+- **Single-user localhost tool.** No accounts, no auth, no multi-user; it binds to
+  loopback and is not meant to be exposed on a network.
+- **Only Python is auto-verified.** C++ / Java solutions are compiler-probed only and
+  reported "not auto-verified" — verify those yourself.
+- **The sandbox is a convenience, not a security boundary.** It caps time, memory, and
+  process count, but do not rely on it to contain hostile code; see [SECURITY.md](SECURITY.md).
+- **Requires the `claude` CLI.** It drives your Claude Code subscription through the CLI;
+  there is no API-key fallback, so runs fail until `claude` is installed and authenticated.
+
 ## Tests
 
 All tests mock the `claude` subprocess, so the suite runs offline with no real Claude calls.
