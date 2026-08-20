@@ -71,9 +71,10 @@ the runtime dependencies:
 
 (Not on Windows? Run `python3 -m venv .venv`, activate it, then `pip install -r requirements.txt`.)
 
-**Step 3: run.**
+**Step 3: run.** Activate the virtual environment, then start the app:
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
 python app.py
 ```
 
