@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] - 2026-08-26
+
+### Internal
+- Stopped a Windows sandbox test from flaking. The fork-bomb process-cap test
+  asserted one of two valid timing outcomes (the child self-detecting the full
+  job and exiting with a marker code); on a loaded machine the job tears the
+  child down first, so the test failed roughly two runs in three and reddened CI
+  at random. It now asserts the property that actually holds every time: a
+  working cap means the bomb never spawns all its children, so the run never
+  passes.
+- Bumped click to 8.5.0 in the lockfile and cleared a pip advisory (PYSEC-2026-3721)
+  in the local toolchain.
+
 ## [1.3.2] - 2026-08-19
 
 ### Fixed
