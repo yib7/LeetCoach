@@ -223,8 +223,8 @@ def test_fork_bomb_is_stopped_by_active_process_cap_on_windows():
         ``error`` on a nonzero exit).
     The invariant that is NOT timing-dependent is the security one: the bomb
     never prints ``SPAWNED-ALL``, so the result is never ``pass``. With no cap
-    all 32 spawns succeed, the marker prints, and the status IS ``pass`` -- the
-    assertion below is what that regression would flunk. Either way the ~15
+    all 32 spawns succeed, the marker prints, and the status IS ``pass``. That
+    regression is what the assertion below would flunk. Either way the ~15
     sleepers that spawned before the wall are inside the job, so close_job's
     KILL_ON_JOB_CLOSE in verify_python's finally reaps them.
 
@@ -239,7 +239,7 @@ def test_fork_bomb_is_stopped_by_active_process_cap_on_windows():
         "        procs.append(subprocess.Popen(\n"
         "            [sys.executable, '-c', 'import time; time.sleep(20)']))\n"
         "except OSError:\n"
-        "    sys.exit(7)\n"   # the cap said no -- one of the two valid paths
+        "    sys.exit(7)\n"   # the cap said no: one of the two valid paths
         "print('SPAWNED-ALL')\n"
     )
     start = time.monotonic()

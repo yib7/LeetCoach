@@ -11,9 +11,8 @@ All notable changes to this project are documented here. The format follows
   asserted one of two valid timing outcomes (the child self-detecting the full
   job and exiting with a marker code); on a loaded machine the job tears the
   child down first, so the test failed roughly two runs in three and reddened CI
-  at random. It now asserts the property that actually holds every time: a
-  working cap means the bomb never spawns all its children, so the run never
-  passes.
+  at random. It now asserts the property that holds every time: a working cap
+  means the bomb never spawns all its children, so the run never passes.
 - Bumped click to 8.5.0 in the lockfile and cleared a pip advisory (PYSEC-2026-3721)
   in the local toolchain.
 
