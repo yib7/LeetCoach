@@ -5,7 +5,7 @@ Public builders
 * :func:`build_learning` — no tier; teaches the data structures, algorithms and
   language stdlib needed for the problem (optionally skipping topics already
   learned).
-* :func:`build_answer` — tiered (simple / normal / complex); produces code plus
+* :func:`build_answer` — tiered (basic / normal / optimal); produces code plus
   step-by-step reasoning and an explicit time/space Big-O line, calling out the
   trade-off vs the other tiers.
 * :func:`build_guided` — tiered; one piped document that restates the problem,
@@ -26,7 +26,10 @@ from __future__ import annotations
 # --- supported values ----------------------------------------------------
 
 LANGUAGES = ("python", "cpp", "java")
-TIERS = ("simple", "normal", "complex")
+# The "Code Quality" levels shown in the UI. Keys are the stable internal values
+# (also the saved-file suffix, e.g. ``two_sum__optimal.py``); the UI labels them
+# Basic / Normal / Optimal.
+TIERS = ("basic", "normal", "optimal")
 
 # The one sentence Quick Ask replies with when a question is really asking for
 # the current problem's solution. Fixed wording: it is asserted in tests and
@@ -62,10 +65,10 @@ _LANG_STDLIB = {
     ),
 }
 
-# Per-tier semantics. simple = basic / maybe sub-optimal; normal = balanced;
-# complex = best time/space, minimal-but-readable.
+# Per-tier semantics. basic = simplest / maybe sub-optimal; normal = balanced;
+# optimal = best time/space, minimal-but-readable.
 _TIER_DESC = {
-    "simple": (
+    "basic": (
         "the SIMPLEST, most basic approach that a beginner could write. Use little "
         "or no library magic. It is acceptable if this is sub-optimal in time or "
         "space complexity — clarity beats cleverness here."
@@ -74,7 +77,7 @@ _TIER_DESC = {
         "a realistic, balanced solution — the kind you would strive for in a normal "
         "interview. Balance readability against efficiency without over-engineering."
     ),
-    "complex": (
+    "optimal": (
         "the most optimal solution achievable, with the best possible time and space "
         "complexity. Keep it minimal but readable — nothing redundant, no clever code "
         "that hurts clarity."

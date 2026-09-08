@@ -28,6 +28,7 @@ from _helpers import CLASSIFY_JSON
 from _helpers import parse_sse as _parse_sse
 
 import app as app_module
+import claude_cli
 
 # --- a fake Claude that answers both the classify and the answer prompt ---
 
@@ -70,12 +71,23 @@ def fake_run(prompt, **kwargs):
         yield text[i : i + 20]
 
 
+def _authed_probe():
+    """A signed-in auth probe so the page renders with no CLI banner and never
+    spawns the real `claude auth status` during tests."""
+    return claude_cli.AuthStatus(installed=True, logged_in=True)
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+    # Register the key monkeypatch owns so a /config/model write (which mutates
+    # os.environ directly) is reverted at teardown and can't leak between tests.
+    monkeypatch.delenv("LEETCOACH_MODEL", raising=False)
     QA_CALLS.clear()
-    application = app_module.create_app(run_fn=fake_run)
+    application = app_module.create_app(run_fn=fake_run, auth_probe=_authed_probe)
     application.config.update(TESTING=True)
+    # Persist model-picker writes to a temp .env, never the real project file.
+    application.config["DOTENV_PATH"] = str(tmp_path / ".env")
     return application.test_client(), tmp_path
 
 
@@ -581,7 +593,7 @@ def test_distinct_keys_do_not_collide(client):
     c, _ = client
     r1 = c.post("/run", json=_RUN_PAYLOAD)
     assert r1.status_code == 200
-    other = dict(_RUN_PAYLOAD, tier="complex")  # distinct valid key
+    other = dict(_RUN_PAYLOAD, tier="optimal")  # distinct valid key
     r2 = c.post("/run", json=other)
     assert r2.status_code == 200, r2.status_code  # no false 409 across distinct keys
     # Drain LIFO — two stream_with_context responses held open share one request-
@@ -666,11 +678,68 @@ def test_delete_missing_or_bad_suffix_is_404(client):
 
 # --- app constructs without a live claude --------------------------------
 
-def test_create_app_does_not_require_claude(monkeypatch):
-    # is_available may be False on a CI box; constructing the app must not raise.
-    monkeypatch.setattr("claude_cli.is_available", lambda **kw: False)
-    application = app_module.create_app(run_fn=fake_run)
+def test_create_app_does_not_require_claude():
+    # claude may be absent on a CI box; constructing the app AND serving the page
+    # must not raise. A probe reporting "not installed" stands in for that box.
+    def missing_probe():
+        return claude_cli.AuthStatus(installed=False, logged_in=False)
+
+    application = app_module.create_app(run_fn=fake_run, auth_probe=missing_probe)
     assert application is not None
     # GET / still works (it surfaces the unavailable state in the page, not a crash)
     resp = application.test_client().get("/")
     assert resp.status_code == 200
+
+
+# --- auth / model flags injected into the page ---------------------------
+
+def test_index_injects_signed_in_and_model_flags(client):
+    c, _ = client  # the fixture's probe reports installed + logged_in
+    html = c.get("/").get_data(as_text=True)
+    assert 'data-claude-available="true"' in html
+    assert 'data-claude-logged-in="true"' in html
+    # default model (claude-opus-4-8) maps to the picker's "opus"
+    assert 'data-claude-model="opus"' in html
+    # no unreplaced placeholders leak to the page
+    assert "__CLAUDE_AVAILABLE__" not in html
+    assert "__CLAUDE_LOGGED_IN__" not in html
+    assert "__CLAUDE_MODEL__" not in html
+
+
+def test_index_signed_out_flag_is_false():
+    def signed_out():
+        return claude_cli.AuthStatus(installed=True, logged_in=False)
+
+    application = app_module.create_app(run_fn=fake_run, auth_probe=signed_out)
+    html = application.test_client().get("/").get_data(as_text=True)
+    assert 'data-claude-available="true"' in html
+    assert 'data-claude-logged-in="false"' in html
+
+
+# --- POST /config/model: persist the picked model ------------------------
+
+def test_config_model_persists_and_takes_effect(client):
+    c, tmp_path = client
+    resp = c.post("/config/model", json={"model": "sonnet"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "model": "sonnet"}
+    # written to the (temp) .env for a future launch ...
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LEETCOACH_MODEL=sonnet" in env_text
+    # ... and live in the process so the next run uses it with no restart
+    import config
+    assert config.model() == "sonnet"
+
+
+def test_config_model_rejects_unknown_alias(client):
+    c, tmp_path = client
+    resp = c.post("/config/model", json={"model": "gpt-4"})
+    assert resp.status_code == 400
+    # nothing persisted on a rejected value
+    assert not (tmp_path / ".env").exists()
+
+
+def test_config_model_rejects_missing_field(client):
+    c, _ = client
+    resp = c.post("/config/model", json={})
+    assert resp.status_code == 400

@@ -226,3 +226,63 @@ def save_answer(
         folder, stem, [(ext, code), ("md", reasoning)]
     )
     return code_path, reasoning_path
+
+
+# --- one-time tier rename migration --------------------------------------
+
+# The tier was renamed simple/complex -> basic/optimal (normal is unchanged),
+# which is also the saved-answer filename suffix. This maps a legacy suffix to
+# its new value so an existing library keeps working after the rename.
+_TIER_RENAMES = {"simple": "basic", "complex": "optimal"}
+
+
+def _renamed_tier(filename: str) -> str | None:
+    """Map a saved answer filename to its post-rename name, or ``None`` if it
+    needs no change.
+
+    Splits the stem on ``__`` — which is *only* ever the tier (and optional
+    ``__N`` slot) delimiter, because :func:`slug` collapses any run of ``_`` in a
+    problem name to a single ``_`` — so the tier is always the second segment.
+    """
+    p = Path(filename)
+    parts = p.stem.split("__")
+    if len(parts) < 2:
+        return None
+    new_tier = _TIER_RENAMES.get(parts[1])
+    if new_tier is None:
+        return None
+    parts[1] = new_tier
+    return f"{'__'.join(parts)}{p.suffix}"
+
+
+def migrate_tier_suffixes(root: Path | None = None) -> list[tuple[str, str]]:
+    """Rename saved answer files from the old tier suffix to the new one.
+
+    Walks ``<root>/answers`` (default: the configured output dir) and renames
+    each ``<problem>__simple*`` / ``<problem>__complex*`` file to its new tier
+    token, leaving ``normal`` and every non-answer file untouched. Both siblings
+    of an Answer (code + ``.md``) are renamed because each carries the suffix.
+
+    Idempotent and non-destructive: a rename whose destination already exists is
+    skipped rather than clobbering it, so this is safe to run on every startup.
+    Returns the ``(old_name, new_name)`` pairs actually renamed.
+    """
+    base = (root if root is not None else config.output_dir()) / "answers"
+    if not base.is_dir():
+        return []
+    renamed: list[tuple[str, str]] = []
+    for path in base.rglob("*"):
+        if not path.is_file():
+            continue
+        new_name = _renamed_tier(path.name)
+        if new_name is None or new_name == path.name:
+            continue
+        dest = path.with_name(new_name)
+        if dest.exists():
+            continue  # never clobber; keeps repeated runs idempotent
+        try:
+            path.rename(dest)
+        except OSError:
+            continue  # a locked/vanished file must not abort the whole sweep
+        renamed.append((path.name, new_name))
+    return renamed
