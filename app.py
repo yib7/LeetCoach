@@ -29,7 +29,10 @@ SSE event protocol (shared by every mode):
 from __future__ import annotations
 
 import json
+import os
+import socket
 import threading
+import webbrowser
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -111,6 +114,35 @@ def _hostname(host: str) -> str:
     if host.startswith("["):
         return host.partition("]")[0] + "]"
     return host.rsplit(":", 1)[0]
+
+
+def _choose_port(preferred: int, host: str, *, span: int = 20) -> int:
+    """Pick a bindable TCP port on ``host``, preferring ``preferred`` (SP-A).
+
+    Probe-bind a fresh ``AF_INET``/``SOCK_STREAM`` socket to ``(host, preferred)``
+    with NO ``SO_REUSEADDR`` (so probing an in-use port genuinely fails); if it
+    binds, return ``preferred``. Otherwise scan ``preferred+1 … preferred+span``
+    and return the first port that binds. If the whole span is busy, bind to port
+    ``0`` and return the OS-assigned ephemeral port. Every probe socket is closed
+    before returning. A tiny TOCTOU window between the probe and ``app.run`` is
+    acceptable for a single-user localhost tool — this only turns a hard crash on
+    an occupied port into a graceful fallback."""
+    for candidate in range(preferred, preferred + span + 1):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind((host, candidate))
+            return candidate
+        except OSError:
+            continue
+        finally:
+            sock.close()
+    # Whole span occupied — let the OS hand us any free ephemeral port.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()
 
 
 def _sse_text(delta: str) -> str:
@@ -660,12 +692,24 @@ app = create_app()
 
 if __name__ == "__main__":
     host = HOST
-    port = PORT
+    # Fall back to a nearby free port instead of crashing when PORT is occupied
+    # (a stale instance, another app on 5000) — a double-click launch must never
+    # die on "address already in use".
+    port = _choose_port(PORT, host)
     if not claude_cli.is_available():
         print(
             "WARNING: the `claude` CLI was not found on PATH. The page will load "
             "but runs will fail until Claude Code is installed/authenticated "
             "(or set LEETCOACH_CLAUDE_BIN)."
         )
-    print(f"LeetCoach running at  http://{host}:{port}  (Ctrl-C to stop)")
+    # When bound to all interfaces, point the browser at loopback (0.0.0.0/:: is
+    # a bind address, not a browsable host).
+    browser_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    url = f"http://{browser_host}:{port}/"
+    print(f"LeetCoach running at  {url}  (Ctrl-C to stop)")
+    # Auto-open the browser shortly after the server starts accepting connections
+    # (the ~1s delay lets app.run bind first). Suppressed for headless/dev use
+    # via LEETCOACH_NO_BROWSER.
+    if os.environ.get("LEETCOACH_NO_BROWSER", "").lower() not in {"1", "true", "yes"}:
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     app.run(host=host, port=port, debug=False, threaded=True)
