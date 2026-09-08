@@ -54,6 +54,7 @@
 
   var viewConsole = $("view-console");
   var viewLibrary = $("view-library");
+  var viewStats = $("view-stats");
 
   // session lifecycle containers (all live inside #session as siblings)
   var sessionState = document.querySelector("[data-session-state]");
@@ -276,10 +277,12 @@
   function switchView(view) {
     if (viewConsole) viewConsole.hidden = view !== "console";
     if (viewLibrary) viewLibrary.hidden = view !== "library";
+    if (viewStats) viewStats.hidden = view !== "stats";
     document.querySelectorAll("[data-view]").forEach(function (a) {
       a.classList.toggle("on", a.getAttribute("data-view") === view);
     });
     if (view === "library") loadLibrary(); // re-fetch on open: fresh after runs
+    if (view === "stats") refreshStats();  // recompute from the already-loaded runs
   }
   document.querySelectorAll("[data-view]").forEach(function (a) {
     a.addEventListener("click", function () { switchView(a.getAttribute("data-view")); });
@@ -1062,6 +1065,267 @@
   }
 
   // =========================================================================
+  // Stats (Cycle 10) — pure helpers + Stats view + Console streak badge.
+  // All derived client-side from currentRuns (grouped over /library mtimes).
+  // run.savedAt is Unix SECONDS (like every mtime here), so day-bucket via *1000.
+  // =========================================================================
+
+  // Local YYYY-MM-DD. NOT toISOString (that is UTC and would misbucket a run
+  // saved near local midnight into the wrong day / streak).
+  function dayKey(date) {
+    var y = date.getFullYear();
+    var m = date.getMonth() + 1;
+    var d = date.getDate();
+    return y + "-" + (m < 10 ? "0" : "") + m + "-" + (d < 10 ? "0" : "") + d;
+  }
+
+  // Parse a YYYY-MM-DD key back to a LOCAL-midnight Date (for day arithmetic).
+  function parseDayKey(k) {
+    var p = String(k).split("-");
+    return new Date(+p[0], (+p[1]) - 1, +p[2]);
+  }
+
+  // Pure: derive every stat from a runs array. `now` is injectable (tests).
+  function computeStats(runs, now) {
+    now = now || new Date();
+    runs = runs || [];
+
+    var probSet = {};
+    var byMode = {};
+    var byLanguage = {};
+    var byTopic = {};
+    var dayCounts = {}; // 'YYYY-MM-DD' -> runs that day
+
+    runs.forEach(function (run) {
+      var title = run.problem || run.stemRaw || "";
+      if (title) probSet[title] = true;
+
+      var mode = run.mode || "Other";
+      byMode[mode] = (byMode[mode] || 0) + 1;
+
+      var lang = (run.language && run.language !== "—") ? run.language : "Unknown";
+      byLanguage[lang] = (byLanguage[lang] || 0) + 1;
+
+      var topic = run.topic || "Uncategorized";
+      byTopic[topic] = (byTopic[topic] || 0) + 1;
+
+      if (typeof run.savedAt === "number" && run.savedAt > 0) {
+        var k = dayKey(new Date(run.savedAt * 1000));
+        dayCounts[k] = (dayCounts[k] || 0) + 1;
+      }
+    });
+
+    var today = dayCounts[dayKey(now)] || 0;
+
+    // last 7 local days (today + the 6 prior)
+    var thisWeek = 0;
+    for (var i = 0; i < 7; i++) {
+      var wd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      thisWeek += dayCounts[dayKey(wd)] || 0;
+    }
+
+    // current streak: consecutive active days ending today, with a
+    // today-or-yesterday grace so a fresh morning still reads the streak.
+    var currentStreak = 0;
+    var cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (!dayCounts[dayKey(cursor)]) {
+      cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+      if (!dayCounts[dayKey(cursor)]) cursor = null; // neither today nor yesterday
+    }
+    while (cursor && dayCounts[dayKey(cursor)]) {
+      currentStreak++;
+      cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1);
+    }
+
+    // longest streak: longest consecutive run over the sorted unique active days.
+    var days = Object.keys(dayCounts).sort(); // 'YYYY-MM-DD' sorts chronologically
+    var longestStreak = 0;
+    var runLen = 0;
+    var prev = null;
+    days.forEach(function (k) {
+      if (prev === null) {
+        runLen = 1;
+      } else {
+        var diff = Math.round((parseDayKey(k) - parseDayKey(prev)) / 86400000);
+        runLen = diff === 1 ? runLen + 1 : 1;
+      }
+      if (runLen > longestStreak) longestStreak = runLen;
+      prev = k;
+    });
+
+    // heatmap: last 119 days (17 weeks), oldest -> newest.
+    var heatmap = [];
+    for (var j = 118; j >= 0; j--) {
+      var hd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - j);
+      var hk = dayKey(hd);
+      heatmap.push({ date: hk, count: dayCounts[hk] || 0 });
+    }
+
+    return {
+      total: runs.length,
+      distinctProblems: Object.keys(probSet).length,
+      today: today,
+      thisWeek: thisWeek,
+      currentStreak: currentStreak,
+      longestStreak: longestStreak,
+      byMode: byMode,
+      byLanguage: byLanguage,
+      byTopic: byTopic,
+      heatmap: heatmap,
+    };
+  }
+
+  // 5 intensity buckets (classes hm-0..hm-4) by runs/day.
+  function heatBucket(c) {
+    if (c <= 0) return 0;
+    if (c === 1) return 1;
+    if (c === 2) return 2;
+    if (c <= 4) return 3;
+    return 4;
+  }
+
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  function setStatText(id, val) {
+    var e = $(id);
+    if (e) e.textContent = String(val);
+  }
+
+  // ---- Stats view: tiles --------------------------------------------------
+  function renderTiles(stats) {
+    setStatText("stat-streak", stats.currentStreak);
+    setStatText("stat-streak-sub",
+      stats.currentStreak === 0 ? "start today" : (stats.currentStreak === 1 ? "day" : "days"));
+    setStatText("stat-longest", stats.longestStreak);
+    setStatText("stat-longest-sub", stats.longestStreak === 1 ? "day best" : "days best");
+    setStatText("stat-today", stats.today);
+    setStatText("stat-today-sub", "this week: " + stats.thisWeek);
+    setStatText("stat-total", stats.total);
+    setStatText("stat-total-sub",
+      stats.distinctProblems + (stats.distinctProblems === 1 ? " problem" : " problems"));
+  }
+
+  // ---- Stats view: activity heatmap --------------------------------------
+  // GitHub-style: columns = weeks, rows = weekday. Lead with blank cells so the
+  // first day lands on its correct weekday row (grid-auto-flow:column fills a
+  // column top-to-bottom before moving right).
+  function renderHeatmap(heatmap) {
+    var grid = $("hm-grid");
+    var months = $("hm-months");
+    if (!grid || !months) return;
+    grid.innerHTML = "";
+    months.innerHTML = "";
+    if (!heatmap.length) return;
+
+    var first = parseDayKey(heatmap[0].date);
+    var pad = first.getDay(); // 0=Sun .. 6=Sat leading blanks
+    var cells = [];
+    for (var p = 0; p < pad; p++) cells.push(null);
+    heatmap.forEach(function (d) { cells.push(d); });
+    var numCols = Math.ceil(cells.length / 7);
+
+    grid.style.gridTemplateColumns = "repeat(" + numCols + ", var(--hm-cell))";
+    months.style.gridTemplateColumns = "repeat(" + numCols + ", var(--hm-cell))";
+
+    cells.forEach(function (d) {
+      if (!d) { grid.appendChild(el("span", "hm-cell hm-pad")); return; }
+      var cell = el("span", "hm-cell hm-" + heatBucket(d.count));
+      cell.title = d.date + " · " + d.count + (d.count === 1 ? " run" : " runs");
+      grid.appendChild(cell);
+    });
+
+    // Month labels above the columns where the month first changes (spaced out
+    // so a short leading month doesn't collide with the next label).
+    var lastMonth = -1;
+    var lastLabelCol = -99;
+    for (var c = 0; c < numCols; c++) {
+      var rep = null;
+      for (var r = 0; r < 7; r++) {
+        var cc = cells[c * 7 + r];
+        if (cc) { rep = cc; break; }
+      }
+      if (!rep) continue;
+      var mo = parseDayKey(rep.date).getMonth();
+      if (mo !== lastMonth) {
+        lastMonth = mo;
+        if (c - lastLabelCol >= 3) {
+          var lbl = el("span", "hm-mo", MONTHS[mo]);
+          lbl.style.gridColumnStart = String(c + 1);
+          months.appendChild(lbl);
+          lastLabelCol = c;
+        }
+      }
+    }
+  }
+
+  // ---- Stats view: breakdowns --------------------------------------------
+  function sortedEntries(map) {
+    return Object.keys(map).map(function (k) {
+      return { key: k, count: map[k] };
+    }).sort(function (a, b) {
+      return b.count - a.count || a.key.localeCompare(b.key);
+    });
+  }
+
+  function renderBars(id, map) {
+    var host = $(id);
+    if (!host) return;
+    host.innerHTML = "";
+    var rows = sortedEntries(map);
+    if (!rows.length) { host.appendChild(el("div", "bd-empty", "No data yet")); return; }
+    var max = rows[0].count || 1;
+    rows.forEach(function (row) {
+      var r = el("div", "bd-row");
+      r.appendChild(el("span", "bd-key", row.key));
+      var track = el("span", "bd-track");
+      var fill = el("span", "bd-fill");
+      fill.style.width = Math.max(6, Math.round((row.count / max) * 100)) + "%";
+      track.appendChild(fill);
+      r.appendChild(track);
+      r.appendChild(el("span", "bd-num", String(row.count)));
+      host.appendChild(r);
+    });
+  }
+
+  function renderTopicList(id, map) {
+    var host = $(id);
+    if (!host) return;
+    host.innerHTML = "";
+    var rows = sortedEntries(map).slice(0, 8); // byTopic rendered sorted desc
+    if (!rows.length) { host.appendChild(el("div", "bd-empty", "No topics yet")); return; }
+    rows.forEach(function (row, i) {
+      var r = el("div", "bd-trow");
+      r.appendChild(el("span", "bd-rank", String(i + 1)));
+      r.appendChild(el("span", "bd-tname", row.key));
+      r.appendChild(el("span", "bd-num", String(row.count)));
+      host.appendChild(r);
+    });
+  }
+
+  // ---- Stats orchestration -----------------------------------------------
+  function refreshStats() {
+    var stats = computeStats(currentRuns);
+
+    var empty = $("stats-empty");
+    var body = $("stats-body");
+    if (!stats.total) {
+      if (empty) empty.hidden = false;
+      if (body) body.hidden = true;
+      return;
+    }
+    if (empty) empty.hidden = true;
+    if (body) body.hidden = false;
+    renderTiles(stats);
+    renderHeatmap(stats.heatmap);
+    renderBars("bd-mode", stats.byMode);
+    renderBars("bd-language", stats.byLanguage);
+    renderTopicList("bd-topic", stats.byTopic);
+  }
+
+  var statsEmptyCta = $("stats-empty-cta");
+  if (statsEmptyCta) statsEmptyCta.addEventListener("click", function () { switchView("console"); });
+
+  // =========================================================================
   // Library two-pane.
   // =========================================================================
   var vwTitle, vwSub;
@@ -1239,6 +1503,7 @@
         renderRecentTable(currentRuns);
         renderTopics(currentRuns);
         renderTree(libFiles);
+        refreshStats(); // recompute streak badge + Stats view from the new runs
       })
       .catch(function (e) {
         libFiles = [];
@@ -1247,6 +1512,7 @@
         renderRecents([]);
         renderRecentTable([]);
         renderTopics([]);
+        refreshStats(); // empty-state + "start your streak" nudge on load failure
         if (libTree) {
           libTree.innerHTML = "";
           libTree.appendChild(el("div", "grp-h", "Could not load the library (" + (e && e.message) + ")."));
@@ -1289,5 +1555,6 @@
 
   // ---- boot ---------------------------------------------------------------
   enterIdle();
+  refreshStats(); // instant streak badge / empty-state before /library resolves
   loadLibrary();
 })();

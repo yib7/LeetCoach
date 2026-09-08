@@ -20,7 +20,7 @@
       <nav class="nav" aria-label="Primary">
         <a class="on" data-view="console" role="button" tabindex="0">Console</a>
         <a data-view="library" role="button" tabindex="0">Library</a>
-        <a class="inert" aria-disabled="true">Stats</a>
+        <a data-view="stats" role="button" tabindex="0">Stats</a>
       </nav>
       <div class="tb-spacer"></div>
       <div class="tb-search inert" aria-hidden="true" title="Search is not available yet">
@@ -49,7 +49,7 @@
           <a class="on" data-view="console" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-4 6 4 6M16 6l4 6-4 6"/></svg> Console</a>
           <a data-view="library" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4h3v16H5zM10.5 4h3v16h-3z"/><path d="m16 5 3 .8-3.2 14-3-.8z"/></svg> Library</a>
           <a class="inert" aria-disabled="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10l2 2h6.5A1.5 1.5 0 0 1 20 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18Z"/></svg> Bookmarks</a>
-          <a class="inert" aria-disabled="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-3"/></svg> Stats</a>
+          <a data-view="stats" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-3"/></svg> Stats</a>
         </nav>
         <div class="side-lbl">Recent runs <a class="inert" aria-disabled="true">Clear</a></div>
         <div class="recents" id="recents" aria-label="Recent runs"></div>
@@ -228,6 +228,89 @@
                 <button id="library-viewer-close" class="mini" type="button">Close</button>
               </div>
               <div id="library-viewer-body" class="md pad"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===== STATS VIEW ===== -->
+        <section id="view-stats" hidden>
+          <div class="ctx">
+            <div>
+              <h1>Stats</h1>
+              <div class="sub">Your practice activity — derived from the <b>study library</b> you build as you run.</div>
+            </div>
+            <div class="r">
+              <span class="hint">Local &amp; offline · from <b>output/</b></span>
+            </div>
+          </div>
+
+          <!-- empty state (JS toggles vs #stats-body) -->
+          <div class="stats-empty" id="stats-empty" hidden>
+            <div class="se-flame">&#128293;</div>
+            <div class="se-t">No runs yet</div>
+            <div class="se-d">Solve your first problem to start your streak.</div>
+            <button class="btn green" id="stats-empty-cta" type="button">Go to the Console</button>
+          </div>
+
+          <!-- populated stats -->
+          <div id="stats-body">
+            <div class="stat-tiles">
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic">&#128293;</span><span class="st-lbl">Current streak</span></div>
+                <div class="st-val" id="stat-streak">0</div>
+                <div class="st-sub" id="stat-streak-sub">days</div>
+              </div>
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic">&#127942;</span><span class="st-lbl">Longest streak</span></div>
+                <div class="st-val" id="stat-longest">0</div>
+                <div class="st-sub" id="stat-longest-sub">days best</div>
+              </div>
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic">&#9989;</span><span class="st-lbl">Solved today</span></div>
+                <div class="st-val" id="stat-today">0</div>
+                <div class="st-sub" id="stat-today-sub">this week: 0</div>
+              </div>
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic">&#128218;</span><span class="st-lbl">Total solved</span></div>
+                <div class="st-val" id="stat-total">0</div>
+                <div class="st-sub" id="stat-total-sub">0 problems</div>
+              </div>
+            </div>
+
+            <section class="panel stats-panel">
+              <div class="p-head">
+                <span class="p-title">Activity <span class="tag">last 17 weeks</span></span>
+                <div class="hm-legend">
+                  <span>Less</span>
+                  <span class="hm-cell hm-0"></span>
+                  <span class="hm-cell hm-1"></span>
+                  <span class="hm-cell hm-2"></span>
+                  <span class="hm-cell hm-3"></span>
+                  <span class="hm-cell hm-4"></span>
+                  <span>More</span>
+                </div>
+              </div>
+              <div class="hm-scroll">
+                <div class="hm-inner">
+                  <div class="hm-months" id="hm-months"></div>
+                  <div class="hm-grid" id="hm-grid"></div>
+                </div>
+              </div>
+            </section>
+
+            <div class="stats-breakdowns">
+              <section class="panel stats-panel">
+                <div class="p-head"><span class="p-title">By mode</span></div>
+                <div class="bd-list" id="bd-mode"></div>
+              </section>
+              <section class="panel stats-panel">
+                <div class="p-head"><span class="p-title">By language</span></div>
+                <div class="bd-list" id="bd-language"></div>
+              </section>
+              <section class="panel stats-panel">
+                <div class="p-head"><span class="p-title">Top topics</span></div>
+                <div class="bd-list" id="bd-topic"></div>
+              </section>
             </div>
           </div>
         </section>
