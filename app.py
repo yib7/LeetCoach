@@ -119,25 +119,34 @@ def _hostname(host: str) -> str:
 def _choose_port(preferred: int, host: str, *, span: int = 20) -> int:
     """Pick a bindable TCP port on ``host``, preferring ``preferred`` (SP-A).
 
-    Probe-bind a fresh ``AF_INET``/``SOCK_STREAM`` socket to ``(host, preferred)``
-    with NO ``SO_REUSEADDR`` (so probing an in-use port genuinely fails); if it
-    binds, return ``preferred``. Otherwise scan ``preferred+1 … preferred+span``
-    and return the first port that binds. If the whole span is busy, bind to port
-    ``0`` and return the OS-assigned ephemeral port. Every probe socket is closed
-    before returning. A tiny TOCTOU window between the probe and ``app.run`` is
-    acceptable for a single-user localhost tool — this only turns a hard crash on
-    an occupied port into a graceful fallback."""
-    for candidate in range(preferred, preferred + span + 1):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    Probe-bind a fresh ``SOCK_STREAM`` socket (address family derived from ``host``,
+    so an IPv6 ``HOST`` such as ``::1`` works as well as IPv4) with NO
+    ``SO_REUSEADDR`` (so probing an in-use port genuinely fails); if ``preferred``
+    binds, return it. Otherwise scan ``preferred+1 … preferred+span`` (clamped to the
+    valid ``<= 65535`` range) and return the first port that binds. If the whole span
+    is busy, bind to port ``0`` and return the OS-assigned ephemeral port. Every probe
+    socket is closed before returning. A tiny TOCTOU window between the probe and
+    ``app.run`` is acceptable for a single-user localhost tool — this only turns a
+    hard crash on an occupied port into a graceful fallback."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+
+    def _binds(port: int) -> bool:
+        sock = socket.socket(family, socket.SOCK_STREAM)
         try:
-            sock.bind((host, candidate))
-            return candidate
+            sock.bind((host, port))
+            return True
         except OSError:
-            continue
+            return False
         finally:
             sock.close()
-    # Whole span occupied — let the OS hand us any free ephemeral port.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    # Clamp the scan so a candidate never exceeds the valid port range (a high
+    # PORT would otherwise raise OverflowError, not OSError, past 65535).
+    for candidate in range(preferred, min(preferred + span, 65535) + 1):
+        if _binds(candidate):
+            return candidate
+    # Whole span occupied (or preferred out of range) — OS-assigned ephemeral port.
+    sock = socket.socket(family, socket.SOCK_STREAM)
     try:
         sock.bind((host, 0))
         return sock.getsockname()[1]
