@@ -33,7 +33,7 @@ All notable changes to this project are documented here. The format follows
 - Runs work exactly as before: the `claude` CLI dependency, the SSE streaming pipeline,
   the Answer-mode sandbox, the `output/` storage layout, and the `/run` request contract
   are all unchanged. The Stats tab and the search palette read only your existing library,
-  with no new endpoint. The suite is now 283 tests, still mocking the subprocess.
+  with no new endpoint. The suite is now 285 tests, still mocking the subprocess.
 
 ## [1.3.3] - 2026-08-26
 
