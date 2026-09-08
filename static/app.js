@@ -778,9 +778,12 @@
   }
   runBtn.addEventListener("click", runNow);
 
-  // ⌘/Ctrl + Enter anywhere runs (guarded against double-run).
+  // ⌘/Ctrl + Enter anywhere runs (guarded against double-run). Suppressed while
+  // an overlay (the search palette or shortcuts modal) is open, so Ctrl/Cmd+Enter
+  // in the palette opens the result without ALSO kicking off a background run.
   document.addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && (e.key === "Enter" || e.keyCode === 13)) {
+      if (document.querySelector(".overlay:not([hidden])")) return;
       e.preventDefault();
       if (!isStreaming) runNow();
     }
