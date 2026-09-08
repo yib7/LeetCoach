@@ -49,3 +49,28 @@ def test_choose_port_falls_back_when_busy():
             confirm.close()
     finally:
         held.close()
+
+
+def test_choose_port_high_preferred_stays_in_range():
+    """A preferred port past the valid range must NOT raise OverflowError; the scan
+    is clamped to <= 65535 and it falls back to an OS-assigned ephemeral port."""
+    chosen = _choose_port(70000, HOST)
+    assert isinstance(chosen, int)
+    assert 1 <= chosen <= 65535
+
+
+def test_choose_port_ipv6_host():
+    """An IPv6 host (e.g. HOST='::1') is probed with an IPv6 socket rather than
+    crashing on an AF_INET/AF_INET6 mismatch."""
+    try:
+        probe = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        probe.bind(("::1", 0))
+        free6 = probe.getsockname()[1]
+        probe.close()
+    except OSError:
+        import pytest
+
+        pytest.skip("no IPv6 loopback on this host")
+    chosen = _choose_port(free6, "::1")
+    assert isinstance(chosen, int)
+    assert 1 <= chosen <= 65535
