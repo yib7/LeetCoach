@@ -29,11 +29,18 @@ All notable changes to this project are documented here. The format follows
 - Removed two placeholder controls that never did anything: the sidebar Bookmarks entry
   and the recent-runs Clear link.
 
+### Fixed
+- A failed run now says *why*. `claude` reports an expired login (and other API errors)
+  on stdout as stream-json, which the app discarded — leaving a bare "exited with code 1.
+  Is the claude CLI installed and authenticated?". The run-failed message now surfaces the
+  real reason (e.g. "Failed to authenticate: OAuth session expired and could not be
+  refreshed") and points you to run `claude` in a terminal to sign in.
+
 ### Notes
 - Runs work exactly as before: the `claude` CLI dependency, the SSE streaming pipeline,
   the Answer-mode sandbox, the `output/` storage layout, and the `/run` request contract
   are all unchanged. The Stats tab and the search palette read only your existing library,
-  with no new endpoint. The suite is now 285 tests, still mocking the subprocess.
+  with no new endpoint. The suite is now 288 tests, still mocking the subprocess.
 
 ## [1.3.3] - 2026-08-26
 
