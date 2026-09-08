@@ -26,6 +26,10 @@ CLI.
   a topic index lets Learning skip and cross-link what you have already studied. The
   Library tab browses everything you have saved and lets you delete a file you no longer
   want, and the Console sidebar lists your recent runs.
+- **Tracks your practice.** A Stats tab turns your saved runs into a daily streak (with a
+  badge in the Console header), an activity heatmap, and totals by topic, mode, and language,
+  so you can see your momentum at a glance. A `Ctrl`/`Cmd`+`K` search palette jumps to any
+  saved problem, and `?` shows the keyboard shortcuts.
 - **Quick Ask.** A side box answers a small syntax or stdlib question with Haiku, without
   streaming or saving anything, so you never break focus to look something up. It refuses to
   hand over the current problem's solution and points you back to a mode, but still answers
@@ -82,6 +86,11 @@ Open the printed URL (default `http://127.0.0.1:5000`), paste a problem, pick a 
 language (and tier), and click **Run**. The answer streams in live and is saved under
 `output/`. `python app.py` is the single entry point for every later run.
 
+**Daily use.** After the one-time setup you do not need the terminal. Run
+`.\scripts\create-shortcut.ps1` once to put a **LeetCoach** shortcut on your Desktop; from
+then on, double-click it (or run `.\LeetCoach.cmd`) to start the app and open it in your
+browser. If port 5000 is busy it picks the next free port. Close the window to stop the app.
+
 (Optional) Copy `.env.example` to `.env` to change the model or paths; all settings are
 optional, see [Configuration](#configuration).
 
@@ -129,14 +138,14 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Language | Python 3.12+ |
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
-| Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console + Library) |
-| Tests / lint | pytest (281 tests, all mocking the subprocess), ruff |
+| Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console, Library, Stats) |
+| Tests / lint | pytest (283 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Configuration
 
-All eight settings are environment variables, overridable in your shell or a `.env` file.
+All nine settings are environment variables, overridable in your shell or a `.env` file.
 All are optional.
 
 | Variable               | Default                        | What it does                                                        |
@@ -149,6 +158,7 @@ All are optional.
 | `LEETCOACH_TOPIC_INDEX`| `<output_dir>/topic_index.json`| Path to the persisted topic index JSON.                             |
 | `LEETCOACH_RUN_TIMEOUT`| `600`                          | Wall-clock cap in seconds for a single `claude` run.                |
 | `LEETCOACH_VERIFY_TIMEOUT`| `10`                        | Wall-clock cap in seconds for each Answer-mode sample verification. |
+| `LEETCOACH_NO_BROWSER`   | *(unset)*                      | Set to `1`/`true` to stop `python app.py` opening your browser on launch.            |
 
 ## Where outputs are saved
 

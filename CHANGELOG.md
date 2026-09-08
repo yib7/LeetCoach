@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - Unreleased
+
+### Added
+- **One-click desktop launch.** A `LeetCoach.cmd` launcher plus
+  `scripts/create-shortcut.ps1`, which drops a `LeetCoach` shortcut on your Desktop
+  (resolving a OneDrive-redirected Desktop), so a double-click starts the app and
+  opens it in your browser. The first run bootstraps the virtual environment through
+  `setup.ps1` if it is missing. The shortcut and browser tab get a real `[lc]` app icon.
+- **The app opens your browser on start**, and when the default port is already in
+  use it falls back to the next free port instead of failing to launch. Set
+  `LEETCOACH_NO_BROWSER=1` to suppress the auto-open for headless or dev use.
+- **A Stats tab.** Your saved runs now drive a practice dashboard: current and longest
+  daily streak, solved today, this week, and in total, a calendar heatmap of the last
+  several months, and a breakdown by mode, language, and topic. A streak badge sits in
+  the Console header. Everything is derived from the files already in `output/`, so it
+  stays offline and adds no new storage.
+- **A search palette** (`Ctrl`/`Cmd` + `K`) that filters your saved runs and library by
+  problem, topic, mode, or language and opens the file you pick.
+- **A keyboard-shortcuts dialog** (press `?`) listing what the app responds to. Pressing
+  `?` while typing in the problem box does nothing, as expected.
+
+### Changed
+- Removed two placeholder controls that never did anything: the sidebar Bookmarks entry
+  and the recent-runs Clear link.
+
+### Notes
+- Runs work exactly as before: the `claude` CLI dependency, the SSE streaming pipeline,
+  the Answer-mode sandbox, the `output/` storage layout, and the `/run` request contract
+  are all unchanged. The Stats tab and the search palette read only your existing library,
+  with no new endpoint. The suite is now 283 tests, still mocking the subprocess.
+
 ## [1.3.3] - 2026-08-26
 
 ### Internal
