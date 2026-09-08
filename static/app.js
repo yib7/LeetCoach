@@ -1572,6 +1572,241 @@
     });
   }
 
+  // =========================================================================
+  // Overlays (Cycle 10, C1/C2): keyboard-shortcuts help modal + ⌘K search
+  // palette. Both toggle via the `hidden` property (like every other section
+  // here) and render ALL user-derived text through el()/textContent — never
+  // innerHTML — so the XSS posture is preserved. No backend/route change.
+  // =========================================================================
+  var shortcutsModal = $("shortcuts-modal");
+  var shortcutsBtn = $("shortcuts-btn");
+  var shortcutsClose = $("shortcuts-close");
+  var searchPalette = $("search-palette");
+  var searchBox = $("tb-search");
+  var searchInput = $("search-input");
+  var searchResults = $("search-results");
+  var overlayReturnFocus = null; // element focus returns to when an overlay closes
+  var searchRows = [];           // current filtered items (parallel to the rendered rows)
+  var searchActive = -1;         // highlighted index within searchRows
+
+  // The `?` shortcut must never fire while the user is typing text.
+  function isTypingTarget(node) {
+    if (!node) return false;
+    var tag = (node.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || node.isContentEditable === true;
+  }
+  function restoreOverlayFocus() {
+    var t = overlayReturnFocus;
+    overlayReturnFocus = null;
+    if (t && typeof t.focus === "function") { try { t.focus(); } catch (e) { /* noop */ } }
+  }
+
+  // ---- shortcuts modal ----------------------------------------------------
+  function openShortcuts() {
+    if (!shortcutsModal || !shortcutsModal.hidden) return;
+    closeSearch(); // never stack overlays
+    overlayReturnFocus = document.activeElement;
+    shortcutsModal.hidden = false;
+    if (shortcutsClose) shortcutsClose.focus(); // move focus into the dialog
+  }
+  function closeShortcuts() {
+    if (!shortcutsModal || shortcutsModal.hidden) return;
+    shortcutsModal.hidden = true;
+    restoreOverlayFocus();
+  }
+  if (shortcutsBtn) shortcutsBtn.addEventListener("click", openShortcuts);
+  if (shortcutsClose) shortcutsClose.addEventListener("click", closeShortcuts);
+  if (shortcutsModal) {
+    shortcutsModal.addEventListener("click", function (e) {
+      if (e.target === shortcutsModal) closeShortcuts(); // backdrop click only
+    });
+  }
+
+  // ---- search palette -----------------------------------------------------
+  function hintFor(parts) {
+    return parts.filter(function (p) { return p && p !== "—"; }).join(" · ");
+  }
+
+  // Searchable corpus = grouped runs (rich rows) ∪ any loose library file NOT
+  // folded into a run (defensive: output/ is normally all 3-segment run files).
+  function buildSearchItems() {
+    var items = [];
+    var claimed = {};
+    currentRuns.forEach(function (run) {
+      var path = run.mdPath || (run.files[0] && run.files[0].path);
+      if (!path) return;
+      run.files.forEach(function (f) { claimed[f.path] = true; });
+      var names = run.files.map(function (f) { return f.path.split("/").pop(); }).join(" ");
+      items.push({
+        title: run.problem || run.stemRaw || path,
+        hint: hintFor([run.mode, run.topic, run.language]),
+        path: path,
+        run: run,
+        savedAt: run.savedAt || 0,
+        hay: [run.problem, run.topic, run.mode, run.language, run.stemRaw, run.langExt, names]
+          .join(" ").toLowerCase(),
+      });
+    });
+    libFiles.forEach(function (f) {
+      if (claimed[f.path]) return; // already represented by its run row
+      var meta = fileMeta(f.path);
+      items.push({
+        title: meta.title,
+        hint: hintFor([meta.mode, meta.topic, langLabel(meta.ext)]) || f.path,
+        path: f.path,
+        run: null,
+        savedAt: (f && f.mtime) || 0,
+        hay: [meta.title, meta.topic, meta.mode, langLabel(meta.ext), f.path].join(" ").toLowerCase(),
+      });
+    });
+    return items;
+  }
+
+  // Case-insensitive: every whitespace-separated term must be a substring.
+  // Empty query -> most recent runs so the palette is useful before typing.
+  function filterSearch(query) {
+    var all = buildSearchItems();
+    var q = String(query || "").trim().toLowerCase();
+    if (!q) {
+      return all.slice().sort(function (a, b) { return b.savedAt - a.savedAt; }).slice(0, 8);
+    }
+    var terms = q.split(/\s+/);
+    return all.filter(function (it) {
+      return terms.every(function (t) { return it.hay.indexOf(t) !== -1; });
+    }).slice(0, 40);
+  }
+
+  function setSearchActive(i) {
+    var rows = searchResults.querySelectorAll(".pal-row");
+    if (!rows.length) { searchActive = -1; return; }
+    if (i < 0) i = 0;
+    if (i > rows.length - 1) i = rows.length - 1;
+    searchActive = i;
+    for (var r = 0; r < rows.length; r++) {
+      var on = r === i;
+      rows[r].classList.toggle("on", on);
+      if (on) { rows[r].setAttribute("aria-selected", "true"); rows[r].scrollIntoView({ block: "nearest" }); }
+      else rows[r].removeAttribute("aria-selected");
+    }
+  }
+  function moveSearchActive(delta) {
+    var rows = searchResults.querySelectorAll(".pal-row");
+    if (!rows.length) return;
+    var next = searchActive + delta;
+    if (next < 0) next = rows.length - 1;   // wrap
+    if (next > rows.length - 1) next = 0;
+    setSearchActive(next);
+  }
+
+  function renderSearchResults(items) {
+    searchRows = items;
+    searchResults.innerHTML = ""; // trusted: only .pal-* nodes are appended below
+    if (!items.length) {
+      searchResults.appendChild(el("div", "pal-none", "No matches"));
+      searchActive = -1;
+      return;
+    }
+    items.forEach(function (it, i) {
+      var row = el("div", "pal-row" + (i === 0 ? " on" : ""));
+      row.setAttribute("role", "option");
+      if (i === 0) row.setAttribute("aria-selected", "true");
+      row.appendChild(typeBadge(extOf(it.path)));
+      var main = el("div", "pal-main");
+      main.appendChild(el("div", "pal-title", it.title)); // user text -> textContent
+      if (it.hint) main.appendChild(el("div", "pal-hint", it.hint));
+      row.appendChild(main);
+      row.addEventListener("click", function () { openSearchItem(it); });
+      (function (idx) {
+        row.addEventListener("mousemove", function () {
+          if (searchActive !== idx) setSearchActive(idx);
+        });
+      })(i);
+      searchResults.appendChild(row);
+    });
+    searchActive = 0;
+  }
+
+  // Reuse the existing library-open path so a result opens in the Library viewer.
+  function openSearchItem(it) {
+    if (!it) return;
+    closeSearch();
+    if (it.run) {
+      openRun(it.run);            // switchView("library") + openFile(run's md/first file)
+    } else {
+      switchView("library");
+      openFile(it.path);
+    }
+  }
+
+  function openSearch() {
+    if (!searchPalette || !searchInput) return;
+    if (!searchPalette.hidden) { searchInput.focus(); searchInput.select(); return; }
+    closeShortcuts(); // never stack overlays
+    overlayReturnFocus = document.activeElement;
+    searchPalette.hidden = false;
+    searchInput.value = "";
+    renderSearchResults(filterSearch(""));
+    searchInput.focus();
+  }
+  function closeSearch() {
+    if (!searchPalette || searchPalette.hidden) return;
+    searchPalette.hidden = true;
+    restoreOverlayFocus();
+  }
+
+  if (searchBox) {
+    searchBox.addEventListener("click", openSearch);
+    searchBox.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " " || e.keyCode === 13 || e.keyCode === 32) {
+        e.preventDefault(); openSearch();
+      }
+    });
+  }
+  if (searchPalette) {
+    searchPalette.addEventListener("click", function (e) {
+      if (e.target === searchPalette) closeSearch(); // backdrop click only
+    });
+  }
+  if (searchInput) {
+    searchInput.addEventListener("input", function () {
+      renderSearchResults(filterSearch(searchInput.value));
+    });
+    searchInput.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowDown") { e.preventDefault(); moveSearchActive(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); moveSearchActive(-1); }
+      else if (e.key === "Enter" || e.keyCode === 13) {
+        e.preventDefault();
+        openSearchItem(searchRows[searchActive] || searchRows[0]);
+      }
+      // Esc is handled by the global overlay handler below.
+    });
+  }
+
+  // ---- global overlay keys (kept independent of the run / Quick-Ask keys) --
+  document.addEventListener("keydown", function (e) {
+    // Esc closes whichever overlay is open (palette wins if both somehow are).
+    if (e.key === "Escape" || e.keyCode === 27) {
+      if (searchPalette && !searchPalette.hidden) { e.preventDefault(); closeSearch(); return; }
+      if (shortcutsModal && !shortcutsModal.hidden) { e.preventDefault(); closeShortcuts(); return; }
+      return;
+    }
+    // ⌘/Ctrl+K opens the search palette (preventDefault so the browser's own
+    // find/location shortcut doesn't fire). The ⌘/Ctrl+Enter run handler and
+    // the Quick-Ask Enter handler check different keys, so both keep working.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k" || e.key === "K")) {
+      e.preventDefault();
+      openSearch();
+      return;
+    }
+    // "?" (Shift+/) opens the shortcuts modal — GUARDED so it never fires while
+    // focus is in an input / textarea / contenteditable (e.g. the problem box).
+    if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
+      e.preventDefault();
+      openShortcuts();
+    }
+  });
+
   // ---- boot ---------------------------------------------------------------
   enterIdle();
   refreshStats(); // instant streak badge / empty-state before /library resolves

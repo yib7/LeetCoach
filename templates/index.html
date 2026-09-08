@@ -23,7 +23,8 @@
         <a data-view="stats" role="button" tabindex="0">Stats</a>
       </nav>
       <div class="tb-spacer"></div>
-      <div class="tb-search inert" aria-hidden="true" title="Search is not available yet">
+      <div class="tb-search" id="tb-search" role="button" tabindex="0"
+           title="Search your library (Ctrl/&#8984; + K)" aria-label="Search your library">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
         <span class="ph">Search…</span>
         <span class="k"><kbd>&#8984;</kbd><kbd>K</kbd></span>
@@ -32,7 +33,7 @@
         <span class="dot"></span>
         <span class="tb-status-label">claude CLI</span>
       </span>
-      <button class="iconbtn inert" type="button" title="Keyboard shortcuts" aria-hidden="true" tabindex="-1">
+      <button class="iconbtn" id="shortcuts-btn" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>
       </button>
     </header>
@@ -317,6 +318,55 @@
         </section>
 
       </main>
+    </div>
+  </div>
+
+  <!-- ===== keyboard shortcuts help modal (C1) ===== -->
+  <div class="overlay" id="shortcuts-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="modal-head">
+        <h2 class="modal-title" id="shortcuts-title">Keyboard shortcuts</h2>
+        <button class="iconbtn" id="shortcuts-close" type="button" aria-label="Close shortcuts">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="sc-row">
+          <span class="sc-desc">Run the current problem</span>
+          <span class="sc-keys"><kbd>Ctrl</kbd><span class="sc-or">/</span><kbd>&#8984;</kbd><kbd>Enter</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Search your library</span>
+          <span class="sc-keys"><kbd>Ctrl</kbd><span class="sc-or">/</span><kbd>&#8984;</kbd><kbd>K</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Show this shortcuts dialog</span>
+          <span class="sc-keys"><kbd>?</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Ask in Quick Ask</span>
+          <span class="sc-keys"><kbd>Enter</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Close a dialog or search</span>
+          <span class="sc-keys"><kbd>Esc</kbd></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== search palette (C2) ===== -->
+  <div class="overlay overlay-top" id="search-palette" hidden>
+    <div class="palette" role="dialog" aria-modal="true" aria-label="Search your library">
+      <div class="pal-head">
+        <svg class="pal-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+        <input id="search-input" class="pal-input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Search problems, topics, modes, languages…"
+               role="combobox" aria-controls="search-results" aria-expanded="true" aria-autocomplete="list"
+               aria-label="Search your library" />
+        <kbd class="pal-esc">Esc</kbd>
+      </div>
+      <div class="pal-results" id="search-results" role="listbox" aria-label="Search results"></div>
     </div>
   </div>
 
