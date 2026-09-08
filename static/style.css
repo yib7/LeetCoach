@@ -302,8 +302,13 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .qa-answer{margin:0 15px 14px;padding:13px 16px;border:1px solid var(--border-soft);border-radius:var(--r2);background:var(--inset);font-size:14px}
 .qa-answer.err{color:var(--tx3);font:12.5px var(--mono)}
 
-/* ---- stats (Cycle 10) ---- */
+/* ---- stats + streak badge (Cycle 10) ---- */
 #view-stats{--hm-cell:13px}
+
+/* Console streak badge (B3) */
+.streak-badge{display:inline-flex;align-items:center;gap:7px;font:600 12.5px var(--sans);color:var(--grn-2);background:var(--grn-weak);border:1px solid var(--grn-line);border-radius:999px;padding:5px 12px;white-space:nowrap}
+.streak-badge .sb-flame{font-size:13px;line-height:1}
+.streak-badge.zero{color:var(--tx3);background:var(--s1);border-color:var(--border)}
 
 /* stat tiles */
 .stat-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}

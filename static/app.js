@@ -1191,6 +1191,24 @@
     if (e) e.textContent = String(val);
   }
 
+  // ---- Console streak badge (B3) -----------------------------------------
+  function renderStreakBadge(stats) {
+    var badge = $("streak-badge");
+    if (!badge) return;
+    badge.textContent = "";
+    badge.hidden = false;
+    var zero = stats.currentStreak <= 0;
+    badge.classList.toggle("zero", zero);
+    if (zero) {
+      badge.appendChild(el("span", "sb-txt", "Start your streak today"));
+      return;
+    }
+    badge.appendChild(el("span", "sb-flame", "🔥")); // fire emoji
+    var txt = stats.currentStreak + "-day streak";
+    if (stats.today > 0) txt += " · " + stats.today + " today";
+    badge.appendChild(el("span", "sb-txt", txt));
+  }
+
   // ---- Stats view: tiles --------------------------------------------------
   function renderTiles(stats) {
     setStatText("stat-streak", stats.currentStreak);
@@ -1302,9 +1320,10 @@
     });
   }
 
-  // ---- Stats orchestration -----------------------------------------------
+  // ---- Stats orchestration (badge always; view when populated) -----------
   function refreshStats() {
     var stats = computeStats(currentRuns);
+    renderStreakBadge(stats);
 
     var empty = $("stats-empty");
     var body = $("stats-body");
