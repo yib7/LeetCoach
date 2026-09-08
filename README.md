@@ -50,7 +50,9 @@ need:
 - That CLI **authenticated** (`claude` runs and answers from your normal shell).
 
 If `claude` isn't found, the page still loads but shows a banner and runs fail until it's
-installed and authenticated. There are no secrets to configure.
+installed and authenticated. If it's installed but signed out, the banner says so and gives
+you the exact command — `claude auth login` — to sign in; the desktop shortcut also runs
+that for you automatically when needed. There are no secrets to configure.
 
 ## Setup
 
@@ -82,9 +84,10 @@ the runtime dependencies:
 python app.py
 ```
 
-Open the printed URL (default `http://127.0.0.1:5000`), paste a problem, pick a mode and
-language (and tier), and click **Run**. The answer streams in live and is saved under
-`output/`. `python app.py` is the single entry point for every later run.
+Open the printed URL (default `http://127.0.0.1:5000`), paste a problem, pick a mode,
+language, and Code Quality level (and, if you like, a model), and click **Run**. The
+answer streams in live and is saved under `output/`. `python app.py` is the single entry
+point for every later run.
 
 **Daily use.** After the one-time setup you do not need the terminal. Run
 `.\scripts\create-shortcut.ps1` once to put a **LeetCoach** shortcut on your Desktop; from
@@ -96,16 +99,17 @@ optional, see [Configuration](#configuration).
 
 ## Modes
 
-Two modes are **tiered**: *simple* (basic, possibly sub-optimal), *normal* (a balanced
-interview answer), or *complex* (the most optimal solution).
+Two modes take a **Code Quality** level: *Basic* (the simplest approach, possibly
+sub-optimal), *Normal* (a balanced interview answer), or *Optimal* (the best time/space
+solution).
 
-- **Learning** (no tier) teaches the full stack a problem needs (data structures,
-  algorithms, language stdlib). It uses the topic index to skip and cross-link topics you
-  have already studied.
-- **Guided Learning** (tiered) is one flowing document: restate the problem, teach the
-  stack, reason step by step, then produce the answer.
-- **Answer** (tiered) is a working solution plus reasoning, an explicit Big-O line, and the
-  trade-off versus the other tiers.
+- **Learning** (no Code Quality level) teaches the full stack a problem needs (data
+  structures, algorithms, language stdlib). It uses the topic index to skip and cross-link
+  topics you have already studied.
+- **Guided Learning** is one flowing document: restate the problem, teach the stack,
+  reason step by step, then produce the answer at the chosen level.
+- **Answer** is a working solution plus reasoning, an explicit Big-O line, and the
+  trade-off versus the other levels.
 
 ## Add-ons
 
@@ -139,7 +143,7 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
 | Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console, Library, Stats) |
-| Tests / lint | pytest (288 tests, all mocking the subprocess), ruff |
+| Tests / lint | pytest (315 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -150,7 +154,7 @@ All are optional.
 
 | Variable               | Default                        | What it does                                                        |
 | ---------------------- | ------------------------------ | ------------------------------------------------------------------- |
-| `LEETCOACH_MODEL`      | `claude-opus-4-8`              | Claude model id passed to `claude --model` (e.g. `opus` / `sonnet`).|
+| `LEETCOACH_MODEL`      | `claude-opus-4-8`              | Claude model id passed to `claude --model` (e.g. `opus` / `sonnet`). The Console model picker writes this for you.|
 | `LEETCOACH_CLASSIFIER_MODEL` | `haiku`                  | Model for the short classification call that tags each run.        |
 | `LEETCOACH_QUICK_ASK_MODEL`  | `haiku`                  | Model for the Quick Ask box (short syntax / stdlib lookups).       |
 | `LEETCOACH_CLAUDE_BIN` | `claude`                       | Name or absolute path of the `claude` executable.                   |
@@ -169,8 +173,8 @@ directory you launch from), organized by problem type:
 output/
   learning/<problem_type>_learning/<problem>.md
   guided/<problem_type>/<problem>.md
-  answers/<problem_type>/<problem>__<tier>.<ext>   (code)
-  answers/<problem_type>/<problem>__<tier>.md      (reasoning + verification)
+  answers/<problem_type>/<problem>__<level>.<ext>   (code; <level> = basic|normal|optimal)
+  answers/<problem_type>/<problem>__<level>.md      (reasoning + verification)
   topic_index.json
 ```
 
