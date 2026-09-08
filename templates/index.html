@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="/static/vendor/highlight-github-dark.min.css" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body data-claude-available="__CLAUDE_AVAILABLE__">
+<body data-claude-available="__CLAUDE_AVAILABLE__" data-claude-logged-in="__CLAUDE_LOGGED_IN__" data-claude-model="__CLAUDE_MODEL__">
   <div class="app">
 
     <!-- ===== top bar ===== -->
@@ -62,13 +62,22 @@
       <!-- ===== content ===== -->
       <main class="content">
 
-        <!-- claude CLI availability warning (JS reveals from body flag) -->
+        <!-- claude CLI availability / sign-in warning (JS reveals from body flags) -->
         <section id="claude-warning" class="banner" hidden>
           <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 4 3 19h18Z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg></div>
           <div>
-            <div class="bt">The <code>claude</code> CLI was not found on PATH</div>
-            <div class="bd">Runs will fail until Claude Code is installed and authenticated (or set
-              <code>LEETCOACH_CLAUDE_BIN</code>), then reload this page.</div>
+            <!-- shown when the binary isn't on PATH -->
+            <div data-banner="missing" hidden>
+              <div class="bt">The <code>claude</code> CLI was not found on PATH</div>
+              <div class="bd">Runs will fail until Claude Code is installed (or set
+                <code>LEETCOACH_CLAUDE_BIN</code> to its full path), then reload this page.</div>
+            </div>
+            <!-- shown when the binary is present but signed out -->
+            <div data-banner="signedout" hidden>
+              <div class="bt">You&#8217;re signed out of the <code>claude</code> CLI</div>
+              <div class="bd">Runs will fail until you sign in. In a terminal, run
+                <code class="cmd">claude auth login</code>, then reload this page.</div>
+            </div>
           </div>
         </section>
 
@@ -121,11 +130,19 @@
                 </div>
               </div>
               <div class="tgroup" data-seg="tier">
-                <span class="tlabel">Tier</span>
-                <div class="seg" data-seg="tier" role="group" aria-label="Tier">
-                  <button class="seg-btn" type="button" data-val="simple">Simple</button>
+                <span class="tlabel">Code Quality</span>
+                <div class="seg" data-seg="tier" role="group" aria-label="Code Quality">
+                  <button class="seg-btn" type="button" data-val="basic">Basic</button>
                   <button class="seg-btn on" type="button" data-val="normal">Normal</button>
-                  <button class="seg-btn" type="button" data-val="complex">Complex</button>
+                  <button class="seg-btn" type="button" data-val="optimal">Optimal</button>
+                </div>
+              </div>
+              <div class="tgroup" data-seg="model">
+                <span class="tlabel">Model</span>
+                <div class="seg" data-seg="model" role="group" aria-label="Model">
+                  <button class="seg-btn" type="button" data-val="opus">Opus</button>
+                  <button class="seg-btn" type="button" data-val="sonnet">Sonnet</button>
+                  <button class="seg-btn" type="button" data-val="haiku">Haiku</button>
                 </div>
               </div>
               <div class="tb-spacer"></div>

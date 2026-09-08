@@ -237,20 +237,27 @@
     editorEl.classList.add("flash");
   }
 
-  // ---- CLI availability pill ---------------------------------------------
+  // ---- CLI availability + sign-in pill -----------------------------------
   (function claudeStatus() {
-    var ready = document.body.dataset.claudeAvailable === "true";
+    var installed = document.body.dataset.claudeAvailable === "true";
+    var loggedIn = document.body.dataset.claudeLoggedIn === "true";
+    var ready = installed && loggedIn;
     var pill = $("claude-status");
     var dot = pill ? pill.querySelector(".dot") : null;
     var label = pill ? pill.querySelector(".tb-status-label") : null;
-    if (ready) {
-      if (dot) dot.classList.remove("red");
-      if (label) label.textContent = "claude CLI ready";
-      if (claudeWarning) claudeWarning.hidden = true;
-    } else {
-      if (dot) dot.classList.add("red");
-      if (label) label.textContent = "claude CLI not found";
-      if (claudeWarning) claudeWarning.hidden = false;
+    if (dot) dot.classList.toggle("red", !ready);
+    if (label) {
+      label.textContent = ready
+        ? "claude CLI ready"
+        : installed ? "claude CLI signed out" : "claude CLI not found";
+    }
+    // Reveal the matching banner message and hide the section when all good.
+    if (claudeWarning) {
+      var missing = claudeWarning.querySelector('[data-banner="missing"]');
+      var signedOut = claudeWarning.querySelector('[data-banner="signedout"]');
+      if (missing) missing.hidden = installed;                  // only when NOT installed
+      if (signedOut) signedOut.hidden = !(installed && !loggedIn); // installed but signed out
+      claudeWarning.hidden = ready;
     }
   })();
 
@@ -262,15 +269,40 @@
   function syncTier() {
     if (tierGroup) tierGroup.classList.toggle("disabled", activeVal("mode") === "learning");
   }
+  // Persist the model choice as the default (server writes .env + updates env).
+  // Best-effort: on failure the run path still uses the server's current model.
+  function saveModel(alias) {
+    fetch("/config/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: alias }),
+    }).catch(function () {});
+  }
   document.querySelectorAll(".seg").forEach(function (seg) {
     seg.addEventListener("click", function (e) {
       var b = e.target.closest(".seg-btn");
       if (!b || !seg.contains(b)) return;
       seg.querySelectorAll(".seg-btn").forEach(function (x) { x.classList.remove("on"); });
       b.classList.add("on");
-      if (seg.getAttribute("data-seg") === "mode") syncTier();
+      var group = seg.getAttribute("data-seg");
+      if (group === "mode") syncTier();
+      if (group === "model") saveModel(b.getAttribute("data-val"));
     });
   });
+  // Reflect the server's current default model in the picker on load.
+  (function initModel() {
+    var current = document.body.dataset.claudeModel || "";
+    if (!current) return; // custom/unknown id -> leave the picker unselected
+    var btn = document.querySelector(
+      '.seg[data-seg="model"] .seg-btn[data-val="' + current + '"]'
+    );
+    if (btn) {
+      btn.parentNode.querySelectorAll(".seg-btn").forEach(function (x) {
+        x.classList.remove("on");
+      });
+      btn.classList.add("on");
+    }
+  })();
   syncTier();
 
   // ---- Console <-> Library tabs ------------------------------------------

@@ -285,15 +285,25 @@ def _verification_detail(result) -> str:
     return "\n**Failed samples:**\n\n" + "\n\n".join(blocks) + "\n"
 
 
-def create_app(*, run_fn=claude_cli.run) -> Flask:
-    """Build the Flask app. ``run_fn`` is the injectable Claude runner used by
-    BOTH the classifier and the answer stream (tests pass a fake)."""
+def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.auth_status) -> Flask:
+    """Build the Flask app.
+
+    ``run_fn`` is the injectable Claude runner used by BOTH the classifier and
+    the answer stream (tests pass a fake). ``auth_probe`` is the injectable
+    sign-in probe the page uses to decide which (if any) CLI banner to show —
+    injectable so tests never spawn the real ``claude auth status``.
+    """
     app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
 
     # Reject oversized request bodies with a clean 413 instead of buffering an
     # unbounded POST into memory (P2-3). A LeetCode problem is a few KB; 2 MiB is
     # generous headroom while still capping a hostile/accidental flood.
     app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+
+    # Where the model picker persists its choice. A config value (not a bare
+    # constant) so tests can redirect it to a temp file instead of the real
+    # project `.env`.
+    app.config["DOTENV_PATH"] = str(HERE / ".env")
 
     # In-flight /run de-duplication (P2-12): a single-user local tool should not
     # fan the same (problem, mode, language, tier) into N concurrent Claude runs
@@ -362,19 +372,38 @@ def create_app(*, run_fn=claude_cli.run) -> Flask:
 
     @app.get("/")
     def index():
-        # is_available is checked at request time (not import) so the app
+        # The auth state is probed at request time (not import) so the app
         # constructs without a live claude (tests / CI). The page surfaces the
-        # state; it never crashes here.
+        # state — installed? signed in? which model? — and never crashes here.
         try:
-            available = claude_cli.is_available()
-        except Exception:  # noqa: BLE001 - availability probe must never 500 the page
-            available = False
+            status = auth_probe()
+            installed, logged_in = status.installed, status.logged_in
+        except Exception:  # noqa: BLE001 - the probe must never 500 the page
+            installed, logged_in = False, False
         html = (TEMPLATES / "index.html").read_text(encoding="utf-8")
-        # Inject a tiny banner flag the page reads (kept out of a template engine
-        # to keep the page a plain static file editable by hand).
-        flag = "true" if available else "false"
-        html = html.replace("__CLAUDE_AVAILABLE__", flag)
+        # Inject tiny flags the page reads (kept out of a template engine so the
+        # page stays a plain static file editable by hand).
+        html = html.replace("__CLAUDE_AVAILABLE__", "true" if installed else "false")
+        html = html.replace("__CLAUDE_LOGGED_IN__", "true" if logged_in else "false")
+        html = html.replace("__CLAUDE_MODEL__", config.model_alias())
         return Response(html, mimetype="text/html")
+
+    @app.post("/config/model")
+    def config_model():
+        # Persist the in-app model picker's choice as the default. The alias is
+        # allowlisted (it becomes a `--model` argv token) and written to `.env`
+        # so it survives a restart; os.environ is updated so the very next run
+        # uses it with no restart (config.model() reads env at call time).
+        data = request.get_json(silent=True) or {}
+        alias = data.get("model")
+        if alias not in config.ALLOWED_MODEL_ALIASES:
+            return jsonify({"error": "Unknown model."}), 400
+        try:
+            config.upsert_env_var(app.config["DOTENV_PATH"], "LEETCOACH_MODEL", alias)
+        except OSError:
+            return jsonify({"error": "Could not save the model setting."}), 500
+        os.environ["LEETCOACH_MODEL"] = alias
+        return jsonify({"ok": True, "model": alias})
 
     @app.get("/library")
     def library():
@@ -705,11 +734,32 @@ if __name__ == "__main__":
     # (a stale instance, another app on 5000) — a double-click launch must never
     # die on "address already in use".
     port = _choose_port(PORT, host)
-    if not claude_cli.is_available():
+    # Migrate any pre-rename answer files (simple/complex -> basic/optimal) so an
+    # existing library keeps working after the "Code Quality" rename. Idempotent
+    # and guarded: a failure here must never stop the app from launching.
+    try:
+        renamed = storage.migrate_tier_suffixes()
+        if renamed:
+            print(f"Migrated {len(renamed)} saved answer file(s) to the new tier names.")
+    except Exception as exc:  # noqa: BLE001 - a migration hiccup must not block launch
+        print(f"WARNING: could not migrate old tier filenames ({exc}).")
+    # Surface the CLI sign-in state so a terminal launch is guided too (the
+    # launcher script handles the interactive `claude auth login`; here we only
+    # tell the user what to do).
+    try:
+        _auth = claude_cli.auth_status()
+    except Exception:  # noqa: BLE001 - the probe must never stop the app launching
+        _auth = claude_cli.AuthStatus(installed=False, logged_in=False)
+    if not _auth.installed:
         print(
             "WARNING: the `claude` CLI was not found on PATH. The page will load "
-            "but runs will fail until Claude Code is installed/authenticated "
-            "(or set LEETCOACH_CLAUDE_BIN)."
+            "but runs will fail until Claude Code is installed (or set "
+            "LEETCOACH_CLAUDE_BIN)."
+        )
+    elif not _auth.logged_in:
+        print(
+            "WARNING: you are signed out of the `claude` CLI. Runs will fail until "
+            "you sign in — run `claude auth login` in a terminal, then reload."
         )
     # When bound to all interfaces, point the browser at loopback (0.0.0.0/:: is
     # a bind address, not a browsable host).

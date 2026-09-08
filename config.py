@@ -51,6 +51,29 @@ def model() -> str:
     return os.environ.get("LEETCOACH_MODEL", DEFAULT_MODEL)
 
 
+# The generic aliases the in-app model picker offers. Aliases (not pinned ids)
+# so each always resolves to the CLI's current opus/sonnet/haiku — nothing to
+# maintain as new versions ship. Anything reaching `--model` is allowlisted to
+# one of these; an explicit id like ``claude-opus-5`` is still settable by hand
+# in ``.env``.
+ALLOWED_MODEL_ALIASES = ("opus", "sonnet", "haiku")
+
+
+def model_alias() -> str:
+    """The picker alias that best matches the currently configured model.
+
+    Maps the active :func:`model` id to one of :data:`ALLOWED_MODEL_ALIASES` by
+    substring (so the default ``claude-opus-4-8`` highlights ``opus``). Returns
+    ``""`` when the configured model matches no alias — the picker then shows no
+    selection rather than a wrong one.
+    """
+    current = model().lower()
+    for alias in ALLOWED_MODEL_ALIASES:
+        if alias in current:
+            return alias
+    return ""
+
+
 def classifier_model() -> str:
     """Model id/alias for the classifier's short Claude call (audit6 P2-4).
 
@@ -140,3 +163,46 @@ def topic_index_path() -> Path:
     if override:
         return Path(override)
     return output_dir() / "topic_index.json"
+
+
+def _env_line_key(line: str) -> str | None:
+    """The variable name a ``.env`` line assigns, or ``None`` if it assigns none.
+
+    Blank lines and ``#`` comments assign nothing. A leading ``export`` is
+    tolerated. Only a line containing ``=`` is an assignment.
+    """
+    s = line.strip()
+    if not s or s.startswith("#"):
+        return None
+    if s.startswith("export "):
+        s = s[len("export "):].lstrip()
+    key, sep, _ = s.partition("=")
+    return key.strip() if sep else None
+
+
+def upsert_env_var(path, key: str, value: str) -> None:
+    """Set ``key=value`` in the dotenv file at ``path``, in place.
+
+    Replaces the first existing assignment to ``key`` (preserving every other
+    line, comment, and blank), or appends the assignment when the key is absent.
+    Creates the file if it does not exist. This is how the in-app model picker
+    persists ``LEETCOACH_MODEL`` so the choice survives a restart. Pure I/O on
+    the given path — the live process env is updated separately by the caller.
+    """
+    p = Path(path)
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    new_line = f"{key}={value}"
+    out: list[str] = []
+    replaced = False
+    for line in lines:
+        if not replaced and _env_line_key(line) == key:
+            out.append(new_line)
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(new_line)
+    p.write_text("\n".join(out) + "\n", encoding="utf-8")

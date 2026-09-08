@@ -43,7 +43,7 @@ import subprocess
 import tempfile
 import threading
 from collections import deque
-from typing import Callable, Iterable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
 import config
 
@@ -65,6 +65,62 @@ def is_available(*, which: Callable[[str], Optional[str]] = shutil.which) -> boo
     depending on what is installed on the machine.
     """
     return which(config.claude_bin()) is not None
+
+
+class AuthStatus(NamedTuple):
+    """Sign-in state of the `claude` CLI, as probed by :func:`auth_status`.
+
+    ``installed`` is whether the binary resolves on PATH; ``logged_in`` is
+    whether the CLI reports an active Anthropic session. ``logged_in`` is only
+    ever meaningful when ``installed`` is True.
+    """
+
+    installed: bool
+    logged_in: bool
+
+
+def _default_auth_runner(argv: list[str]):
+    """Run ``claude auth status`` for real, returning the completed process.
+
+    Resolves argv[0] via PATHEXT (Windows shim), captures stdout, caps the wait,
+    and suppresses a console window on Windows — mirroring :func:`_real_runner`.
+    """
+    resolved = shutil.which(argv[0]) or argv[0]
+    kwargs: dict = {"capture_output": True, "text": True, "timeout": 15}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return subprocess.run([resolved, *argv[1:]], **kwargs)
+
+
+def auth_status(
+    *,
+    run: Optional[Callable[[list[str]], object]] = None,
+    which: Callable[[str], Optional[str]] = shutil.which,
+) -> AuthStatus:
+    """Probe whether the `claude` CLI is installed and signed in.
+
+    Uses ``claude auth status``, which prints a small JSON object
+    (``{"loggedIn": <bool>, ...}``) — a local, non-interactive check that costs
+    no model call. ``run`` is injectable so tests never spawn the real CLI; it
+    takes the argv list and returns an object with a ``.stdout`` string (like
+    :func:`subprocess.run` with ``capture_output=True``).
+
+    Robust by contract: a missing binary yields ``installed=False``; any other
+    failure (non-JSON output, a timeout, a crash) yields
+    ``installed=True, logged_in=False`` — this probe must never raise, because
+    it runs on the page-load path and in the launcher.
+    """
+    if which(config.claude_bin()) is None:
+        return AuthStatus(installed=False, logged_in=False)
+    runner = run or _default_auth_runner
+    try:
+        proc = runner([config.claude_bin(), "auth", "status"])
+        stdout = getattr(proc, "stdout", "") or ""
+        data = json.loads(stdout)
+        logged_in = bool(data.get("loggedIn"))
+    except Exception:  # noqa: BLE001 - an auth probe must never raise
+        return AuthStatus(installed=True, logged_in=False)
+    return AuthStatus(installed=True, logged_in=logged_in)
 
 
 def _error_from_stream(lines: Iterable[str]) -> str:
@@ -271,9 +327,9 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
                 detail = stderr or _error_from_stream(stdout_tail)
                 message = (
                     f"`{config.claude_bin()}` exited with code {returncode}. "
-                    "Is the `claude` CLI installed and signed in? An expired login "
-                    "is the usual cause — run `claude` in a terminal to sign in, "
-                    "then try again."
+                    "You are most likely signed out of the `claude` CLI (an expired "
+                    "login is the usual cause). Run  claude auth login  in a "
+                    "terminal to sign in, then click Run again."
                 )
                 if detail:
                     message += f"\n{detail}"

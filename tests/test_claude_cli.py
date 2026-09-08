@@ -200,6 +200,62 @@ def test_is_available_uses_configured_binary_name(monkeypatch):
     assert seen["name"] == "my-claude"
 
 
+# --- (c2) auth_status: sign-in probe via `claude auth status` -------------
+
+import types  # noqa: E402 - grouped with the auth-probe tests it supports
+
+
+def _fake_proc(stdout):
+    return types.SimpleNamespace(stdout=stdout, returncode=0)
+
+
+def test_auth_status_reports_logged_in():
+    seen = {}
+
+    def fake_run(argv):
+        seen["argv"] = argv
+        return _fake_proc('{"loggedIn": true, "authMethod": "oauth"}')
+
+    st = claude_cli.auth_status(run=fake_run, which=lambda name: "/usr/bin/claude")
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=True)
+    # it asks the CLI the right question
+    assert seen["argv"][-2:] == ["auth", "status"]
+
+
+def test_auth_status_reports_logged_out():
+    st = claude_cli.auth_status(
+        run=lambda argv: _fake_proc('{"loggedIn": false, "authMethod": "none"}'),
+        which=lambda name: "/usr/bin/claude",
+    )
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=False)
+
+
+def test_auth_status_missing_binary_is_not_installed():
+    # No binary on PATH -> installed False, and the runner is never called.
+    def boom(argv):
+        raise AssertionError("runner must not be called when the binary is missing")
+
+    st = claude_cli.auth_status(run=boom, which=lambda name: None)
+    assert st == claude_cli.AuthStatus(installed=False, logged_in=False)
+
+
+def test_auth_status_malformed_output_is_safe():
+    # Non-JSON output must not raise; treat as installed-but-signed-out.
+    st = claude_cli.auth_status(
+        run=lambda argv: _fake_proc("not json at all"),
+        which=lambda name: "/usr/bin/claude",
+    )
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=False)
+
+
+def test_auth_status_runner_crash_is_safe():
+    def boom(argv):
+        raise OSError("spawn failed")
+
+    st = claude_cli.auth_status(run=boom, which=lambda name: "/usr/bin/claude")
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=False)
+
+
 def test_run_raises_clear_error_when_unavailable():
     # If the wrapper is asked to run while claude is unavailable, the error
     # message must clearly name the missing dependency.
