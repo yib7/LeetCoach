@@ -7,7 +7,12 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $target = Join-Path $repoRoot "LeetCoach.cmd"
 $icon = Join-Path $repoRoot "docs\media\leetcoach.ico"
-$lnkPath = Join-Path $env:USERPROFILE "Desktop\LeetCoach.lnk"
+# Resolve the real Desktop via the known-folder API so a OneDrive-redirected
+# Desktop (C:\Users\<you>\OneDrive\Desktop) is used instead of a non-existent
+# C:\Users\<you>\Desktop.
+$desktop = [Environment]::GetFolderPath("Desktop")
+if ([string]::IsNullOrEmpty($desktop)) { $desktop = Join-Path $env:USERPROFILE "Desktop" }
+$lnkPath = Join-Path $desktop "LeetCoach.lnk"
 
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($lnkPath)
