@@ -42,6 +42,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from collections import deque
 from typing import Callable, Iterable, Iterator, Optional
 
 import config
@@ -64,6 +65,31 @@ def is_available(*, which: Callable[[str], Optional[str]] = shutil.which) -> boo
     depending on what is installed on the machine.
     """
     return which(config.claude_bin()) is not None
+
+
+def _error_from_stream(lines: Iterable[str]) -> str:
+    """Extract a human-readable failure reason from `claude`'s stream-json stdout.
+
+    `claude` reports auth / API failures on STDOUT as a terminal ``result`` line
+    flagged ``is_error`` (its stderr is often empty for these), so the nonzero-exit
+    handler below reads it back to show the real cause — e.g. "Failed to
+    authenticate: OAuth session expired" — instead of a bare exit code. Returns the
+    ``result`` message of the last such line, or "" when none is present.
+    """
+    reason = ""
+    for raw in lines:
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            continue
+        try:
+            obj = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if obj.get("type") == "result" and obj.get("is_error"):
+            msg = obj.get("result")
+            if isinstance(msg, str) and msg.strip():
+                reason = msg.strip()
+    return reason
 
 
 # --- subprocess runner (the only real-IO part) ---------------------------
@@ -114,6 +140,7 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
     stdin_ok = True      # False -> the child died before consuming stdin (P2-3)
     disconnected = False  # True -> consumer close()d us (SSE client went away)
     stdin_thread: Optional[threading.Thread] = None  # daemon feeding stdin (P1-1)
+    stdout_tail: deque[str] = deque(maxlen=12)  # last stdout lines, for error reporting
 
     # Wall-clock watchdog (audit6 P2-2): a hung `claude` (network stall, stuck
     # auth prompt, wedged node) would otherwise block the stdout read loop —
@@ -172,6 +199,7 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
         stdin_thread = threading.Thread(target=_feed_stdin, daemon=True)
         stdin_thread.start()
         for line in proc.stdout:
+            stdout_tail.append(line)
             yield line
         with watchdog_lock:
             reading_done = True
@@ -235,11 +263,21 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
             # that's a cancellation, not a Claude failure to report.
             if (drained or not stdin_ok) and returncode != 0:
                 stderr_file.seek(0)
-                stderr = stderr_file.read().decode("utf-8", "replace")
-                raise ClaudeUnavailableError(
+                stderr = stderr_file.read().decode("utf-8", "replace").strip()
+                # `claude` puts auth / API errors on stdout (stream-json), not
+                # stderr, so when stderr is empty read the real reason back from
+                # the drained stdout tail — the user sees "OAuth session expired"
+                # rather than a bare exit code.
+                detail = stderr or _error_from_stream(stdout_tail)
+                message = (
                     f"`{config.claude_bin()}` exited with code {returncode}. "
-                    f"Is the claude CLI installed and authenticated?\n{stderr.strip()}"
+                    "Is the `claude` CLI installed and signed in? An expired login "
+                    "is the usual cause — run `claude` in a terminal to sign in, "
+                    "then try again."
                 )
+                if detail:
+                    message += f"\n{detail}"
+                raise ClaudeUnavailableError(message)
         finally:
             stderr_file.close()
 

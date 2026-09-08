@@ -139,7 +139,7 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
 | Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console, Library, Stats) |
-| Tests / lint | pytest (285 tests, all mocking the subprocess), ruff |
+| Tests / lint | pytest (288 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

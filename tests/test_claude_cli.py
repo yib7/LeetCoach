@@ -547,3 +547,47 @@ def test_real_runner_surfaces_stderr_on_nonzero_exit():
         assert "3" in str(exc)
     else:
         raise AssertionError("expected ClaudeUnavailableError on nonzero exit")
+
+
+def test_error_from_stream_extracts_stdout_failure():
+    """`_error_from_stream` returns the message of a terminal is_error result line
+    (claude reports auth/API errors there, not on stderr)."""
+    lines = [
+        '{"type":"system","subtype":"init"}\n',
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}\n',
+        '{"type":"result","subtype":"success","is_error":true,'
+        '"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}\n',
+    ]
+    assert claude_cli._error_from_stream(lines) == (
+        "Failed to authenticate: OAuth session expired and could not be refreshed"
+    )
+
+
+def test_error_from_stream_empty_without_error_result():
+    """No is_error result line -> empty string (a normal run reports nothing)."""
+    lines = [
+        '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n',
+        "not json at all\n",
+        "\n",
+    ]
+    assert claude_cli._error_from_stream(lines) == ""
+
+
+def test_nonzero_exit_surfaces_stdout_error_when_stderr_empty():
+    """Integration: `claude` reports the auth failure on STDOUT (stderr empty) and
+    exits nonzero — the runner reads the reason back so the user sees the real
+    cause plus actionable re-login guidance, not a bare exit code."""
+    script = (
+        "import sys, json\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':True,"
+        "'result':'Failed to authenticate: OAuth session expired and could not be refreshed'}))\n"
+        "sys.exit(1)\n"
+    )
+    try:
+        _drive_real_runner([sys.executable, "-c", script], "ping")
+    except claude_cli.ClaudeUnavailableError as exc:
+        assert "OAuth session expired" in str(exc)   # the real reason, surfaced
+        assert "sign in" in str(exc)                 # actionable re-login guidance
+    else:
+        raise AssertionError("expected ClaudeUnavailableError on nonzero exit")
