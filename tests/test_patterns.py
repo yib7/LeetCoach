@@ -93,6 +93,18 @@ def test_topics_rescue_an_unmappable_type():
     assert result.problem_type == "hash_map"
 
 
+def test_generic_container_topics_do_not_bias_the_rescue_to_hash_map():
+    # SP2 M1: "array" used to rescue almost every label into hash_map, since
+    # nearly every problem touches an array.
+    result = _classify(json.dumps(
+        {"problem_type": "sorting", "topics": ["array", "sorting", "greedy"]}))
+    assert result.problem_type == "greedy"
+    assert patterns.normalize_pattern("sorting", ["arrays", "set", "map"]) == patterns.FALLBACK
+    assert patterns.normalize_pattern("strings", ["Hash Set"]) == "hash_map"
+    # the label itself may still say "arrays" (NeetCode's "Arrays & Hashing")
+    assert patterns.normalize_pattern("arrays") == "hash_map"
+
+
 def test_non_string_type_is_tolerated():
     result = _classify(json.dumps({"problem_type": ["dp"], "topics": "bfs"}))
     assert result.problem_type == patterns.FALLBACK

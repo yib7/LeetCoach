@@ -104,6 +104,13 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 _SLUG_MAX = 60  # a label longer than this is not a pattern name
 
+# SP2 M1: generic container words. Nearly every problem touches an array, so
+# as a *topic* these say nothing about the technique - letting them rescue a
+# label sent "sorting" + ["array", "sorting", "greedy"] to hash_map. They
+# still count in the label itself ("Arrays & Hashing" is NeetCode's name for
+# hash_map); only the topic rescue ignores them.
+_GENERIC_TOPIC_KEYWORDS = frozenset({"array", "arrays", "set", "map", "dict", "dictionary"})
+
 
 def _slug(text: str) -> str:
     """ASCII snake_case: NFKD-transliterated, lowercased, non-alphanumerics
@@ -112,7 +119,7 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", ascii_text.lower()).strip("_")
 
 
-def _match(slug: str) -> str | None:
+def _match(slug: str, skip: frozenset = frozenset()) -> str | None:
     if not slug or len(slug) > _SLUG_MAX:
         return None
     if slug in PATTERNS:
@@ -120,6 +127,8 @@ def _match(slug: str) -> str | None:
     tokens = slug.split("_")
     for canonical, keywords in _RULES:
         for keyword in keywords:
+            if keyword in skip:
+                continue
             parts = keyword.split("_")
             n = len(parts)
             if any(tokens[i:i + n] == parts for i in range(len(tokens) - n + 1)):
@@ -132,12 +141,17 @@ def normalize_pattern(raw, topics=()) -> str:
 
     ``raw`` is tried first; if it maps nowhere, each of ``topics`` is tried in
     order (a reply like ``{"problem_type": "strings", "topics": ["hash map"]}``
-    still lands in ``hash_map``). Never raises; non-strings are ignored.
+    still lands in ``hash_map``), ignoring generic container words (SP2 M1:
+    a topic "array" is no evidence of hash_map). Never raises; non-strings are
+    ignored.
     """
-    candidates = [raw, *(topics or ())]
-    for candidate in candidates:
-        if isinstance(candidate, str):
-            hit = _match(_slug(candidate))
+    if isinstance(raw, str):
+        hit = _match(_slug(raw))
+        if hit:
+            return hit
+    for topic in topics or ():
+        if isinstance(topic, str):
+            hit = _match(_slug(topic), skip=_GENERIC_TOPIC_KEYWORDS)
             if hit:
                 return hit
     return FALLBACK
