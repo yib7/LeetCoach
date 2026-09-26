@@ -35,6 +35,7 @@ can point ``LEETCOACH_TOPIC_INDEX`` at a tmp file.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -43,6 +44,8 @@ from pathlib import Path
 
 import config
 import patterns
+
+logger = logging.getLogger(__name__)
 
 # Serializes the load->merge->save cycle in ``record()``. Flask runs
 # ``threaded=True``, so two concurrent Learning requests could otherwise
@@ -105,23 +108,30 @@ def load(path=None) -> dict:
     returns a dict with ``by_type`` (dict), ``all`` (list) and ``by_language``
     (dict of language -> bucket) present, well-typed and sanitized.
     """
-    data, _existed = _read_raw(_path(path))
+    data, _existed, _transient = _read_raw(_path(path))
     return _clean_index(data)
 
 
 def _read_raw(p: Path):
-    """``(parsed top-level dict or None, file_existed)``. Never raises."""
+    """``(parsed top-level dict or None, file_existed, transient_error)``.
+    Never raises.
+
+    SP2 M6: ``transient_error`` is True only when the file exists but could
+    not be READ at all (an ``OSError`` other than "missing" - e.g. another
+    process briefly holding it locked). That is NOT corruption: unlike a
+    missing file or bad JSON, there is nothing wrong with what is on disk, so
+    the caller must not treat it as replaceable content."""
     try:
         raw = p.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return None, False
+        return None, False, False
     except OSError:
-        return None, True
+        return None, True, True
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError, RecursionError):
-        return None, True
-    return (data if isinstance(data, dict) else None), True
+        return None, True, False
+    return (data if isinstance(data, dict) else None), True, False
 
 
 def _clean_index(data) -> dict:
@@ -241,7 +251,20 @@ def record(problem_type: str, topics, path=None, *, language=None) -> dict:
     # replaced (unreadable file, a malformed section) is backed up first.
     with _RECORD_LOCK:
         p = _path(path)
-        raw, existed = _read_raw(p)
+        raw, existed, transient = _read_raw(p)
+        if transient:
+            # SP2 M6: the file exists but a transient OSError (e.g. another
+            # process briefly locking it) stopped us reading it - unlike a
+            # missing file or corrupt JSON, there is nothing wrong with its
+            # content. Overwriting it here would silently discard everything
+            # already recorded just because of a momentary lock, so skip the
+            # write entirely and drop this topic rather than clobber it.
+            logger.warning(
+                "topic_index.record(): could not read %s (transient OSError) - "
+                "skipping this write so the existing index is not overwritten",
+                p,
+            )
+            return _clean_index({})
         lossy = existed and raw is None
         if raw is None:
             raw = {}
