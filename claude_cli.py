@@ -740,14 +740,18 @@ def _real_runner(
         stdin_thread.start()
         for line in proc.stdout:
             stdout_tail.append(line)
-            is_result = _is_result_line(line)
-            yield line
-            if is_result:
+            if _is_result_line(line):
                 # A6: the answer is complete. Stop reading - a straggler that
                 # still holds stdout (a helper grandchild, or the CLI lingering
-                # on shutdown) must not keep the run open.
+                # on shutdown) must not keep the run open. `saw_result` is set
+                # BEFORE the yield: the parser (`_iter_text_deltas`) stops at
+                # this line and close()s us, which raises GeneratorExit AT the
+                # yield - that close must get the post-result grace below, not
+                # the disconnect branch's immediate kill (SP2 fix I1).
                 saw_result = True
+                yield line
                 break
+            yield line
         with watchdog_lock:
             reading_done = True
             # A watchdog-killed stream also ends in EOF; only a drain the
@@ -755,8 +759,12 @@ def _real_runner(
             # naturally.
             drained = not timed_out and not (handle is not None and handle.cancelled)
     except GeneratorExit:
-        # Consumer disconnect: never convert this into an error below (raising
-        # from the finally would swallow the GeneratorExit).
+        # Closed early. Either a genuine consumer disconnect (nothing seen past
+        # the last delta -> the finally kills the tree at once), or the parser
+        # stopping at the `result` event (`saw_result` -> the finally waits up
+        # to RESULT_EXIT_GRACE for a natural exit, then kills). Either way
+        # never convert this into an error below: raising from the finally
+        # would swallow the GeneratorExit.
         disconnected = True
         raise
     finally:

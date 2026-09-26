@@ -196,3 +196,64 @@ def test_disconnect_during_stdin_write_does_not_raise():
     start = time.monotonic()
     gen.close()  # must not raise ClaudeUnavailableError
     assert time.monotonic() - start < 15
+
+
+# --- SP2 fix round 1 (I1): the post-result grace works THROUGH run() ----------
+#
+# `_iter_text_deltas` stops at the `result` event and closes the runner, which
+# raises GeneratorExit at the runner's `yield`. That close used to be taken for
+# a consumer disconnect (immediate tree-kill), so the RESULT_EXIT_GRACE path
+# only ever ran in tests that drove `_real_runner` directly.
+
+_DELTA = json.dumps({"type": "stream_event", "event": {
+    "type": "content_block_delta", "delta": {"type": "text_delta", "text": "hi"}}})
+_RESULT = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                      "result": "hi"})
+
+
+def _run_through_public_api(script):
+    def runner(argv, stdin_text, **kwargs):
+        return claude_cli._real_runner([sys.executable, "-c", script], stdin_text, **kwargs)
+
+    return claude_cli.run("x", runner=runner, flags=frozenset())
+
+
+def test_cli_exiting_shortly_after_result_is_awaited_through_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "60")
+    monkeypatch.setattr(claude_cli, "RESULT_EXIT_GRACE", 5.0)
+    marker = tmp_path / "exited-cleanly"
+    script = (
+        "import sys, time\n"
+        "sys.stdin.read()\n"
+        f"sys.stdout.write({_DELTA!r} + '\\n')\n"
+        f"sys.stdout.write({_RESULT!r} + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(0.5)\n"
+        f"open({str(marker)!r}, 'w').write('ok')\n"
+        "sys.exit(0)\n"
+    )
+    run = _run_through_public_api(script)
+    assert "".join(run) == "hi"  # returns normally, no exception
+    assert marker.exists(), "the CLI was killed at its result instead of given the grace"
+
+
+def test_cli_lingering_after_result_is_killed_after_grace_through_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "60")
+    monkeypatch.setattr(claude_cli, "RESULT_EXIT_GRACE", 1.0)
+    pid_file = tmp_path / "pid"
+    script = (
+        "import os, sys, time\n"
+        f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+        "sys.stdin.read()\n"
+        f"sys.stdout.write({_DELTA!r} + '\\n')\n"
+        f"sys.stdout.write({_RESULT!r} + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(40)\n"
+    )
+    run = _run_through_public_api(script)
+    assert next(run) == "hi"
+    start = time.monotonic()
+    assert list(run) == []  # the stop at `result` is not an error
+    elapsed = time.monotonic() - start
+    assert 0.9 <= elapsed < 12, f"grace not honoured / kill too slow: {elapsed:.2f}s"
+    assert wait_dead(int(pid_file.read_text())), "a CLI lingering past the grace survived"
