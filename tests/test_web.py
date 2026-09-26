@@ -229,6 +229,36 @@ def test_run_rejects_non_string_fields(client, payload):
     assert not [p for p in tmp_path.rglob("*") if p.is_file()]
 
 
+# --- B23: a non-object JSON body -> clean 400 on every JSON route ----------
+
+@pytest.mark.parametrize("payload", [["x"], "just a string", 123, True])
+def test_run_rejects_non_object_json_body(client, payload):
+    """A JSON array/string/number/bool body (not an object) must be a clean
+    400, not a 500 from `.get()` on a list/str (B23)."""
+    c, tmp_path = client
+    resp = c.post("/run", data=json.dumps(payload), content_type="application/json")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+@pytest.mark.parametrize("payload", [["x"], "just a string", 123, True])
+def test_ask_rejects_non_object_json_body(client, payload):
+    c, _ = client
+    resp = c.post("/ask", data=json.dumps(payload), content_type="application/json")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+
+@pytest.mark.parametrize("payload", [["sonnet"], "sonnet", 123])
+def test_config_model_rejects_non_object_json_body(client, payload):
+    c, tmp_path = client
+    resp = c.post("/config/model", data=json.dumps(payload), content_type="application/json")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+    assert not (tmp_path / ".env").exists()
+
+
 # --- mid-stream subprocess failure -> SSE error event --------------------
 
 def test_run_answer_midstream_failure_emits_error_event(tmp_path, monkeypatch):

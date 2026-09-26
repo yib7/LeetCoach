@@ -105,6 +105,26 @@ LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
 TIERS = prompts.TIERS                  # ("simple", "normal", "complex")
 
 
+def _json_object() -> tuple[dict, Response | None]:
+    """Parse the request body as JSON and return ``(data, None)``, or
+    ``(_, error_response)`` if the body isn't a JSON OBJECT (B23).
+
+    ``request.get_json(silent=True)`` happily returns a list/string/number for
+    a JSON array/string/number body, and every route below immediately calls
+    ``.get()`` on the result — an ``AttributeError`` -> bare 500 for any
+    script/curl that posts a non-object body. A missing/empty body still
+    parses to ``None`` and is treated as ``{}`` (unchanged: every field is then
+    "missing", handled by each route's own validation) since it's
+    indistinguishable from an explicit JSON ``null``.
+    """
+    data = request.get_json(silent=True)
+    if data is None:
+        return {}, None
+    if not isinstance(data, dict):
+        return {}, (jsonify({"error": "Request body must be a JSON object."}), 400)
+    return data, None
+
+
 def _non_string_field_error(data: dict, fields) -> str | None:
     """Return a 400-worthy message if any named field is PRESENT but not a
     string, else ``None``. ``fields`` is an iterable of ``(key, Label)`` pairs.
@@ -415,7 +435,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.auth_status) -> F
         # allowlisted (it becomes a `--model` argv token) and written to `.env`
         # so it survives a restart; os.environ is updated so the very next run
         # uses it with no restart (config.model() reads env at call time).
-        data = request.get_json(silent=True) or {}
+        data, err = _json_object()
+        if err:
+            return err
         alias = data.get("model")
         if alias not in config.ALLOWED_MODEL_ALIASES:
             return jsonify({"error": "Unknown model."}), 400
@@ -470,7 +492,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.auth_status) -> F
 
     @app.post("/run")
     def run():
-        data = request.get_json(silent=True) or {}
+        data, err = _json_object()
+        if err:
+            return err
 
         # Type-check before any .strip()/.lower(): a non-string field (a script
         # posting a JSON number/list) must be a clean 400, not a 500 (3.12).
@@ -699,7 +723,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.auth_status) -> F
         # Quick Ask (SP2): a small syntax/stdlib question answered by the cheap
         # quick-ask model via the SAME injected run_fn as /run. The answer is
         # ephemeral — plain JSON, no SSE, nothing saved to the library.
-        data = request.get_json(silent=True) or {}
+        data, err = _json_object()
+        if err:
+            return err
 
         # Type-check before any .strip()/.lower() OR the problem-context slice
         # below (which sits outside the try/except): a non-string field must be
