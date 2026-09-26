@@ -149,8 +149,9 @@ A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 
 ## Configuration
 
-All nine settings are environment variables, overridable in your shell or a `.env` file.
-All are optional.
+All ten settings are environment variables, overridable in your shell or a `.env` file.
+All are optional. `.env.example` has the same list, ready to copy to `.env` (the two path
+settings ship commented out there — see why in the table below).
 
 | Variable               | Default                        | What it does                                                        |
 | ---------------------- | ------------------------------ | ------------------------------------------------------------------- |
@@ -158,11 +159,12 @@ All are optional.
 | `LEETCOACH_CLASSIFIER_MODEL` | `haiku`                  | Model for the short classification call that tags each run.        |
 | `LEETCOACH_QUICK_ASK_MODEL`  | `haiku`                  | Model for the Quick Ask box (short syntax / stdlib lookups).       |
 | `LEETCOACH_CLAUDE_BIN` | `claude`                       | Name or absolute path of the `claude` executable.                   |
-| `LEETCOACH_OUTPUT_DIR` | `output` next to the app       | Where the study library is written.                                 |
-| `LEETCOACH_TOPIC_INDEX`| `<output_dir>/topic_index.json`| Path to the persisted topic index JSON.                             |
+| `LEETCOACH_OUTPUT_DIR` | `output` next to the app       | Where the study library is written. Relative to the app's own directory unless you set this — a relative value here instead resolves against your current working directory, so it's commented out in `.env.example` by default. |
+| `LEETCOACH_TOPIC_INDEX`| `<output_dir>/topic_index.json`| Path to the persisted topic index JSON. Same relative-path caveat as above. |
 | `LEETCOACH_RUN_TIMEOUT`| `600`                          | Wall-clock cap in seconds for a single `claude` run.                |
 | `LEETCOACH_VERIFY_TIMEOUT`| `10`                        | Wall-clock cap in seconds for each Answer-mode sample verification. |
 | `LEETCOACH_NO_BROWSER`   | *(unset)*                      | Set to `1`/`true` to stop `python app.py` opening your browser on launch.            |
+| `LEETCOACH_NO_DOTENV`    | *(unset)*                      | Set to `1`/`true` to skip loading `.env` entirely (use real environment variables only). |
 
 ## Where outputs are saved
 
