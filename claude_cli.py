@@ -42,7 +42,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from typing import Callable, Iterable, Iterator, Optional
+from collections import deque
+from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
 import config
 
@@ -64,6 +65,87 @@ def is_available(*, which: Callable[[str], Optional[str]] = shutil.which) -> boo
     depending on what is installed on the machine.
     """
     return which(config.claude_bin()) is not None
+
+
+class AuthStatus(NamedTuple):
+    """Sign-in state of the `claude` CLI, as probed by :func:`auth_status`.
+
+    ``installed`` is whether the binary resolves on PATH; ``logged_in`` is
+    whether the CLI reports an active Anthropic session. ``logged_in`` is only
+    ever meaningful when ``installed`` is True.
+    """
+
+    installed: bool
+    logged_in: bool
+
+
+def _default_auth_runner(argv: list[str]):
+    """Run ``claude auth status`` for real, returning the completed process.
+
+    Resolves argv[0] via PATHEXT (Windows shim), captures stdout, caps the wait,
+    and suppresses a console window on Windows — mirroring :func:`_real_runner`.
+    """
+    resolved = shutil.which(argv[0]) or argv[0]
+    kwargs: dict = {"capture_output": True, "text": True, "timeout": 15}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return subprocess.run([resolved, *argv[1:]], **kwargs)
+
+
+def auth_status(
+    *,
+    run: Optional[Callable[[list[str]], object]] = None,
+    which: Callable[[str], Optional[str]] = shutil.which,
+) -> AuthStatus:
+    """Probe whether the `claude` CLI is installed and signed in.
+
+    Uses ``claude auth status``, which prints a small JSON object
+    (``{"loggedIn": <bool>, ...}``) — a local, non-interactive check that costs
+    no model call. ``run`` is injectable so tests never spawn the real CLI; it
+    takes the argv list and returns an object with a ``.stdout`` string (like
+    :func:`subprocess.run` with ``capture_output=True``).
+
+    Robust by contract: a missing binary yields ``installed=False``; any other
+    failure (non-JSON output, a timeout, a crash) yields
+    ``installed=True, logged_in=False`` — this probe must never raise, because
+    it runs on the page-load path and in the launcher.
+    """
+    if which(config.claude_bin()) is None:
+        return AuthStatus(installed=False, logged_in=False)
+    runner = run or _default_auth_runner
+    try:
+        proc = runner([config.claude_bin(), "auth", "status"])
+        stdout = getattr(proc, "stdout", "") or ""
+        data = json.loads(stdout)
+        logged_in = bool(data.get("loggedIn"))
+    except Exception:  # noqa: BLE001 - an auth probe must never raise
+        return AuthStatus(installed=True, logged_in=False)
+    return AuthStatus(installed=True, logged_in=logged_in)
+
+
+def _error_from_stream(lines: Iterable[str]) -> str:
+    """Extract a human-readable failure reason from `claude`'s stream-json stdout.
+
+    `claude` reports auth / API failures on STDOUT as a terminal ``result`` line
+    flagged ``is_error`` (its stderr is often empty for these), so the nonzero-exit
+    handler below reads it back to show the real cause — e.g. "Failed to
+    authenticate: OAuth session expired" — instead of a bare exit code. Returns the
+    ``result`` message of the last such line, or "" when none is present.
+    """
+    reason = ""
+    for raw in lines:
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            continue
+        try:
+            obj = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if obj.get("type") == "result" and obj.get("is_error"):
+            msg = obj.get("result")
+            if isinstance(msg, str) and msg.strip():
+                reason = msg.strip()
+    return reason
 
 
 # --- subprocess runner (the only real-IO part) ---------------------------
@@ -114,6 +196,7 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
     stdin_ok = True      # False -> the child died before consuming stdin (P2-3)
     disconnected = False  # True -> consumer close()d us (SSE client went away)
     stdin_thread: Optional[threading.Thread] = None  # daemon feeding stdin (P1-1)
+    stdout_tail: deque[str] = deque(maxlen=12)  # last stdout lines, for error reporting
 
     # Wall-clock watchdog (audit6 P2-2): a hung `claude` (network stall, stuck
     # auth prompt, wedged node) would otherwise block the stdout read loop —
@@ -172,6 +255,7 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
         stdin_thread = threading.Thread(target=_feed_stdin, daemon=True)
         stdin_thread.start()
         for line in proc.stdout:
+            stdout_tail.append(line)
             yield line
         with watchdog_lock:
             reading_done = True
@@ -235,11 +319,21 @@ def _real_runner(argv: list[str], stdin_text: str) -> Iterator[str]:
             # that's a cancellation, not a Claude failure to report.
             if (drained or not stdin_ok) and returncode != 0:
                 stderr_file.seek(0)
-                stderr = stderr_file.read().decode("utf-8", "replace")
-                raise ClaudeUnavailableError(
+                stderr = stderr_file.read().decode("utf-8", "replace").strip()
+                # `claude` puts auth / API errors on stdout (stream-json), not
+                # stderr, so when stderr is empty read the real reason back from
+                # the drained stdout tail — the user sees "OAuth session expired"
+                # rather than a bare exit code.
+                detail = stderr or _error_from_stream(stdout_tail)
+                message = (
                     f"`{config.claude_bin()}` exited with code {returncode}. "
-                    f"Is the claude CLI installed and authenticated?\n{stderr.strip()}"
+                    "You are most likely signed out of the `claude` CLI (an expired "
+                    "login is the usual cause). Run  claude auth login  in a "
+                    "terminal to sign in, then click Run again."
                 )
+                if detail:
+                    message += f"\n{detail}"
+                raise ClaudeUnavailableError(message)
         finally:
             stderr_file.close()
 

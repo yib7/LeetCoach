@@ -54,6 +54,7 @@
 
   var viewConsole = $("view-console");
   var viewLibrary = $("view-library");
+  var viewStats = $("view-stats");
 
   // session lifecycle containers (all live inside #session as siblings)
   var sessionState = document.querySelector("[data-session-state]");
@@ -236,20 +237,27 @@
     editorEl.classList.add("flash");
   }
 
-  // ---- CLI availability pill ---------------------------------------------
+  // ---- CLI availability + sign-in pill -----------------------------------
   (function claudeStatus() {
-    var ready = document.body.dataset.claudeAvailable === "true";
+    var installed = document.body.dataset.claudeAvailable === "true";
+    var loggedIn = document.body.dataset.claudeLoggedIn === "true";
+    var ready = installed && loggedIn;
     var pill = $("claude-status");
     var dot = pill ? pill.querySelector(".dot") : null;
     var label = pill ? pill.querySelector(".tb-status-label") : null;
-    if (ready) {
-      if (dot) dot.classList.remove("red");
-      if (label) label.textContent = "claude CLI ready";
-      if (claudeWarning) claudeWarning.hidden = true;
-    } else {
-      if (dot) dot.classList.add("red");
-      if (label) label.textContent = "claude CLI not found";
-      if (claudeWarning) claudeWarning.hidden = false;
+    if (dot) dot.classList.toggle("red", !ready);
+    if (label) {
+      label.textContent = ready
+        ? "claude CLI ready"
+        : installed ? "claude CLI signed out" : "claude CLI not found";
+    }
+    // Reveal the matching banner message and hide the section when all good.
+    if (claudeWarning) {
+      var missing = claudeWarning.querySelector('[data-banner="missing"]');
+      var signedOut = claudeWarning.querySelector('[data-banner="signedout"]');
+      if (missing) missing.hidden = installed;                  // only when NOT installed
+      if (signedOut) signedOut.hidden = !(installed && !loggedIn); // installed but signed out
+      claudeWarning.hidden = ready;
     }
   })();
 
@@ -261,25 +269,52 @@
   function syncTier() {
     if (tierGroup) tierGroup.classList.toggle("disabled", activeVal("mode") === "learning");
   }
+  // Persist the model choice as the default (server writes .env + updates env).
+  // Best-effort: on failure the run path still uses the server's current model.
+  function saveModel(alias) {
+    fetch("/config/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: alias }),
+    }).catch(function () {});
+  }
   document.querySelectorAll(".seg").forEach(function (seg) {
     seg.addEventListener("click", function (e) {
       var b = e.target.closest(".seg-btn");
       if (!b || !seg.contains(b)) return;
       seg.querySelectorAll(".seg-btn").forEach(function (x) { x.classList.remove("on"); });
       b.classList.add("on");
-      if (seg.getAttribute("data-seg") === "mode") syncTier();
+      var group = seg.getAttribute("data-seg");
+      if (group === "mode") syncTier();
+      if (group === "model") saveModel(b.getAttribute("data-val"));
     });
   });
+  // Reflect the server's current default model in the picker on load.
+  (function initModel() {
+    var current = document.body.dataset.claudeModel || "";
+    if (!current) return; // custom/unknown id -> leave the picker unselected
+    var btn = document.querySelector(
+      '.seg[data-seg="model"] .seg-btn[data-val="' + current + '"]'
+    );
+    if (btn) {
+      btn.parentNode.querySelectorAll(".seg-btn").forEach(function (x) {
+        x.classList.remove("on");
+      });
+      btn.classList.add("on");
+    }
+  })();
   syncTier();
 
   // ---- Console <-> Library tabs ------------------------------------------
   function switchView(view) {
     if (viewConsole) viewConsole.hidden = view !== "console";
     if (viewLibrary) viewLibrary.hidden = view !== "library";
+    if (viewStats) viewStats.hidden = view !== "stats";
     document.querySelectorAll("[data-view]").forEach(function (a) {
       a.classList.toggle("on", a.getAttribute("data-view") === view);
     });
     if (view === "library") loadLibrary(); // re-fetch on open: fresh after runs
+    if (view === "stats") refreshStats();  // recompute from the already-loaded runs
   }
   document.querySelectorAll("[data-view]").forEach(function (a) {
     a.addEventListener("click", function () { switchView(a.getAttribute("data-view")); });
@@ -775,9 +810,12 @@
   }
   runBtn.addEventListener("click", runNow);
 
-  // ⌘/Ctrl + Enter anywhere runs (guarded against double-run).
+  // ⌘/Ctrl + Enter anywhere runs (guarded against double-run). Suppressed while
+  // an overlay (the search palette or shortcuts modal) is open, so Ctrl/Cmd+Enter
+  // in the palette opens the result without ALSO kicking off a background run.
   document.addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && (e.key === "Enter" || e.keyCode === 13)) {
+      if (document.querySelector(".overlay:not([hidden])")) return;
       e.preventDefault();
       if (!isStreaming) runNow();
     }
@@ -1062,6 +1100,286 @@
   }
 
   // =========================================================================
+  // Stats (Cycle 10) — pure helpers + Stats view + Console streak badge.
+  // All derived client-side from currentRuns (grouped over /library mtimes).
+  // run.savedAt is Unix SECONDS (like every mtime here), so day-bucket via *1000.
+  // =========================================================================
+
+  // Local YYYY-MM-DD. NOT toISOString (that is UTC and would misbucket a run
+  // saved near local midnight into the wrong day / streak).
+  function dayKey(date) {
+    var y = date.getFullYear();
+    var m = date.getMonth() + 1;
+    var d = date.getDate();
+    return y + "-" + (m < 10 ? "0" : "") + m + "-" + (d < 10 ? "0" : "") + d;
+  }
+
+  // Parse a YYYY-MM-DD key back to a LOCAL-midnight Date (for day arithmetic).
+  function parseDayKey(k) {
+    var p = String(k).split("-");
+    return new Date(+p[0], (+p[1]) - 1, +p[2]);
+  }
+
+  // Pure: derive every stat from a runs array. `now` is injectable (tests).
+  function computeStats(runs, now) {
+    now = now || new Date();
+    runs = runs || [];
+
+    var probSet = {};
+    var byMode = {};
+    var byLanguage = {};
+    var byTopic = {};
+    var dayCounts = {}; // 'YYYY-MM-DD' -> runs that day
+
+    runs.forEach(function (run) {
+      var title = run.problem || run.stemRaw || "";
+      if (title) probSet[title] = true;
+
+      var mode = run.mode || "Other";
+      byMode[mode] = (byMode[mode] || 0) + 1;
+
+      var lang = (run.language && run.language !== "—") ? run.language : "Unknown";
+      byLanguage[lang] = (byLanguage[lang] || 0) + 1;
+
+      var topic = run.topic || "Uncategorized";
+      byTopic[topic] = (byTopic[topic] || 0) + 1;
+
+      if (typeof run.savedAt === "number" && run.savedAt > 0) {
+        var k = dayKey(new Date(run.savedAt * 1000));
+        dayCounts[k] = (dayCounts[k] || 0) + 1;
+      }
+    });
+
+    var today = dayCounts[dayKey(now)] || 0;
+
+    // last 7 local days (today + the 6 prior)
+    var thisWeek = 0;
+    for (var i = 0; i < 7; i++) {
+      var wd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      thisWeek += dayCounts[dayKey(wd)] || 0;
+    }
+
+    // current streak: consecutive active days ending today, with a
+    // today-or-yesterday grace so a fresh morning still reads the streak.
+    var currentStreak = 0;
+    var cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    if (!dayCounts[dayKey(cursor)]) {
+      cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+      if (!dayCounts[dayKey(cursor)]) cursor = null; // neither today nor yesterday
+    }
+    while (cursor && dayCounts[dayKey(cursor)]) {
+      currentStreak++;
+      cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1);
+    }
+
+    // longest streak: longest consecutive run over the sorted unique active days.
+    var days = Object.keys(dayCounts).sort(); // 'YYYY-MM-DD' sorts chronologically
+    var longestStreak = 0;
+    var runLen = 0;
+    var prev = null;
+    days.forEach(function (k) {
+      if (prev === null) {
+        runLen = 1;
+      } else {
+        var diff = Math.round((parseDayKey(k) - parseDayKey(prev)) / 86400000);
+        runLen = diff === 1 ? runLen + 1 : 1;
+      }
+      if (runLen > longestStreak) longestStreak = runLen;
+      prev = k;
+    });
+
+    // heatmap: last 119 days (17 weeks), oldest -> newest.
+    var heatmap = [];
+    for (var j = 118; j >= 0; j--) {
+      var hd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - j);
+      var hk = dayKey(hd);
+      heatmap.push({ date: hk, count: dayCounts[hk] || 0 });
+    }
+
+    return {
+      total: runs.length,
+      distinctProblems: Object.keys(probSet).length,
+      today: today,
+      thisWeek: thisWeek,
+      currentStreak: currentStreak,
+      longestStreak: longestStreak,
+      byMode: byMode,
+      byLanguage: byLanguage,
+      byTopic: byTopic,
+      heatmap: heatmap,
+    };
+  }
+
+  // 5 intensity buckets (classes hm-0..hm-4) by runs/day.
+  function heatBucket(c) {
+    if (c <= 0) return 0;
+    if (c === 1) return 1;
+    if (c === 2) return 2;
+    if (c <= 4) return 3;
+    return 4;
+  }
+
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  function setStatText(id, val) {
+    var e = $(id);
+    if (e) e.textContent = String(val);
+  }
+
+  // ---- Console streak badge (B3) -----------------------------------------
+  function renderStreakBadge(stats) {
+    var badge = $("streak-badge");
+    if (!badge) return;
+    badge.textContent = "";
+    badge.hidden = false;
+    var zero = stats.currentStreak <= 0;
+    badge.classList.toggle("zero", zero);
+    if (zero) {
+      badge.appendChild(el("span", "sb-txt", "Start your streak today"));
+      return;
+    }
+    badge.appendChild(el("span", "sb-flame", "🔥")); // fire emoji
+    var txt = stats.currentStreak + "-day streak";
+    if (stats.today > 0) txt += " · " + stats.today + " today";
+    badge.appendChild(el("span", "sb-txt", txt));
+  }
+
+  // ---- Stats view: tiles --------------------------------------------------
+  function renderTiles(stats) {
+    setStatText("stat-streak", stats.currentStreak);
+    setStatText("stat-streak-sub",
+      stats.currentStreak === 0 ? "start today" : (stats.currentStreak === 1 ? "day" : "days"));
+    setStatText("stat-longest", stats.longestStreak);
+    setStatText("stat-longest-sub", stats.longestStreak === 1 ? "day best" : "days best");
+    setStatText("stat-today", stats.today);
+    setStatText("stat-today-sub", "this week: " + stats.thisWeek);
+    setStatText("stat-total", stats.total);
+    setStatText("stat-total-sub",
+      stats.distinctProblems + (stats.distinctProblems === 1 ? " problem" : " problems"));
+  }
+
+  // ---- Stats view: activity heatmap --------------------------------------
+  // GitHub-style: columns = weeks, rows = weekday. Lead with blank cells so the
+  // first day lands on its correct weekday row (grid-auto-flow:column fills a
+  // column top-to-bottom before moving right).
+  function renderHeatmap(heatmap) {
+    var grid = $("hm-grid");
+    var months = $("hm-months");
+    if (!grid || !months) return;
+    grid.innerHTML = "";
+    months.innerHTML = "";
+    if (!heatmap.length) return;
+
+    var first = parseDayKey(heatmap[0].date);
+    var pad = first.getDay(); // 0=Sun .. 6=Sat leading blanks
+    var cells = [];
+    for (var p = 0; p < pad; p++) cells.push(null);
+    heatmap.forEach(function (d) { cells.push(d); });
+    var numCols = Math.ceil(cells.length / 7);
+
+    grid.style.gridTemplateColumns = "repeat(" + numCols + ", var(--hm-cell))";
+    months.style.gridTemplateColumns = "repeat(" + numCols + ", var(--hm-cell))";
+
+    cells.forEach(function (d) {
+      if (!d) { grid.appendChild(el("span", "hm-cell hm-pad")); return; }
+      var cell = el("span", "hm-cell hm-" + heatBucket(d.count));
+      cell.title = d.date + " · " + d.count + (d.count === 1 ? " run" : " runs");
+      grid.appendChild(cell);
+    });
+
+    // Month labels above the columns where the month first changes (spaced out
+    // so a short leading month doesn't collide with the next label).
+    var lastMonth = -1;
+    var lastLabelCol = -99;
+    for (var c = 0; c < numCols; c++) {
+      var rep = null;
+      for (var r = 0; r < 7; r++) {
+        var cc = cells[c * 7 + r];
+        if (cc) { rep = cc; break; }
+      }
+      if (!rep) continue;
+      var mo = parseDayKey(rep.date).getMonth();
+      if (mo !== lastMonth) {
+        lastMonth = mo;
+        if (c - lastLabelCol >= 3) {
+          var lbl = el("span", "hm-mo", MONTHS[mo]);
+          lbl.style.gridColumnStart = String(c + 1);
+          months.appendChild(lbl);
+          lastLabelCol = c;
+        }
+      }
+    }
+  }
+
+  // ---- Stats view: breakdowns --------------------------------------------
+  function sortedEntries(map) {
+    return Object.keys(map).map(function (k) {
+      return { key: k, count: map[k] };
+    }).sort(function (a, b) {
+      return b.count - a.count || a.key.localeCompare(b.key);
+    });
+  }
+
+  function renderBars(id, map) {
+    var host = $(id);
+    if (!host) return;
+    host.innerHTML = "";
+    var rows = sortedEntries(map);
+    if (!rows.length) { host.appendChild(el("div", "bd-empty", "No data yet")); return; }
+    var max = rows[0].count || 1;
+    rows.forEach(function (row) {
+      var r = el("div", "bd-row");
+      r.appendChild(el("span", "bd-key", row.key));
+      var track = el("span", "bd-track");
+      var fill = el("span", "bd-fill");
+      fill.style.width = Math.max(6, Math.round((row.count / max) * 100)) + "%";
+      track.appendChild(fill);
+      r.appendChild(track);
+      r.appendChild(el("span", "bd-num", String(row.count)));
+      host.appendChild(r);
+    });
+  }
+
+  function renderTopicList(id, map) {
+    var host = $(id);
+    if (!host) return;
+    host.innerHTML = "";
+    var rows = sortedEntries(map).slice(0, 8); // byTopic rendered sorted desc
+    if (!rows.length) { host.appendChild(el("div", "bd-empty", "No topics yet")); return; }
+    rows.forEach(function (row, i) {
+      var r = el("div", "bd-trow");
+      r.appendChild(el("span", "bd-rank", String(i + 1)));
+      r.appendChild(el("span", "bd-tname", row.key));
+      r.appendChild(el("span", "bd-num", String(row.count)));
+      host.appendChild(r);
+    });
+  }
+
+  // ---- Stats orchestration (badge always; view when populated) -----------
+  function refreshStats() {
+    var stats = computeStats(currentRuns);
+    renderStreakBadge(stats);
+
+    var empty = $("stats-empty");
+    var body = $("stats-body");
+    if (!stats.total) {
+      if (empty) empty.hidden = false;
+      if (body) body.hidden = true;
+      return;
+    }
+    if (empty) empty.hidden = true;
+    if (body) body.hidden = false;
+    renderTiles(stats);
+    renderHeatmap(stats.heatmap);
+    renderBars("bd-mode", stats.byMode);
+    renderBars("bd-language", stats.byLanguage);
+    renderTopicList("bd-topic", stats.byTopic);
+  }
+
+  var statsEmptyCta = $("stats-empty-cta");
+  if (statsEmptyCta) statsEmptyCta.addEventListener("click", function () { switchView("console"); });
+
+  // =========================================================================
   // Library two-pane.
   // =========================================================================
   var vwTitle, vwSub;
@@ -1239,6 +1557,7 @@
         renderRecentTable(currentRuns);
         renderTopics(currentRuns);
         renderTree(libFiles);
+        refreshStats(); // recompute streak badge + Stats view from the new runs
       })
       .catch(function (e) {
         libFiles = [];
@@ -1247,6 +1566,7 @@
         renderRecents([]);
         renderRecentTable([]);
         renderTopics([]);
+        refreshStats(); // empty-state + "start your streak" nudge on load failure
         if (libTree) {
           libTree.innerHTML = "";
           libTree.appendChild(el("div", "grp-h", "Could not load the library (" + (e && e.message) + ")."));
@@ -1287,7 +1607,243 @@
     });
   }
 
+  // =========================================================================
+  // Overlays (Cycle 10, C1/C2): keyboard-shortcuts help modal + ⌘K search
+  // palette. Both toggle via the `hidden` property (like every other section
+  // here) and render ALL user-derived text through el()/textContent — never
+  // innerHTML — so the XSS posture is preserved. No backend/route change.
+  // =========================================================================
+  var shortcutsModal = $("shortcuts-modal");
+  var shortcutsBtn = $("shortcuts-btn");
+  var shortcutsClose = $("shortcuts-close");
+  var searchPalette = $("search-palette");
+  var searchBox = $("tb-search");
+  var searchInput = $("search-input");
+  var searchResults = $("search-results");
+  var overlayReturnFocus = null; // element focus returns to when an overlay closes
+  var searchRows = [];           // current filtered items (parallel to the rendered rows)
+  var searchActive = -1;         // highlighted index within searchRows
+
+  // The `?` shortcut must never fire while the user is typing text.
+  function isTypingTarget(node) {
+    if (!node) return false;
+    var tag = (node.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || node.isContentEditable === true;
+  }
+  function restoreOverlayFocus() {
+    var t = overlayReturnFocus;
+    overlayReturnFocus = null;
+    if (t && typeof t.focus === "function") { try { t.focus(); } catch (e) { /* noop */ } }
+  }
+
+  // ---- shortcuts modal ----------------------------------------------------
+  function openShortcuts() {
+    if (!shortcutsModal || !shortcutsModal.hidden) return;
+    closeSearch(); // never stack overlays
+    overlayReturnFocus = document.activeElement;
+    shortcutsModal.hidden = false;
+    if (shortcutsClose) shortcutsClose.focus(); // move focus into the dialog
+  }
+  function closeShortcuts() {
+    if (!shortcutsModal || shortcutsModal.hidden) return;
+    shortcutsModal.hidden = true;
+    restoreOverlayFocus();
+  }
+  if (shortcutsBtn) shortcutsBtn.addEventListener("click", openShortcuts);
+  if (shortcutsClose) shortcutsClose.addEventListener("click", closeShortcuts);
+  if (shortcutsModal) {
+    shortcutsModal.addEventListener("click", function (e) {
+      if (e.target === shortcutsModal) closeShortcuts(); // backdrop click only
+    });
+  }
+
+  // ---- search palette -----------------------------------------------------
+  function hintFor(parts) {
+    return parts.filter(function (p) { return p && p !== "—"; }).join(" · ");
+  }
+
+  // Searchable corpus = grouped runs (rich rows) ∪ any loose library file NOT
+  // folded into a run (defensive: output/ is normally all 3-segment run files).
+  function buildSearchItems() {
+    var items = [];
+    var claimed = {};
+    currentRuns.forEach(function (run) {
+      var path = run.mdPath || (run.files[0] && run.files[0].path);
+      if (!path) return;
+      run.files.forEach(function (f) { claimed[f.path] = true; });
+      var names = run.files.map(function (f) { return f.path.split("/").pop(); }).join(" ");
+      items.push({
+        title: run.problem || run.stemRaw || path,
+        hint: hintFor([run.mode, run.topic, run.language]),
+        path: path,
+        run: run,
+        savedAt: run.savedAt || 0,
+        hay: [run.problem, run.topic, run.mode, run.language, run.stemRaw, run.langExt, names]
+          .join(" ").toLowerCase(),
+      });
+    });
+    libFiles.forEach(function (f) {
+      if (claimed[f.path]) return; // already represented by its run row
+      var meta = fileMeta(f.path);
+      items.push({
+        title: meta.title,
+        hint: hintFor([meta.mode, meta.topic, langLabel(meta.ext)]) || f.path,
+        path: f.path,
+        run: null,
+        savedAt: (f && f.mtime) || 0,
+        hay: [meta.title, meta.topic, meta.mode, langLabel(meta.ext), f.path].join(" ").toLowerCase(),
+      });
+    });
+    return items;
+  }
+
+  // Case-insensitive: every whitespace-separated term must be a substring.
+  // Empty query -> most recent runs so the palette is useful before typing.
+  function filterSearch(query) {
+    var all = buildSearchItems();
+    var q = String(query || "").trim().toLowerCase();
+    if (!q) {
+      return all.slice().sort(function (a, b) { return b.savedAt - a.savedAt; }).slice(0, 8);
+    }
+    var terms = q.split(/\s+/);
+    return all.filter(function (it) {
+      return terms.every(function (t) { return it.hay.indexOf(t) !== -1; });
+    }).slice(0, 40);
+  }
+
+  function setSearchActive(i) {
+    var rows = searchResults.querySelectorAll(".pal-row");
+    if (!rows.length) { searchActive = -1; return; }
+    if (i < 0) i = 0;
+    if (i > rows.length - 1) i = rows.length - 1;
+    searchActive = i;
+    for (var r = 0; r < rows.length; r++) {
+      var on = r === i;
+      rows[r].classList.toggle("on", on);
+      if (on) { rows[r].setAttribute("aria-selected", "true"); rows[r].scrollIntoView({ block: "nearest" }); }
+      else rows[r].removeAttribute("aria-selected");
+    }
+  }
+  function moveSearchActive(delta) {
+    var rows = searchResults.querySelectorAll(".pal-row");
+    if (!rows.length) return;
+    var next = searchActive + delta;
+    if (next < 0) next = rows.length - 1;   // wrap
+    if (next > rows.length - 1) next = 0;
+    setSearchActive(next);
+  }
+
+  function renderSearchResults(items) {
+    searchRows = items;
+    searchResults.innerHTML = ""; // trusted: only .pal-* nodes are appended below
+    if (!items.length) {
+      searchResults.appendChild(el("div", "pal-none", "No matches"));
+      searchActive = -1;
+      return;
+    }
+    items.forEach(function (it, i) {
+      var row = el("div", "pal-row" + (i === 0 ? " on" : ""));
+      row.setAttribute("role", "option");
+      if (i === 0) row.setAttribute("aria-selected", "true");
+      row.appendChild(typeBadge(extOf(it.path)));
+      var main = el("div", "pal-main");
+      main.appendChild(el("div", "pal-title", it.title)); // user text -> textContent
+      if (it.hint) main.appendChild(el("div", "pal-hint", it.hint));
+      row.appendChild(main);
+      row.addEventListener("click", function () { openSearchItem(it); });
+      (function (idx) {
+        row.addEventListener("mousemove", function () {
+          if (searchActive !== idx) setSearchActive(idx);
+        });
+      })(i);
+      searchResults.appendChild(row);
+    });
+    searchActive = 0;
+  }
+
+  // Reuse the existing library-open path so a result opens in the Library viewer.
+  function openSearchItem(it) {
+    if (!it) return;
+    closeSearch();
+    if (it.run) {
+      openRun(it.run);            // switchView("library") + openFile(run's md/first file)
+    } else {
+      switchView("library");
+      openFile(it.path);
+    }
+  }
+
+  function openSearch() {
+    if (!searchPalette || !searchInput) return;
+    if (!searchPalette.hidden) { searchInput.focus(); searchInput.select(); return; }
+    closeShortcuts(); // never stack overlays
+    overlayReturnFocus = document.activeElement;
+    searchPalette.hidden = false;
+    searchInput.value = "";
+    renderSearchResults(filterSearch(""));
+    searchInput.focus();
+  }
+  function closeSearch() {
+    if (!searchPalette || searchPalette.hidden) return;
+    searchPalette.hidden = true;
+    restoreOverlayFocus();
+  }
+
+  if (searchBox) {
+    searchBox.addEventListener("click", openSearch);
+    searchBox.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " " || e.keyCode === 13 || e.keyCode === 32) {
+        e.preventDefault(); openSearch();
+      }
+    });
+  }
+  if (searchPalette) {
+    searchPalette.addEventListener("click", function (e) {
+      if (e.target === searchPalette) closeSearch(); // backdrop click only
+    });
+  }
+  if (searchInput) {
+    searchInput.addEventListener("input", function () {
+      renderSearchResults(filterSearch(searchInput.value));
+    });
+    searchInput.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowDown") { e.preventDefault(); moveSearchActive(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); moveSearchActive(-1); }
+      else if (e.key === "Enter" || e.keyCode === 13) {
+        e.preventDefault();
+        openSearchItem(searchRows[searchActive] || searchRows[0]);
+      }
+      // Esc is handled by the global overlay handler below.
+    });
+  }
+
+  // ---- global overlay keys (kept independent of the run / Quick-Ask keys) --
+  document.addEventListener("keydown", function (e) {
+    // Esc closes whichever overlay is open (palette wins if both somehow are).
+    if (e.key === "Escape" || e.keyCode === 27) {
+      if (searchPalette && !searchPalette.hidden) { e.preventDefault(); closeSearch(); return; }
+      if (shortcutsModal && !shortcutsModal.hidden) { e.preventDefault(); closeShortcuts(); return; }
+      return;
+    }
+    // ⌘/Ctrl+K opens the search palette (preventDefault so the browser's own
+    // find/location shortcut doesn't fire). The ⌘/Ctrl+Enter run handler and
+    // the Quick-Ask Enter handler check different keys, so both keep working.
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k" || e.key === "K")) {
+      e.preventDefault();
+      openSearch();
+      return;
+    }
+    // "?" (Shift+/) opens the shortcuts modal — GUARDED so it never fires while
+    // focus is in an input / textarea / contenteditable (e.g. the problem box).
+    if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
+      e.preventDefault();
+      openShortcuts();
+    }
+  });
+
   // ---- boot ---------------------------------------------------------------
   enterIdle();
+  refreshStats(); // instant streak badge / empty-state before /library resolves
   loadLibrary();
 })();

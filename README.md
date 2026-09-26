@@ -26,6 +26,10 @@ CLI.
   a topic index lets Learning skip and cross-link what you have already studied. The
   Library tab browses everything you have saved and lets you delete a file you no longer
   want, and the Console sidebar lists your recent runs.
+- **Tracks your practice.** A Stats tab turns your saved runs into a daily streak (with a
+  badge in the Console header), an activity heatmap, and totals by topic, mode, and language,
+  so you can see your momentum at a glance. A `Ctrl`/`Cmd`+`K` search palette jumps to any
+  saved problem, and `?` shows the keyboard shortcuts.
 - **Quick Ask.** A side box answers a small syntax or stdlib question with Haiku, without
   streaming or saving anything, so you never break focus to look something up. It refuses to
   hand over the current problem's solution and points you back to a mode, but still answers
@@ -46,7 +50,9 @@ need:
 - That CLI **authenticated** (`claude` runs and answers from your normal shell).
 
 If `claude` isn't found, the page still loads but shows a banner and runs fail until it's
-installed and authenticated. There are no secrets to configure.
+installed and authenticated. If it's installed but signed out, the banner says so and gives
+you the exact command — `claude auth login` — to sign in; the desktop shortcut also runs
+that for you automatically when needed. There are no secrets to configure.
 
 ## Setup
 
@@ -78,25 +84,32 @@ the runtime dependencies:
 python app.py
 ```
 
-Open the printed URL (default `http://127.0.0.1:5000`), paste a problem, pick a mode and
-language (and tier), and click **Run**. The answer streams in live and is saved under
-`output/`. `python app.py` is the single entry point for every later run.
+Open the printed URL (default `http://127.0.0.1:5000`), paste a problem, pick a mode,
+language, and Code Quality level (and, if you like, a model), and click **Run**. The
+answer streams in live and is saved under `output/`. `python app.py` is the single entry
+point for every later run.
+
+**Daily use.** After the one-time setup you do not need the terminal. Run
+`.\scripts\create-shortcut.ps1` once to put a **LeetCoach** shortcut on your Desktop; from
+then on, double-click it (or run `.\LeetCoach.cmd`) to start the app and open it in your
+browser. If port 5000 is busy it picks the next free port. Close the window to stop the app.
 
 (Optional) Copy `.env.example` to `.env` to change the model or paths; all settings are
 optional, see [Configuration](#configuration).
 
 ## Modes
 
-Two modes are **tiered**: *simple* (basic, possibly sub-optimal), *normal* (a balanced
-interview answer), or *complex* (the most optimal solution).
+Two modes take a **Code Quality** level: *Basic* (the simplest approach, possibly
+sub-optimal), *Normal* (a balanced interview answer), or *Optimal* (the best time/space
+solution).
 
-- **Learning** (no tier) teaches the full stack a problem needs (data structures,
-  algorithms, language stdlib). It uses the topic index to skip and cross-link topics you
-  have already studied.
-- **Guided Learning** (tiered) is one flowing document: restate the problem, teach the
-  stack, reason step by step, then produce the answer.
-- **Answer** (tiered) is a working solution plus reasoning, an explicit Big-O line, and the
-  trade-off versus the other tiers.
+- **Learning** (no Code Quality level) teaches the full stack a problem needs (data
+  structures, algorithms, language stdlib). It uses the topic index to skip and cross-link
+  topics you have already studied.
+- **Guided Learning** is one flowing document: restate the problem, teach the stack,
+  reason step by step, then produce the answer at the chosen level.
+- **Answer** is a working solution plus reasoning, an explicit Big-O line, and the
+  trade-off versus the other levels.
 
 ## Add-ons
 
@@ -129,19 +142,19 @@ The sandbox is a convenience check, not a security boundary; see [SECURITY.md](S
 | Language | Python 3.12+ |
 | Web | Flask, server-sent events for streaming |
 | Model | `claude` CLI (`claude -p`, stream-json), no API key |
-| Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console + Library) |
-| Tests / lint | pytest (281 tests, all mocking the subprocess), ruff |
+| Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console, Library, Stats) |
+| Tests / lint | pytest (315 tests, all mocking the subprocess), ruff |
 
 A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Configuration
 
-All eight settings are environment variables, overridable in your shell or a `.env` file.
+All nine settings are environment variables, overridable in your shell or a `.env` file.
 All are optional.
 
 | Variable               | Default                        | What it does                                                        |
 | ---------------------- | ------------------------------ | ------------------------------------------------------------------- |
-| `LEETCOACH_MODEL`      | `claude-opus-4-8`              | Claude model id passed to `claude --model` (e.g. `opus` / `sonnet`).|
+| `LEETCOACH_MODEL`      | `claude-opus-4-8`              | Claude model id passed to `claude --model` (e.g. `opus` / `sonnet`). The Console model picker writes this for you.|
 | `LEETCOACH_CLASSIFIER_MODEL` | `haiku`                  | Model for the short classification call that tags each run.        |
 | `LEETCOACH_QUICK_ASK_MODEL`  | `haiku`                  | Model for the Quick Ask box (short syntax / stdlib lookups).       |
 | `LEETCOACH_CLAUDE_BIN` | `claude`                       | Name or absolute path of the `claude` executable.                   |
@@ -149,6 +162,7 @@ All are optional.
 | `LEETCOACH_TOPIC_INDEX`| `<output_dir>/topic_index.json`| Path to the persisted topic index JSON.                             |
 | `LEETCOACH_RUN_TIMEOUT`| `600`                          | Wall-clock cap in seconds for a single `claude` run.                |
 | `LEETCOACH_VERIFY_TIMEOUT`| `10`                        | Wall-clock cap in seconds for each Answer-mode sample verification. |
+| `LEETCOACH_NO_BROWSER`   | *(unset)*                      | Set to `1`/`true` to stop `python app.py` opening your browser on launch.            |
 
 ## Where outputs are saved
 
@@ -159,8 +173,8 @@ directory you launch from), organized by problem type:
 output/
   learning/<problem_type>_learning/<problem>.md
   guided/<problem_type>/<problem>.md
-  answers/<problem_type>/<problem>__<tier>.<ext>   (code)
-  answers/<problem_type>/<problem>__<tier>.md      (reasoning + verification)
+  answers/<problem_type>/<problem>__<level>.<ext>   (code; <level> = basic|normal|optimal)
+  answers/<problem_type>/<problem>__<level>.md      (reasoning + verification)
   topic_index.json
 ```
 

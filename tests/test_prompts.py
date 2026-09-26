@@ -10,7 +10,7 @@ holds:
   java),
 * every ANSWER and GUIDED prompt instructs an explicit time/space Big-O line,
   and Answer additionally calls out the trade-off vs the other tiers,
-* tier semantics (simple = basic/maybe sub-optimal; normal = balanced; complex
+* tier semantics (basic = simplest/maybe sub-optimal; normal = balanced; optimal
   = best time/space) are conveyed,
 * Learning has no tier and teaches the tech stack, optionally skipping
   already-learned topics,
@@ -28,7 +28,7 @@ import prompts
 PROBLEM = "Given an array nums, return indices of the two numbers adding to target."
 
 LANGS = ["python", "cpp", "java"]
-TIERS = ["simple", "normal", "complex"]
+TIERS = ["basic", "normal", "optimal"]
 
 # A representative stdlib token we expect the prompt to mention per language.
 STDLIB_HINT = {
@@ -83,7 +83,7 @@ def test_answer_mentions_tier_tradeoff():
     p = _lower(prompts.build_answer(PROBLEM, tier="normal", language="python"))
     assert "trade-off" in p or "tradeoff" in p or "trade off" in p
     # references the other tiers by name
-    assert "simple" in p and "complex" in p
+    assert "basic" in p and "optimal" in p
 
 
 # --- Learning has no tier and is a separate contract ---------------------
@@ -128,21 +128,21 @@ def test_learning_mentions_language_stdlib_hint(lang):
 
 @pytest.mark.parametrize("lang", LANGS)
 def test_answer_mentions_language_stdlib_hint(lang):
-    p = prompts.build_answer(PROBLEM, tier="complex", language=lang)
+    p = prompts.build_answer(PROBLEM, tier="optimal", language=lang)
     assert STDLIB_HINT[lang] in p
 
 
 # --- tier semantics conveyed ---------------------------------------------
 
-def test_simple_tier_says_basic_maybe_suboptimal():
-    p = _lower(prompts.build_answer(PROBLEM, tier="simple", language="python"))
+def test_basic_tier_says_basic_maybe_suboptimal():
+    p = _lower(prompts.build_answer(PROBLEM, tier="basic", language="python"))
     assert "basic" in p or "simplest" in p
-    # simple tolerates sub-optimal complexity / minimal library use
+    # basic tolerates sub-optimal complexity / minimal library use
     assert "sub-optimal" in p or "suboptimal" in p or "may not be optimal" in p
 
 
-def test_complex_tier_says_best_time_space():
-    p = _lower(prompts.build_answer(PROBLEM, tier="complex", language="python"))
+def test_optimal_tier_says_best_time_space():
+    p = _lower(prompts.build_answer(PROBLEM, tier="optimal", language="python"))
     assert "best" in p or "optimal" in p
     assert "readable" in p
 
@@ -198,6 +198,14 @@ def test_non_python_answer_omits_runnable_driver(lang):
 def test_invalid_tier_raises():
     with pytest.raises((ValueError, KeyError)):
         prompts.build_answer(PROBLEM, tier="nonsense", language="python")
+
+
+@pytest.mark.parametrize("old", ["simple", "complex"])
+def test_pre_rename_tier_values_now_raise(old):
+    # The tier was renamed simple/complex -> basic/optimal; the old keys must no
+    # longer be accepted so a stale caller fails loudly instead of silently.
+    with pytest.raises((ValueError, KeyError)):
+        prompts.build_answer(PROBLEM, tier=old, language="python")
 
 
 def test_invalid_language_raises():

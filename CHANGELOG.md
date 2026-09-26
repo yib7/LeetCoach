@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - Unreleased
+
+### Added
+- **One-click desktop launch.** A `LeetCoach.cmd` launcher plus
+  `scripts/create-shortcut.ps1`, which drops a `LeetCoach` shortcut on your Desktop
+  (resolving a OneDrive-redirected Desktop), so a double-click starts the app and
+  opens it in your browser. The first run bootstraps the virtual environment through
+  `setup.ps1` if it is missing. The shortcut and browser tab get a real `[lc]` app icon.
+- **The app opens your browser on start**, and when the default port is already in
+  use it falls back to the next free port instead of failing to launch. Set
+  `LEETCOACH_NO_BROWSER=1` to suppress the auto-open for headless or dev use.
+- **A Stats tab.** Your saved runs now drive a practice dashboard: current and longest
+  daily streak, solved today, this week, and in total, a calendar heatmap of the last
+  several months, and a breakdown by mode, language, and topic. A streak badge sits in
+  the Console header. Everything is derived from the files already in `output/`, so it
+  stays offline and adds no new storage.
+- **A search palette** (`Ctrl`/`Cmd` + `K`) that filters your saved runs and library by
+  problem, topic, mode, or language and opens the file you pick.
+- **A keyboard-shortcuts dialog** (press `?`) listing what the app responds to. Pressing
+  `?` while typing in the problem box does nothing, as expected.
+- **An in-app model picker** in the Console (Opus / Sonnet / Haiku). Your choice is saved
+  to `.env` and applied to the very next run with no restart, so you can switch to a
+  stronger or cheaper model whenever the mood strikes. Quick Ask and the topic classifier
+  keep their own Haiku defaults.
+- **The desktop shortcut signs you in when needed.** Before starting the app, the launcher
+  checks the `claude` CLI's sign-in state and, if you are signed out, runs
+  `claude auth login` for you — so a run never fails on an expired session.
+
+### Changed
+- Renamed the **Tier** control to **Code Quality**, with clearer levels **Basic / Normal /
+  Optimal** (previously Simple / Normal / Complex). Existing saved answers are renamed to
+  match on startup — a one-time, idempotent migration that never overwrites a file.
+- Removed two placeholder controls that never did anything: the sidebar Bookmarks entry
+  and the recent-runs Clear link.
+
+### Fixed
+- A failed run now says *why*, and how to fix it. `claude` reports an expired login (and
+  other API errors) on stdout as stream-json, which the app discarded — leaving a bare
+  "exited with code 1." The run-failed message now surfaces the real reason (e.g. "Failed
+  to authenticate: OAuth session expired…") and names the exact fix, `claude auth login`.
+  The startup banner likewise tells signed-out and not-installed apart and shows the
+  copy-paste command.
+
+### Notes
+- Runs work exactly as before: the `claude` CLI dependency, the SSE streaming pipeline,
+  the Answer-mode sandbox, the `output/` storage layout, and the `/run` request contract
+  are all unchanged. The Stats tab and the search palette read only your existing library,
+  with no new endpoint. The suite is now 315 tests, still mocking the subprocess.
+
 ## [1.3.3] - 2026-08-26
 
 ### Internal

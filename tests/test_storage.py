@@ -173,20 +173,20 @@ def test_save_answer_python_paths(out_root):
 )
 def test_save_answer_extension_per_language(out_root, language, ext):
     code_path, _ = storage.save_answer(
-        "Add Two", "linked_list", tier="simple", language=language,
+        "Add Two", "linked_list", tier="basic", language=language,
         code="x", reasoning="r",
     )
-    assert Path(code_path).name == f"add_two__simple.{ext}"
+    assert Path(code_path).name == f"add_two__basic.{ext}"
 
 
 def test_save_answer_creates_parent_dirs(out_root):
     # nothing exists yet; save must create the full tree
     assert not out_root.exists()
     storage.save_answer(
-        "Brand New", "fresh_type", tier="complex", language="python",
+        "Brand New", "fresh_type", tier="optimal", language="python",
         code="x", reasoning="r",
     )
-    assert (out_root / "answers" / "fresh_type" / "brand_new__complex.py").exists()
+    assert (out_root / "answers" / "fresh_type" / "brand_new__optimal.py").exists()
 
 
 # --- security: cannot escape output/ -------------------------------------
@@ -375,3 +375,89 @@ def test_concurrent_save_answer_pairs_stay_matched(out_root):
         sibling_md = py.with_suffix(".md")
         assert sibling_md.exists(), f"{py.name} has no sibling reasoning file"
         assert sibling_md.read_text(encoding="utf-8") == f"reasoning_{i}"
+
+
+# --- one-time tier rename migration (simple/complex -> basic/optimal) -----
+
+def _touch(path: Path, body: str = "x") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_migrate_renames_simple_and_complex_pairs(out_root):
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "two_sum__simple.py", "code")
+    _touch(ans / "two_sum__simple.md", "why")
+    _touch(ans / "three_sum__complex.py", "code")
+    _touch(ans / "three_sum__complex.md", "why")
+
+    renamed = storage.migrate_tier_suffixes(out_root)
+
+    # both siblings of both answers moved (4 files)
+    assert len(renamed) == 4
+    assert (ans / "two_sum__basic.py").exists()
+    assert (ans / "two_sum__basic.md").exists()
+    assert (ans / "three_sum__optimal.py").exists()
+    assert (ans / "three_sum__optimal.md").exists()
+    # the old names are gone
+    assert not (ans / "two_sum__simple.py").exists()
+    assert not (ans / "three_sum__complex.md").exists()
+    # content is preserved through the rename
+    assert (ans / "two_sum__basic.py").read_text(encoding="utf-8") == "code"
+
+
+def test_migrate_leaves_normal_and_unrelated_files_alone(out_root):
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "two_sum__normal.py", "code")
+    _touch(ans / "notes.md", "loose")  # no tier segment at all
+    # a problem whose slug contains "simple" as a word must NOT be touched:
+    # the tier is the SECOND __-segment, not any substring.
+    _touch(ans / "simplify_path__normal.py", "code")
+
+    renamed = storage.migrate_tier_suffixes(out_root)
+
+    assert renamed == []
+    assert (ans / "two_sum__normal.py").exists()
+    assert (ans / "notes.md").exists()
+    assert (ans / "simplify_path__normal.py").exists()
+
+
+def test_migrate_handles_slot_suffix(out_root):
+    # A collision slot appends __N after the tier: <problem>__<tier>__2. The
+    # tier is still the second segment and must migrate, keeping the slot.
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "two_sum__complex__2.py", "code")
+
+    storage.migrate_tier_suffixes(out_root)
+
+    assert (ans / "two_sum__optimal__2.py").exists()
+    assert not (ans / "two_sum__complex__2.py").exists()
+
+
+def test_migrate_is_idempotent_and_never_clobbers(out_root):
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "two_sum__simple.py", "old")
+    # a hand-created file already occupies the destination name
+    _touch(ans / "two_sum__basic.py", "already here")
+
+    renamed = storage.migrate_tier_suffixes(out_root)
+
+    # the rename is skipped rather than clobbering the existing destination
+    assert renamed == []
+    assert (ans / "two_sum__simple.py").read_text(encoding="utf-8") == "old"
+    assert (ans / "two_sum__basic.py").read_text(encoding="utf-8") == "already here"
+
+
+def test_migrate_no_answers_dir_is_noop(out_root):
+    # Nothing saved yet: the answers/ tree doesn't exist. Must be a safe no-op.
+    assert storage.migrate_tier_suffixes(out_root) == []
+
+
+def test_migrate_second_run_finds_nothing(out_root):
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "x__simple.py", "code")
+    first = storage.migrate_tier_suffixes(out_root)
+    second = storage.migrate_tier_suffixes(out_root)
+    assert len(first) == 1
+    assert second == []  # already migrated; a repeat launch does nothing
