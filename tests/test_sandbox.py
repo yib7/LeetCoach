@@ -22,6 +22,7 @@ import time
 
 import pytest
 
+import parsing
 import sandbox
 
 # --- verify_python: pass / fail / error ----------------------------------
@@ -76,6 +77,28 @@ def test_timeout_is_an_error():
     assert "out" in r.note.lower()  # "timed out"
 
 
+def test_timeout_carries_partial_output_and_sample_context_in_detail():
+    """#4 regression: a timeout used to report a bare "timed out after Xs"
+    note with NO `detail` at all, so the saved .md couldn't show the stdin,
+    the expected output, or whatever the wedged solution had already printed
+    before it was killed. `detail` must carry all of that."""
+    code = (
+        "import sys\n"
+        "print('partial output before hanging')\n"
+        "sys.stdout.flush()\n"
+        "while True:\n"
+        "    pass\n"
+    )
+    r = sandbox.verify_python(code, "the-stdin\n", "the-expected", timeout=2)
+    assert r.status == "error", r
+    assert "timed out" in r.note
+    assert r.detail, "timeout verdict must carry a detail entry"
+    entry = r.detail[0]
+    assert entry["stdin"] == "the-stdin\n"
+    assert entry["expected"] == "the-expected"
+    assert "partial output before hanging" in entry["stdout"]
+
+
 # --- A3: structural (tolerant) output comparison --------------------------
 
 def test_outputs_match_exact_is_always_a_match():
@@ -103,6 +126,27 @@ def test_outputs_match_none_vs_json_null():
 def test_outputs_match_float_tolerance():
     assert sandbox._outputs_match("3.14159", "3.141590001") is True
     assert sandbox._outputs_match("2.0", "1.0") is False
+
+
+def test_outputs_match_int_vs_int_requires_exact_value():
+    """#1 regression: `math.isclose`'s default `rel_tol=1e-5` is scaled by
+    magnitude, so large-but-different plain ints were wrongly reported equal
+    even though neither side is a float. The tolerance must apply ONLY when
+    at least one side is a float; two ints must compare exactly."""
+    assert sandbox._outputs_match("100001", "100000") is False
+    assert sandbox._outputs_match("1000000008", "1000000007") is False
+    assert sandbox._outputs_match("[100001]", "[100000]") is False
+    # sanity: the exact-match case still passes.
+    assert sandbox._outputs_match("100000", "100000") is True
+
+
+def test_outputs_match_json_keyword_inside_quoted_string_is_not_rewritten():
+    """#8 regression: a naive `\\bnull\\b` substitution rewrote the "null"
+    inside the STRING `"not null"` into `"not None"`, making two genuinely
+    different string values compare equal."""
+    assert sandbox._outputs_match('[true, "not None"]', '[true, "not null"]') is False
+    # the bare (unquoted) keyword outside any string is still translated.
+    assert sandbox._outputs_match("[true, null]", "[true, null]") is True
 
 
 def test_outputs_match_unquoted_vs_quoted_string():
@@ -472,6 +516,28 @@ Explanation: level order traversal.
 """
 
 
+def test_parse_samples_bare_input_body_keeps_its_own_indentation():
+    """#11 regression: a bare-label Input body's OWN indentation can be
+    meaningful (e.g. a nested grid row's formatting) and must survive
+    verbatim — the old code ran every body line through the markdown-noise
+    stripper, whose leading `[\\s...]+` half silently deleted leading
+    whitespace on every line, not just markdown wrap characters."""
+    text = (
+        "Example 1:\n"
+        "Input:\n"
+        "grid = [\n"
+        "  [1, 0, 0],\n"
+        "  [0, 1, 0],\n"
+        "]\n"
+        "Output: [2,2]\n"
+    )
+    samples = sandbox.parse_samples(text)
+    assert len(samples) == 1, samples
+    lines = samples[0].stdin.splitlines()
+    assert "  [1, 0, 0]," in lines, lines
+    assert "  [0, 1, 0]," in lines, lines
+
+
 def test_parse_samples_captures_output_on_following_line():
     """A bare ``Output:`` label with its value on the next line(s) must capture
     that value, not an empty expected_stdout (audit P1-1)."""
@@ -676,9 +742,11 @@ def test_aggregation_keeps_the_timeout_note_per_sample():
     assert len(r.detail) == 1
     entry = r.detail[0]
     assert "timed out" in entry.get("note", "").lower(), entry
-    # the sample's own stdin/expected are present too, even with no captured
-    # stdout (a timeout never produces a `detail` payload from verify_python).
+    # the sample's own stdin/expected are present too (#4: verify_python now
+    # also returns a `detail` payload — with partial stdout/stderr — for a
+    # timeout, not just for a crash/overflow).
     assert entry.get("expected") == "anything"
+    assert "stdout" in entry
 
 
 def test_aggregation_keeps_the_note_for_a_passing_sample_too():
@@ -710,30 +778,40 @@ def test_verify_timeout_env_knob_defaults_and_invalid_values_fall_back(monkeypat
 
 # --- B5: timeouts are floats end-to-end; config clamps to (0, 86400] -------
 
-def test_verify_timeout_rejects_inf_and_out_of_range(monkeypatch):
+def test_verify_timeout_rejects_inf_and_clamps_out_of_range(monkeypatch):
     import config
     # +inf/-inf must not disable the containment timeout (B5).
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "inf")
     assert config.verify_timeout() == 10.0
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "-inf")
     assert config.verify_timeout() == 10.0
-    # far above a sane wall-clock ceiling (24h) also falls back.
+    # far above a sane wall-clock ceiling (24h) CLAMPS to the ceiling (#6) —
+    # it must not silently fall back to the (much shorter) default, which
+    # would surprise a user who deliberately asked for a long budget.
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "999999")
-    assert config.verify_timeout() == 10.0
+    assert config.verify_timeout() == config.MAX_TIMEOUT_SECONDS
     # the ceiling itself is accepted.
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "86400")
     assert config.verify_timeout() == 86400.0
     # a genuine sub-second float is kept, not truncated.
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "0.5")
     assert config.verify_timeout() == 0.5
+    # <=0 / NaN still reject to the default (#6 keeps this part of B5 intact).
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "0")
+    assert config.verify_timeout() == 10.0
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "-3")
+    assert config.verify_timeout() == 10.0
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "nan")
+    assert config.verify_timeout() == 10.0
 
 
-def test_run_timeout_rejects_inf_and_out_of_range(monkeypatch):
+def test_run_timeout_rejects_inf_and_clamps_out_of_range(monkeypatch):
     import config
     monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "inf")
     assert config.run_timeout() == 600.0
+    # #6: clamped to the ceiling, not discarded to the default.
     monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "999999")
-    assert config.run_timeout() == 600.0
+    assert config.run_timeout() == config.MAX_TIMEOUT_SECONDS
     monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "86400")
     assert config.run_timeout() == 86400.0
 
@@ -784,6 +862,63 @@ def test_verify_answer_threads_the_configured_timeout(monkeypatch):
     r = sandbox.verify_answer("print('x')\n", SINGLE_SAMPLE_PROBLEM, "python")
     assert r.status == "pass", r
     assert seen and all(t == 3 for t in seen), seen
+
+
+# --- #13: end-to-end integration, parsing.extract_code + sandbox ----------
+
+_GUIDED_DOC_MULTI_BLOCK = (
+    "Here's how hash maps work:\n\n"
+    "```python\n"
+    "# teaching snippet: hash map lookup demo, not the real solution\n"
+    "d = {1: 'a'}\n"
+    "print(d.get(1))\n"
+    "```\n\n"
+    "Now the full solution:\n\n"
+    "```python\n"
+    "import ast, sys\n"
+    "\n"
+    "def two_sum(nums, target):\n"
+    "    seen = {}\n"
+    "    for i, n in enumerate(nums):\n"
+    "        complement = target - n\n"
+    "        if complement in seen:\n"
+    "            return [seen[complement], i]\n"
+    "        seen[n] = i\n"
+    "    return []\n"
+    "\n"
+    "if __name__ == \"__main__\":\n"
+    "    line = sys.stdin.readline()\n"
+    "    nums_part, target_part = line.split(', target')\n"
+    "    nums = ast.literal_eval(nums_part.split('nums = ')[1])\n"
+    "    target = int(target_part.split('=')[1])\n"
+    "    print(two_sum(nums, target))\n"
+    "```\n"
+)
+
+_GUIDED_DOC_PROBLEM_TEXT = (
+    "Given an array of integers nums and an integer target, return indices of "
+    "the two numbers that add up to target.\n\n"
+    "Example 1:\n\n"
+    "**Input:** nums = [2,7,11,15], target = 9\n"
+    "**Output:** [0,1]\n"
+)
+
+
+def test_integrated_guided_multiblock_main_guard_doc_verifies_pass_real_python():
+    """#13: end-to-end integration of `parsing.extract_code` + `sandbox` — a
+    multi-block Guided-style doc (an earlier teaching snippet, then the real
+    `__main__`-driven solution) whose solution prints Python's `[0, 1]` list
+    repr against a LeetCode-style `**Input:**`/`**Output:**` `[0,1]`
+    (no-space) example must verify PASS. Nothing in the sandbox is mocked —
+    this runs a REAL python subprocess (only the doc text is a fixture)."""
+    code = parsing.extract_code(_GUIDED_DOC_MULTI_BLOCK, "python")
+    assert "teaching snippet" not in code
+    assert "__main__" in code
+
+    r = sandbox.verify_answer(code, _GUIDED_DOC_PROBLEM_TEXT, "python")
+    assert r.status == "pass", r
+    assert r.samples_total == 1
+    assert r.samples_passed == 1
 
 
 # --- temp dir cleanup ----------------------------------------------------

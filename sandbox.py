@@ -235,8 +235,36 @@ def _normalize(text: str) -> str:
 # multiset — a genuinely wrong (misordered when order matters, or a different
 # value entirely) answer must never become a PASS.
 
-_JSON_KEYWORD_RE = re.compile(r"\btrue\b|\bfalse\b|\bnull\b")
 _JSON_KEYWORD_MAP = {"true": "True", "false": "False", "null": "None"}
+
+# Matches EITHER a full quoted string (single or double, with backslash
+# escapes honoured) OR a bare JSON keyword. Quoted-string alternatives are
+# listed FIRST so the regex engine consumes an entire string literal in one
+# match — a `true`/`false`/`null` substring INSIDE quotes is swallowed as part
+# of that match and never reaches the bare-keyword alternatives. Without this,
+# a naive `\bnull\b` substitution would rewrite the "null" inside the string
+# `"not null"` into `"not None"`, silently making two DIFFERENT string values
+# compare equal (a false PASS).
+_JSON_TOKEN_RE = re.compile(
+    r"'[^'\\]*(?:\\.[^'\\]*)*'"
+    r'|"[^"\\]*(?:\\.[^"\\]*)*"'
+    r"|\btrue\b|\bfalse\b|\bnull\b"
+)
+
+
+def _translate_json_keywords(text: str) -> str:
+    """Rewrite bare JSON ``true``/``false``/``null`` to Python's
+    ``True``/``False``/``None`` — but never inside a quoted string, so a
+    keyword-shaped SUBSTRING of an actual string value is left alone (see
+    :data:`_JSON_TOKEN_RE`)."""
+
+    def repl(m: re.Match) -> str:
+        tok = m.group(0)
+        if tok[0] in "'\"":
+            return tok  # a whole quoted string literal: leave verbatim
+        return _JSON_KEYWORD_MAP[tok]
+
+    return _JSON_TOKEN_RE.sub(repl, text)
 
 
 def _try_parse_structured(text: str):
@@ -250,8 +278,10 @@ def _try_parse_structured(text: str):
 
     candidates = [s]
     # JSON spells booleans/null lowercase; Python's ast needs the capitalized
-    # spelling, so also try a translated candidate (`true` -> `True`, etc.).
-    translated = _JSON_KEYWORD_RE.sub(lambda m: _JSON_KEYWORD_MAP[m.group(0)], s)
+    # spelling, so also try a translated candidate (`true` -> `True`, etc.),
+    # skipping any occurrence inside a quoted string (see
+    # :func:`_translate_json_keywords`).
+    translated = _translate_json_keywords(s)
     if translated != s:
         candidates.append(translated)
 
@@ -275,9 +305,19 @@ def _try_parse_structured(text: str):
 def _values_equal(a, b, *, rel_tol: float = 1e-5, abs_tol: float = 1e-9) -> bool:
     """Structural equality with a float tolerance. ``bool`` is checked before
     the numeric branch (``bool`` is a subclass of ``int`` in Python) so
-    ``True`` never equals ``1``."""
+    ``True`` never equals ``1``.
+
+    The float tolerance is applied ONLY when at least one side is a ``float``
+    — two ``int``s must compare EXACTLY equal. Regression: ``math.isclose``'s
+    default ``rel_tol=1e-5`` is scaled by the operands' magnitude, so two
+    large-but-different ints (``100001`` vs ``100000``, or two ~1e9 values a
+    LeetCode "wrong answer" would plausibly print) were being reported equal
+    even though no float was involved anywhere.
+    """
     if isinstance(a, bool) or isinstance(b, bool):
         return a is b
+    if isinstance(a, int) and isinstance(b, int):
+        return a == b
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
@@ -452,14 +492,26 @@ def verify_python(
         out_reader.join(timeout=2)
         err_reader.join(timeout=2)
 
+        # Whatever the readers captured before the kill is still useful context
+        # for the user (and it's already there — the readers keep draining
+        # right up to the kill) — grab it regardless of the timed-out branch
+        # below (B4/#4: a timeout used to report bare "timed out after Xs"
+        # with no stdin/expected/partial-output, which the saved .md then
+        # couldn't show either).
+        stdout = out_reader.text()
+        stderr = err_reader.text()
+
         if timed_out:
             return VerifyResult(
                 status="error",
                 note=f"timed out after {timeout}s",
+                detail=[{
+                    "stdin": stdin_text,
+                    "expected": expected_stdout,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }],
             )
-
-        stdout = out_reader.text()
-        stderr = err_reader.text()
 
         if out_reader.overflowed.is_set() or err_reader.overflowed.is_set():
             # Applies whether we killed it mid-spew or it finished on its own:
@@ -547,9 +599,26 @@ _TERMINAL_RE = re.compile(
 # false-FAILs an otherwise-correct solution.
 _MD_WRAP_RE = re.compile(r"^[\s`*_]+|[\s`*_]+$")
 
+# Same idea, but for a line INSIDE a bare-label body (e.g. a 2-D grid printed
+# across several lines under a bare ``Input:``): only markdown wrap characters
+# are stripped, never LEADING whitespace, since a body line's indentation can
+# be meaningful data (a nested list's own formatting) rather than incidental
+# markdown padding (#11 — the old ``_MD_WRAP_RE`` stripped leading whitespace
+# on every body line via its ``^[\s...]+`` half, silently de-indenting it).
+_MD_WRAP_LEADING_NO_INDENT_RE = re.compile(r"^[`*_]+")
+_MD_WRAP_TRAILING_RE = re.compile(r"[\s`*_]+$")
+
 
 def _strip_markdown_noise(text: str) -> str:
     return _MD_WRAP_RE.sub("", text or "")
+
+
+def _strip_markdown_noise_keep_indent(text: str) -> str:
+    """Like :func:`_strip_markdown_noise` but preserves leading whitespace
+    (#11): strips leading markdown wrap characters and trailing
+    whitespace/markdown wrap characters only."""
+    text = _MD_WRAP_LEADING_NO_INDENT_RE.sub("", text or "")
+    return _MD_WRAP_TRAILING_RE.sub("", text)
 
 
 def parse_samples(problem_text: str) -> list:
@@ -610,15 +679,17 @@ def parse_samples(problem_text: str) -> list:
             continue
 
         # Bare ``Input:`` label — the data sits on the lines between it and the
-        # ``Output:``. Take that body verbatim (indentation may be meaningful),
-        # trimming surrounding blank lines.
+        # ``Output:``. Take that body verbatim (indentation may be meaningful,
+        # #11 — e.g. a 2-D grid's own row formatting), trimming only
+        # surrounding blank lines and markdown wrap noise, never a line's own
+        # leading whitespace.
         if not stdin_val:
             body = lines[i + 1:j]
             while body and not body[0].strip():
                 body.pop(0)
             while body and not body[-1].strip():
                 body.pop()
-            stdin_val = "\n".join(_strip_markdown_noise(ln) for ln in body)
+            stdin_val = "\n".join(_strip_markdown_noise_keep_indent(ln) for ln in body)
 
         # Bare ``Output:`` label — the value sits on the following line(s), up
         # to a blank line, the next section, or the next ``Input:``. Each line
