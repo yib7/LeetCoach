@@ -1,6 +1,6 @@
 # Places a LeetCoach shortcut on the Desktop (Cycle 10 SP-A).  Run:  .\scripts\create-shortcut.ps1
 # Creates %USERPROFILE%\Desktop\LeetCoach.lnk targeting the repo-root LeetCoach.cmd,
-# so the app launches from a double-click. Repeatable — re-running overwrites the .lnk.
+# so the app launches from a double-click. Repeatable - re-running overwrites the .lnk.
 $ErrorActionPreference = "Stop"
 
 # Repo root is the parent of this scripts/ directory.
