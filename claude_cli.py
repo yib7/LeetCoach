@@ -507,13 +507,24 @@ def cached_auth_status() -> AuthStatus:
 # B2: sign-in guidance is shown ONLY when the CLI's own error text says the
 # problem is authentication. Everything else (usage limits, a bad model name,
 # prompt too long, a crash) is headlined with its real text instead.
+#
+# SP2 M3: a status code only counts as a standalone number - never a stack
+# trace's ``cli.js:401:12`` line/column - and "log in" / "sign in" only as
+# whole words (not the tail of "catalog in" / "design in"). The limit marker
+# also knows the CLI's current wordings ("You've hit your limit",
+# "5-hour limit reached").
 _AUTH_MARKER_RE = re.compile(
-    r"authenticat|oauth|unauthori[sz]ed|\b401\b|invalid api key|api key|"
-    r"not (?:logged|signed) in|log ?in\b|sign ?in\b|/login|credential|"
-    r"token (?:has )?expired|session expired",
+    r"authenticat|oauth|unauthori[sz]ed|(?<![\w:.])401(?![\w:.])|invalid api key|"
+    r"api key|not (?:logged|signed) in|\blog[ -]?in\b|\bsign[ -]?in\b|/login|"
+    r"credential|token (?:has )?expired|session expired",
     re.IGNORECASE,
 )
-_LIMIT_MARKER_RE = re.compile(r"usage limit|rate limit|quota|\b429\b", re.IGNORECASE)
+_LIMIT_MARKER_RE = re.compile(
+    r"usage limit|rate limit|quota|(?<![\w:.])429(?![\w:.])|"
+    r"hit your (?:\w+ )?limit|limit reached|\b\d+[- ]hour limit|"
+    r"\b(?:daily|weekly|monthly) limit",
+    re.IGNORECASE,
+)
 
 _SIGN_IN_HINT = (
     "This looks like a sign-in problem: run  claude auth login  in a terminal "
