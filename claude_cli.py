@@ -421,64 +421,87 @@ def auth_status(
     return AuthStatus(installed=True, logged_in=logged_in)
 
 
-# --- cached sign-in state (B1) ---------------------------------------------
+# --- cached sign-in state (B1, SP2 M2) --------------------------------------
 #
 # The page used to run `claude auth status` synchronously on EVERY `GET /`.
-# A signed-in result is now reused for AUTH_CACHE_TTL seconds and, once stale,
-# served as-is while ONE background thread refreshes it (a sign-out shows up on
-# the next reload). A negative result (signed out / not installed / probe
-# failed) is re-checked synchronously after only AUTH_NEGATIVE_TTL seconds, so
-# the reload right after `claude auth login` reflects the new state.
+# Now every result is cached: a signed-in one for AUTH_CACHE_TTL seconds, a
+# negative one (signed out / not installed / probe failed) for only
+# AUTH_NEGATIVE_TTL seconds. Once stale, the cached value - positive OR
+# negative - is served as-is while ONE background thread refreshes it
+# (stale-while-revalidate, in-flight guarded). So after the first cache prime
+# (the launcher primes it at startup) no request ever waits on the probe; a
+# sign-in or sign-out shows up on the reload after the refresh finishes
+# (typically the second reload). Only a call with nothing cached yet blocks,
+# and concurrent such calls share the one probe instead of each spawning one.
 
 AUTH_CACHE_TTL = 60.0
 AUTH_NEGATIVE_TTL = 5.0
 
 _auth_cache: dict = {}      # binary -> (AuthStatus, probed_at)
-_auth_refreshing: set = set()
+_auth_inflight: dict = {}   # binary -> threading.Event of the running probe
 _auth_lock = threading.Lock()
 
 
 def clear_auth_cache() -> None:
-    """Forget the cached sign-in state (tests; after `claude auth login`)."""
+    """Forget the cached sign-in state (tests; after `claude auth login`).
+
+    A probe still running when this is called finishes harmlessly: its result
+    is dropped instead of repopulating the cache."""
     with _auth_lock:
         _auth_cache.clear()
+        _auth_inflight.clear()
 
 
-def _probe_and_store(key: str) -> AuthStatus:
+def _probe_and_store(key: str, done: threading.Event) -> AuthStatus:
     try:
         status = auth_status()
     except Exception:  # noqa: BLE001 - auth_status never raises; belt and braces
         status = AuthStatus(installed=True, logged_in=False)
     with _auth_lock:
-        _auth_cache[key] = (status, _monotonic())
-        _auth_refreshing.discard(key)
+        if _auth_inflight.get(key) is done:  # not cleared meanwhile
+            _auth_cache[key] = (status, _monotonic())
+            del _auth_inflight[key]
+    done.set()
     return status
 
 
 def cached_auth_status() -> AuthStatus:
-    """:func:`auth_status`, cached per configured binary (B1). Never raises."""
+    """:func:`auth_status`, cached per configured binary (B1). Never raises.
+
+    Blocks only while nothing is cached for the binary yet (the very first
+    call - normally the launcher's); every later call returns at once.
+    """
     key = config.claude_bin()
     now = _monotonic()
     with _auth_lock:
         hit = _auth_cache.get(key)
+        inflight = _auth_inflight.get(key)
         if hit is not None:
             status, probed_at = hit
-            age = now - probed_at
-            if status.logged_in:
-                if age < AUTH_CACHE_TTL:
-                    return status
-                if key not in _auth_refreshing:
-                    _auth_refreshing.add(key)
-                    threading.Thread(
-                        target=_probe_and_store,
-                        args=(key,),
-                        name="leetcoach-auth-refresh",
-                        daemon=True,
-                    ).start()
-                return status  # stale-while-revalidate
-            if age < AUTH_NEGATIVE_TTL:
-                return status
-    return _probe_and_store(key)
+            ttl = AUTH_CACHE_TTL if status.logged_in else AUTH_NEGATIVE_TTL
+            if now - probed_at >= ttl and inflight is None:
+                done = threading.Event()
+                _auth_inflight[key] = done
+                threading.Thread(
+                    target=_probe_and_store,
+                    args=(key, done),
+                    name="leetcoach-auth-refresh",
+                    daemon=True,
+                ).start()
+            return status  # fresh, or stale-while-revalidate
+        owner = inflight is None
+        if owner:
+            inflight = threading.Event()
+            _auth_inflight[key] = inflight
+    if owner:
+        return _probe_and_store(key, inflight)
+    # Another caller is already running the first probe: share its result.
+    inflight.wait(timeout=AUTH_PROBE_TIMEOUT + 10)
+    with _auth_lock:
+        hit = _auth_cache.get(key)
+    if hit is not None:
+        return hit[0]
+    return AuthStatus(installed=is_available(), logged_in=False)
 
 
 # B2: sign-in guidance is shown ONLY when the CLI's own error text says the
