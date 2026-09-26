@@ -193,6 +193,16 @@ def test_non_python_answer_omits_runnable_driver(lang):
     assert "__main__" not in p
 
 
+def test_python_driver_reads_all_stdin_not_just_one_line():
+    # A4: the old contract said "read ONE line", but parse_samples can produce
+    # multi-line stdin (e.g. a matrix spread across several lines) — a
+    # one-line-only driver would silently truncate that input.
+    p = _lower(prompts.build_answer(PROBLEM, tier="normal", language="python"))
+    assert "reads one line" not in p
+    assert "reads all" in p
+    assert "stdin" in p or "standard input" in p
+
+
 # --- invalid inputs are rejected clearly ---------------------------------
 
 def test_invalid_tier_raises():

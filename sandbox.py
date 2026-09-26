@@ -520,12 +520,16 @@ def verify_python(
 #     Output: [0,1]
 # We capture everything after Input:/Output: up to the next label or a blank
 # line. ``Explanation:`` (and the next ``Example``/``Constraints``) terminate the
-# Output capture so we don't swallow prose.
+# Output capture so we don't swallow prose. The leading char class also allows
+# markdown emphasis wrappers (``*``/``_``/`` ` ``) before the label itself, e.g.
+# ``**Input:**`` or `` `Input:` `` (A4) — the label's OWN closing wrapper (the
+# ``**`` right after the colon) lands inside the captured value instead, which
+# is why :func:`_strip_markdown_noise` is applied to every captured value below.
 _INPUT_RE = re.compile(
-    r"(?im)^[ \t>*-]*input\s*[:=]\s*(.*?)\s*$"
+    r"(?im)^[ \t>*_`-]*input\s*[:=]\s*(.*?)\s*$"
 )
 _OUTPUT_RE = re.compile(
-    r"(?im)^[ \t>*-]*output\s*[:=]\s*(.*?)\s*$"
+    r"(?im)^[ \t>*_`-]*output\s*[:=]\s*(.*?)\s*$"
 )
 # Section markers that terminate the search for an ``Output:`` after an
 # ``Input:``. A multi-line Input block (e.g. an array printed across several
@@ -533,8 +537,19 @@ _OUTPUT_RE = re.compile(
 # line count we scan forward until the Output — or bail at the next section so
 # we never swallow prose or the following example's data.
 _TERMINAL_RE = re.compile(
-    r"(?im)^[ \t>*-]*(?:explanation|example|constraints?|follow[ -]?up|note)\b"
+    r"(?im)^[ \t>*_`-]*(?:explanation|example|constraints?|follow[ -]?up|note)\b"
 )
+
+# Strips a leading/trailing run of markdown emphasis wrappers (bold ``**``,
+# italic ``_``, inline code `` ` ``) and the whitespace they leave behind, e.g.
+# from ``**Input:** value`` or `` `Output:` ``value``` `` (A4) — otherwise the
+# label's own closing wrapper leaks into the synthesized stdin/expected and
+# false-FAILs an otherwise-correct solution.
+_MD_WRAP_RE = re.compile(r"^[\s`*_]+|[\s`*_]+$")
+
+
+def _strip_markdown_noise(text: str) -> str:
+    return _MD_WRAP_RE.sub("", text or "")
 
 
 def parse_samples(problem_text: str) -> list:
@@ -573,7 +588,7 @@ def parse_samples(problem_text: str) -> list:
         if not m_in:
             i += 1
             continue
-        stdin_val = m_in.group(1).strip()
+        stdin_val = _strip_markdown_noise(m_in.group(1))
         # Scan forward for the matching Output:. No fixed window — a multi-line
         # Input block can push Output arbitrarily far down — but bail at a
         # section marker (Explanation/Example/Constraints/...) or another Input:,
@@ -583,7 +598,7 @@ def parse_samples(problem_text: str) -> list:
         while j < n:
             m_out = _OUTPUT_RE.match(lines[j])
             if m_out:
-                out_val = m_out.group(1).strip()
+                out_val = _strip_markdown_noise(m_out.group(1))
                 break
             # Stop at the next section or another Input: before an Output:
             # (malformed / unpaired Input).
@@ -603,7 +618,7 @@ def parse_samples(problem_text: str) -> list:
                 body.pop(0)
             while body and not body[-1].strip():
                 body.pop()
-            stdin_val = "\n".join(body)
+            stdin_val = "\n".join(_strip_markdown_noise(ln) for ln in body)
 
         # Bare ``Output:`` label — the value sits on the following line(s), up
         # to a blank line, the next section, or the next ``Input:``. Each line
@@ -618,7 +633,7 @@ def parse_samples(problem_text: str) -> list:
                         or _TERMINAL_RE.match(line)
                         or _INPUT_RE.match(line)):
                     break
-                out_body.append(line.strip())
+                out_body.append(_strip_markdown_noise(line.strip()))
                 k += 1
             out_val = "\n".join(out_body)
             next_i = k

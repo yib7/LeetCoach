@@ -481,6 +481,57 @@ def test_parse_samples_captures_output_on_following_line():
     assert samples[0].expected_stdout == "[[3],[9,20],[15,7]]"
 
 
+# --- A4: markdown emphasis around labels/values must not leak into I/O -----
+
+BOLD_LABEL_PROBLEM = """\
+Example 1:
+
+**Input:** nums = [2,7,11,15], target = 9
+**Output:** [0,1]
+"""
+
+
+def test_parse_samples_strips_bold_markdown_around_single_line_values():
+    samples = sandbox.parse_samples(BOLD_LABEL_PROBLEM)
+    assert len(samples) == 1, samples
+    assert samples[0].stdin.strip() == "nums = [2,7,11,15], target = 9"
+    assert samples[0].expected_stdout == "[0,1]"
+    assert "*" not in samples[0].stdin
+    assert "*" not in samples[0].expected_stdout
+
+
+BOLD_MULTILINE_PROBLEM = """\
+Example 1:
+
+**Input:**
+grid = [
+  [1, 0],
+  [0, 1]
+]
+**Output:**
+**[2,2]**
+
+Explanation: the diagonal sums to target.
+"""
+
+
+def test_parse_samples_strips_bold_markdown_around_multiline_body():
+    samples = sandbox.parse_samples(BOLD_MULTILINE_PROBLEM)
+    assert len(samples) == 1, samples
+    assert samples[0].expected_stdout == "[2,2]"
+    assert "*" not in samples[0].expected_stdout
+    assert "grid" in samples[0].stdin
+    assert "*" not in samples[0].stdin
+
+
+def test_parse_samples_strips_backtick_wrapped_values():
+    text = "Example 1:\nInput: `nums = [1,2], target = 3`\nOutput: `[0,1]`\n"
+    samples = sandbox.parse_samples(text)
+    assert len(samples) == 1, samples
+    assert samples[0].stdin.strip() == "nums = [1,2], target = 3"
+    assert samples[0].expected_stdout == "[0,1]"
+
+
 def test_parse_samples_drops_pair_when_both_sides_empty():
     """Bare ``Input:`` / ``Output:`` labels with no data anywhere must yield NO
     sample (caller falls back to 'not auto-verified') instead of a bogus
