@@ -77,6 +77,16 @@ class ClaudeUnavailableError(RuntimeError):
     """Raised when the `claude` binary cannot be found / run."""
 
 
+class ClaudeCancelledError(RuntimeError):
+    """Raised by a run's iterator after :meth:`ClaudeRun.cancel` killed it."""
+
+
+# A6: after the terminal `result` event the CLI normally exits at once; if it
+# (or a helper holding its stdout) lingers longer than this, it is killed
+# rather than awaited.
+RESULT_EXIT_GRACE = 3.0
+
+
 # --- isolation (A7) ------------------------------------------------------
 
 # Used when a caller passes no persona. Travels in argv (through the npm
@@ -398,6 +408,20 @@ def auth_status(
     return AuthStatus(installed=True, logged_in=logged_in)
 
 
+def failure_message(returncode: int, stderr: str, stream_detail: str = "") -> str:
+    """The user-facing message for a `claude` run that exited nonzero."""
+    detail = stderr or stream_detail
+    message = (
+        f"`{config.claude_bin()}` exited with code {returncode}. "
+        "You are most likely signed out of the `claude` CLI (an expired "
+        "login is the usual cause). Run  claude auth login  in a "
+        "terminal to sign in, then click Run again."
+    )
+    if detail:
+        message += f"\n{detail}"
+    return message
+
+
 def _error_from_stream(lines: Iterable[str]) -> str:
     """Extract a human-readable failure reason from `claude`'s stream-json stdout.
 
@@ -425,6 +449,21 @@ def _error_from_stream(lines: Iterable[str]) -> str:
 
 # --- subprocess runner (the only real-IO part) ---------------------------
 
+def _is_result_line(line: str) -> bool:
+    """True if ``line`` is the terminal stream-json ``result`` event (A6).
+
+    Cheap pre-filter first (most lines are text deltas), then a real parse so
+    answer text that merely *mentions* "result" never ends the read early.
+    """
+    if '"result"' not in line:
+        return False
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(obj, dict) and obj.get("type") == "result"
+
+
 def _real_runner(
     argv: list[str],
     stdin_text: str,
@@ -439,6 +478,13 @@ def _real_runner(
     incremental streaming. ``cwd`` is the neutral directory (A7); ``handle`` is
     the :class:`ClaudeRun` whose ``cancel()`` may kill this process from
     another thread.
+
+    Never-hang guarantees (A6/C5): the child and everything it spawns live in a
+    kill-on-close Job Object (Windows) or their own process group (POSIX), so
+    one kill reaches a grandchild whose parent already exited; reading stops at
+    the terminal ``result`` event (a straggler holding stdout cannot keep the
+    run open); and the wall-clock watchdog fires until *reading* is done, not
+    merely until the direct child exits.
     """
     # stderr goes to a temp file, not a PIPE: an unread stderr PIPE can fill its
     # ~64KB OS buffer and deadlock the child (it blocks writing stderr while we
@@ -467,29 +513,46 @@ def _real_runner(
     if resolved:
         argv = [resolved, *argv[1:]]
 
+    # A6: a kill-on-close job for the whole `claude` tree (None on POSIX or if
+    # the Job API is unavailable - the process group / taskkill still apply).
+    job = proc_util.create_kill_on_close_job()
+
     # If Popen fails (e.g. the binary vanished in the narrow window after
-    # is_available()), close the stderr temp file we opened above — the
-    # try/finally that normally closes it starts below this line.
+    # is_available()), release what we opened above — the try/finally that
+    # normally does it starts below this line.
     try:
         proc = subprocess.Popen(argv, **popen_kwargs)
     except BaseException:
         stderr_file.close()
+        proc_util.close_job(job)
         raise
+    # Assigned right after spawn, BEFORE the prompt is written: the CLI does
+    # its work (and spawns its helpers) only after reading stdin, so those
+    # helpers are born inside the job. (The npm cmd.exe shim starting node in
+    # that window is still covered by taskkill /T, which walks live parents.)
+    proc_util.assign_to_job(job, proc)
+
+    def _kill_tree() -> None:
+        _kill_claude_tree(proc, job)
+
     drained = False
-    stdin_ok = True      # False -> the child died before consuming stdin (P2-3)
+    saw_result = False    # stopped at the terminal `result` event (A6)
+    stopped_after_result = False  # ...and had to kill a lingering CLI
+    stdin_ok = True       # False -> the child died before consuming stdin (P2-3)
     disconnected = False  # True -> consumer close()d us (SSE client went away)
     stdin_thread: Optional[threading.Thread] = None  # daemon feeding stdin (P1-1)
     stdout_tail: deque[str] = deque(maxlen=12)  # last stdout lines, for error reporting
 
-    # Wall-clock watchdog (audit6 P2-2): a hung `claude` (network stall, stuck
-    # auth prompt, wedged node) would otherwise block the stdout read loop —
-    # and the Flask worker thread driving it — forever. After
-    # config.run_timeout() seconds the timer tree-kills the child; the read
-    # loop then sees EOF and the `timed_out` flag makes the exit logic below
-    # raise a "timed out" error instead of misreporting the kill as
-    # "exited with code N" or passing off partial output as a complete answer.
-    # The lock + `reading_done` handshake makes the race at the deadline
-    # deterministic: once stdout has drained to EOF naturally, a late-firing
+    # Wall-clock watchdog (audit6 P2-2, A6): a hung `claude` (network stall,
+    # stuck auth prompt, wedged node) - or a grandchild still holding the
+    # stdout pipe after `claude` itself exited - would otherwise block the read
+    # loop, and the Flask worker thread driving it, forever. After
+    # config.run_timeout() seconds the timer kills the whole tree (job /
+    # process group / taskkill + proc.kill()); the read loop then sees EOF and
+    # the `timed_out` flag makes the exit logic below raise a "timed out"
+    # error. Keyed on `reading_done` ONLY: the old `proc.poll()` bail-out is
+    # exactly what let a pipe-holding grandchild hang the run. The lock makes
+    # the deadline race deterministic: once reading is done, a late-firing
     # timer can no longer reclassify the run as a timeout (or kill anything).
     timeout_s = config.run_timeout()
     timed_out = False
@@ -499,15 +562,19 @@ def _real_runner(
     def _watchdog_fire() -> None:
         nonlocal timed_out
         with watchdog_lock:
-            if reading_done or proc.poll() is not None:
+            if reading_done:
                 return  # run already finished — natural completion wins
             timed_out = True
-            _kill_process_tree(proc)
+        _kill_tree()
         # No wait() here: the main path below always reaps the child.
 
     watchdog = threading.Timer(timeout_s, _watchdog_fire)
     watchdog.daemon = True  # never blocks interpreter shutdown
     watchdog.start()
+    if handle is not None:
+        # From here on ClaudeRun.cancel() (any thread) kills this tree; a
+        # cancel that raced ahead of the spawn fires immediately.
+        handle._attach_killer(_kill_tree)
     try:
         assert proc.stdin is not None and proc.stdout is not None
         # audit P1-1: feed stdin on its own daemon thread so the main thread can
@@ -527,47 +594,60 @@ def _real_runner(
             nonlocal stdin_ok
             try:
                 proc.stdin.write(stdin_text)
-            except OSError:
+            except (OSError, ValueError):
                 stdin_ok = False
             finally:
                 try:
                     proc.stdin.close()
-                except OSError:
+                except (OSError, ValueError):
                     pass
 
         stdin_thread = threading.Thread(target=_feed_stdin, daemon=True)
         stdin_thread.start()
         for line in proc.stdout:
             stdout_tail.append(line)
+            is_result = _is_result_line(line)
             yield line
+            if is_result:
+                # A6: the answer is complete. Stop reading - a straggler that
+                # still holds stdout (a helper grandchild, or the CLI lingering
+                # on shutdown) must not keep the run open.
+                saw_result = True
+                break
         with watchdog_lock:
             reading_done = True
             # A watchdog-killed stream also ends in EOF; only a drain the
-            # watchdog did NOT cause counts as the child finishing naturally.
-            drained = not timed_out
+            # watchdog (or a cancel) did NOT cause counts as finishing
+            # naturally.
+            drained = not timed_out and not (handle is not None and handle.cancelled)
     except GeneratorExit:
-        # Consumer disconnect: never convert this into a timeout error below
-        # (raising from the finally would swallow the GeneratorExit).
+        # Consumer disconnect: never convert this into an error below (raising
+        # from the finally would swallow the GeneratorExit).
         disconnected = True
         raise
     finally:
         # Always disarm the watchdog — normal completion, timeout, disconnect,
         # or error — so no timer thread outlives the run. cancel() is a no-op
-        # for a timer that already fired; the reading_done/poll guards make an
+        # for a timer that already fired; the reading_done guard makes an
         # in-flight firing harmless.
+        with watchdog_lock:
+            reading_done = True
         watchdog.cancel()
-        # If we did NOT drain stdout to EOF, the generator is being closed early
-        # — the SSE client disconnected (Flask throws GeneratorExit into us at
-        # the next yield) or an exception unwound the consumer. The `claude`
-        # subprocess would otherwise keep running to completion and keep burning
-        # subscription usage, so terminate it. Without this, proc.wait() below
-        # would also block until the abandoned child finishes.
-        if not drained and proc.poll() is None:
-            _kill_process_tree(proc)
+        if saw_result and proc.poll() is None:
+            # The CLI normally exits right after its result; give it a short
+            # grace, then stop it rather than wait on it.
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=RESULT_EXIT_GRACE)
             except subprocess.TimeoutExpired:
-                proc.kill()  # last resort if terminate/taskkill was ignored
+                stopped_after_result = True
+                _kill_tree()
+        # If we did NOT drain stdout, the generator is being closed early — the
+        # SSE client disconnected (Flask throws GeneratorExit into us at the
+        # next yield) or an exception unwound the consumer. The `claude`
+        # subprocess would otherwise keep running to completion and keep
+        # burning subscription usage, so kill its tree.
+        if not drained and not saw_result and proc.poll() is None:
+            _kill_tree()
         # Reap the stdin feeder before reading `stdin_ok`/returncode below. Once
         # the child has exited (drained to EOF, killed, or crashed) the write
         # unblocks — broken-pipe on a dead child, or completed on a clean run —
@@ -575,50 +655,76 @@ def _real_runner(
         # before the thread was even started.
         if stdin_thread is not None:
             stdin_thread.join(timeout=5)
-        if proc.stdout is not None:
-            proc.stdout.close()
-        returncode = proc.wait()
         try:
-            # Timeout beats every other report: the watchdog's kill is what
-            # made the child exit nonzero, so "exited with code N" would be
-            # bogus, and the EOF it forced must not be passed off as a
-            # complete answer. (Skipped on disconnect — raising here would
-            # swallow the in-flight GeneratorExit, and nobody is listening.)
-            if timed_out and not disconnected:
-                stderr_file.seek(0)
-                stderr = stderr_file.read().decode("utf-8", "replace")
-                message = (
-                    f"`{config.claude_bin()}` timed out after {timeout_s:g} seconds and "
-                    "was terminated; its output is incomplete. Raise LEETCOACH_RUN_TIMEOUT "
-                    "if the run was legitimately slow."
+            proc.stdout.close()
+        except (OSError, AttributeError):
+            pass
+        try:
+            returncode = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _kill_tree()
+            returncode = proc.wait()
+        if handle is not None:
+            handle._attach_killer(None)
+        # Closing the kill-on-close job reaps any straggler still inside it
+        # (e.g. a grandchild that outlived a run we stopped at `result`).
+        proc_util.close_job(job)
+        cancelled = handle is not None and handle.cancelled
+        try:
+            # Nobody is listening after a disconnect, and raising here would
+            # swallow the in-flight GeneratorExit (C4: that includes the broken
+            # stdin pipe our own kill causes mid-write).
+            if not disconnected:
+                _raise_for_outcome(
+                    cancelled=cancelled and not saw_result,
+                    timed_out=timed_out,
+                    timeout_s=timeout_s,
+                    # A nonzero exit is reported on a normal, fully-drained run
+                    # - or when the stdin write broke because the child died at
+                    # startup (audit6 P2-3). A CLI we stopped ourselves after
+                    # its `result` exits nonzero by design.
+                    failed=(
+                        (drained or not stdin_ok)
+                        and not stopped_after_result
+                        and returncode != 0
+                    ),
+                    returncode=returncode,
+                    stderr_file=stderr_file,
+                    stdout_tail=stdout_tail,
                 )
-                if stderr.strip():
-                    message += f"\n{stderr.strip()}"
-                raise ClaudeUnavailableError(message)
-            # Surface a nonzero-exit error on a normal, fully-drained run — or
-            # when the stdin write broke because the child died at startup
-            # (audit6 P2-3): its stderr holds the real diagnostics. A process
-            # we terminated on client disconnect exits nonzero by design;
-            # that's a cancellation, not a Claude failure to report.
-            if (drained or not stdin_ok) and returncode != 0:
-                stderr_file.seek(0)
-                stderr = stderr_file.read().decode("utf-8", "replace").strip()
-                # `claude` puts auth / API errors on stdout (stream-json), not
-                # stderr, so when stderr is empty read the real reason back from
-                # the drained stdout tail — the user sees "OAuth session expired"
-                # rather than a bare exit code.
-                detail = stderr or _error_from_stream(stdout_tail)
-                message = (
-                    f"`{config.claude_bin()}` exited with code {returncode}. "
-                    "You are most likely signed out of the `claude` CLI (an expired "
-                    "login is the usual cause). Run  claude auth login  in a "
-                    "terminal to sign in, then click Run again."
-                )
-                if detail:
-                    message += f"\n{detail}"
-                raise ClaudeUnavailableError(message)
         finally:
             stderr_file.close()
+
+
+def _raise_for_outcome(
+    *, cancelled, timed_out, timeout_s, failed, returncode, stderr_file, stdout_tail
+) -> None:
+    """Turn how a run ended into the right exception (or none).
+
+    Order matters: a cancel is reported as such; then a timeout beats every
+    other report (the watchdog's kill is what made the child exit nonzero, so
+    "exited with code N" would be bogus, and the EOF it forced must not be
+    passed off as a complete answer); then a real nonzero exit.
+    """
+    if cancelled:
+        raise ClaudeCancelledError("The `claude` run was cancelled.")
+    if timed_out:
+        stderr_file.seek(0)
+        stderr = stderr_file.read().decode("utf-8", "replace")
+        message = (
+            f"`{config.claude_bin()}` timed out after {timeout_s:g} seconds and "
+            "was terminated; its output is incomplete. Raise LEETCOACH_RUN_TIMEOUT "
+            "if the run was legitimately slow."
+        )
+        if stderr.strip():
+            message += f"\n{stderr.strip()}"
+        raise ClaudeUnavailableError(message)
+    if failed:
+        stderr_file.seek(0)
+        stderr = stderr_file.read().decode("utf-8", "replace").strip()
+        raise ClaudeUnavailableError(
+            failure_message(returncode, stderr, _error_from_stream(stdout_tail))
+        )
 
 
 # --- stream-json parsing -------------------------------------------------
