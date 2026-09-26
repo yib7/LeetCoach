@@ -108,6 +108,57 @@ def test_real_auth_markers_still_trigger_the_sign_in_hint(detail):
     assert claude_cli._hint_for(detail) == claude_cli._SIGN_IN_HINT
 
 
+@pytest.mark.parametrize("detail", [
+    # trailing punctuation after the status code (not a stack-trace column)
+    "Request failed with status code 401.",
+    "API Error: 401: Unauthorized",
+])
+def test_auth_status_code_followed_by_punctuation_still_triggers_the_hint(detail):
+    # SP2 M6 review: the old lookaround `(?![\w:.])` rejected a bare trailing
+    # "." or ":" after the code, so real CLI wordings like "...401." or
+    # "401: Unauthorized" lost the hint. A stack-trace column (":401:12" -
+    # colon/period followed by ANOTHER digit) must still be excluded.
+    assert claude_cli._hint_for(detail) == claude_cli._SIGN_IN_HINT
+
+
+@pytest.mark.parametrize("detail", [
+    "HTTP 429: Too Many Requests",
+    "Error 429.",
+])
+def test_limit_status_code_followed_by_punctuation_still_triggers_the_hint(detail):
+    assert claude_cli._hint_for(detail) == claude_cli._LIMIT_HINT
+
+
+@pytest.mark.parametrize("detail", [
+    "TypeError: x is undefined\n    at run (file:///C:/npm/claude/cli.js:401:12)",
+    "at Object.<anonymous> (cli.js:12:429)",
+])
+def test_status_code_stack_trace_column_with_trailing_digit_still_excluded(detail):
+    # Regression guard for the punctuation fix above: a stack-trace column
+    # (code immediately followed by ":<digits>") must still not match.
+    assert claude_cli._hint_for(detail) not in (claude_cli._SIGN_IN_HINT, claude_cli._LIMIT_HINT)
+
+
+@pytest.mark.parametrize("detail", [
+    "context window limit reached",
+    "max output token limit reached",
+])
+def test_generic_limit_reached_without_a_known_wording_is_not_a_usage_limit(detail):
+    # SP2 M6 review: bare "limit reached" was too broad and mislabeled other
+    # kinds of limits (context window, max output tokens) as a usage limit.
+    assert claude_cli._hint_for(detail) != claude_cli._LIMIT_HINT
+
+
+@pytest.mark.parametrize("detail", [
+    "usage limit reached",
+    "5-hour limit reached",
+    "3 hour limit reached",
+    "You've hit your limit for today",
+])
+def test_known_limit_reached_wordings_still_trigger_the_limit_hint(detail):
+    assert claude_cli._hint_for(detail) == claude_cli._LIMIT_HINT
+
+
 def test_real_runner_nonzero_exit_headline_is_the_stderr_text():
     script = (
         "import sys\n"

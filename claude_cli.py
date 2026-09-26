@@ -120,7 +120,15 @@ _flag_lock = threading.Lock()
 # SP2 M4: only a flag in the OPTION COLUMN counts (an indented line starting
 # with the option, optionally after a short alias such as "-p, "); one merely
 # mentioned in another option's description is not a supported flag.
-_HELP_FLAG_RE = re.compile(r"^\s+(?:-\w,\s*)?(--[a-z][\w-]*)", re.MULTILINE)
+#
+# SP2 M6 review: the indent was unbounded (`^\s+`), so a WRAPPED description
+# continuation line that happens to start with something flag-shaped (e.g. a
+# long description wrapping onto its own line as "--config sets ...") was
+# mistaken for a real option-column entry. Real option lines sit at a shallow,
+# fixed indent (2 spaces in `claude --help`); continuation lines are indented
+# much further right (aligned under the description column), so capping the
+# indent at 8 keeps genuine options while excluding those continuations.
+_HELP_FLAG_RE = re.compile(r"^ {1,8}(?:-\w,\s*)?(--[a-z][\w-]*)", re.MULTILINE)
 
 
 def parse_help_flags(text: str) -> frozenset:
@@ -486,12 +494,19 @@ def cached_auth_status() -> AuthStatus:
             if now - probed_at >= ttl and inflight is None:
                 done = threading.Event()
                 _auth_inflight[key] = done
-                threading.Thread(
-                    target=_probe_and_store,
-                    args=(key, done),
-                    name="leetcoach-auth-refresh",
-                    daemon=True,
-                ).start()
+                try:
+                    threading.Thread(
+                        target=_probe_and_store,
+                        args=(key, done),
+                        name="leetcoach-auth-refresh",
+                        daemon=True,
+                    ).start()
+                except Exception:  # noqa: BLE001 - this probe must never raise
+                    # Nothing will ever call _probe_and_store to clear this
+                    # marker or set `done`, so drop it now: a later call can
+                    # retry the refresh instead of being wedged forever
+                    # believing one is already in flight.
+                    del _auth_inflight[key]
             return status  # fresh, or stale-while-revalidate
         owner = inflight is None
         if owner:
@@ -517,15 +532,29 @@ def cached_auth_status() -> AuthStatus:
 # whole words (not the tail of "catalog in" / "design in"). The limit marker
 # also knows the CLI's current wordings ("You've hit your limit",
 # "5-hour limit reached").
+#
+# SP2 M6 review: the lookaheads used to be ``(?![\w:.])`` - reject the code if
+# ANYTHING in ``\w:.`` follows. That rejected legitimate trailing punctuation
+# too: "status code 401." or "429: Too Many Requests" lost the hint solely
+# because the code was followed by "." or ":". The fix only excludes a
+# following word character (glues the code to more digits/letters, as in
+# "4012") or a "." / ":" immediately followed by ANOTHER digit - exactly the
+# stack-trace column shape (":401:12") - while trailing punctuation with
+# nothing digit-like after it still counts as a standalone code.
 _AUTH_MARKER_RE = re.compile(
-    r"authenticat|oauth|unauthori[sz]ed|(?<![\w:.])401(?![\w:.])|invalid api key|"
+    r"authenticat|oauth|unauthori[sz]ed|(?<![\w:.])401(?!\w|[:.]\d)|invalid api key|"
     r"api key|not (?:logged|signed) in|\blog[ -]?in\b|\bsign[ -]?in\b|/login|"
     r"credential|token (?:has )?expired|session expired",
     re.IGNORECASE,
 )
+# SP2 M6 review: a bare "limit reached" was too broad - "context window limit
+# reached" and "max output token limit reached" are NOT usage-limit errors,
+# but used to get the usage-limit hint anyway. Only the CLI's actual
+# usage-limit wordings count now: "usage limit", "N-hour limit (reached)",
+# "hit your ... limit", and the daily/weekly/monthly variants.
 _LIMIT_MARKER_RE = re.compile(
-    r"usage limit|rate limit|quota|(?<![\w:.])429(?![\w:.])|"
-    r"hit your (?:\w+ )?limit|limit reached|\b\d+[- ]hour limit|"
+    r"usage limit|rate limit|quota|(?<![\w:.])429(?!\w|[:.]\d)|"
+    r"hit your (?:\w+ )?limit|\b\d+[- ]hour limit|"
     r"\b(?:daily|weekly|monthly) limit",
     re.IGNORECASE,
 )
