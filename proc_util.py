@@ -50,10 +50,11 @@ def kill_process_tree(proc: "subprocess.Popen[str]", *, group: bool = False) -> 
                 ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
                 check=False,
+                timeout=10,
             )
             return True
-        except OSError:
-            pass  # taskkill missing/unusable — fall through to terminate()
+        except (OSError, subprocess.TimeoutExpired):
+            pass  # taskkill missing/unusable/hung — fall through to terminate()
     elif group and hasattr(os, "killpg"):
         try:
             os.killpg(proc.pid, signal.SIGKILL)
