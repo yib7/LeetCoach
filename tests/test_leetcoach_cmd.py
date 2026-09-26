@@ -35,12 +35,16 @@ _NOOP_PS1 = "exit 0\n"
 # A fake setup.ps1: prints a marker line, and writes .venv\.setup-ok only when
 # SETUP_SHOULD_FAIL isn't set (mirrors the real script's B9 contract enough
 # for LeetCoach.cmd's own re-run/pause logic to be tested against it).
+# SETUP_EXIT_CODE (default 1 on failure) lets tests exercise a NEGATIVE
+# NTSTATUS-style exit code too (#9's "if not %errorlevel%==0" fix).
 _FAKE_SETUP_PS1 = r"""
 Write-Host "FAKE SETUP RAN"
 New-Item -ItemType Directory -Force -Path ".venv" | Out-Null
 if ($env:SETUP_SHOULD_FAIL -eq "1") {
     Write-Host "fake setup failing on purpose"
-    exit 1
+    $code = $env:SETUP_EXIT_CODE
+    if ([string]::IsNullOrWhiteSpace($code)) { $code = 1 }
+    exit [int]$code
 }
 Set-Content -Path ".venv\.setup-ok" -Value "ok"
 exit 0
@@ -94,11 +98,38 @@ def test_marker_present_skips_setup(tmp_path):
     assert "FAKE SETUP RAN" not in result.stdout
 
 
-def test_setup_failure_pauses_and_stops_before_launching_the_app(tmp_path):
+def test_setup_failure_pauses_and_stops_before_launching_the_app(tmp_path, fake_python_exe):
+    """B9/#12: a failed setup must (a) actually pause (so the message is seen
+    even from the minimized desktop-shortcut console) and (b) never proceed
+    to launch app.py against a broken/partial venv. A fake python.exe IS
+    staged here (unlike the old version of this test) so a regression that
+    wrongly launches the app anyway would be caught by "FAKE APP RAN"
+    appearing in the output, instead of failing some other, less direct way."""
     stage = _stage(tmp_path, marker_present=False)
-    result = _run(stage, extra_env={"SETUP_SHOULD_FAIL": "1"})
+    scripts_dir = stage / ".venv" / "Scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(fake_python_exe, scripts_dir / "python.exe")
+    (stage / "app.py").write_text("# unused by the fake python.exe\n", encoding="utf-8")
+
+    result = _run(stage, extra_env={"SETUP_SHOULD_FAIL": "1", "FAKE_APP_EXIT_CODE": "0"})
     assert "Setup failed" in result.stdout
+    assert "press any key" in result.stdout.lower()  # it actually paused
+    assert "FAKE APP RAN" not in result.stdout  # never launched the app
     # the marker must NOT exist (fake setup.ps1 only writes it on success)
+    assert not (stage / ".venv" / ".setup-ok").exists()
+
+
+def test_setup_failure_with_negative_exit_code_still_pauses(tmp_path):
+    """#9 regression: a crash that exits with a NEGATIVE NTSTATUS-style code
+    (e.g. 0xC0000005 shows up in cmd.exe as -1073741819) is NOT ">= 1", so
+    the old `if errorlevel 1` check silently treated it as success."""
+    stage = _stage(tmp_path, marker_present=False)
+    result = _run(
+        stage,
+        extra_env={"SETUP_SHOULD_FAIL": "1", "SETUP_EXIT_CODE": "-1073741819"},
+    )
+    assert "Setup failed" in result.stdout
+    assert "press any key" in result.stdout.lower()
     assert not (stage / ".venv" / ".setup-ok").exists()
 
 
@@ -142,7 +173,7 @@ def fake_python_exe(tmp_path_factory):
     return out
 
 
-def _stage_with_app(tmp_path, fake_python_exe, *, app_exit_code=0):
+def _stage_with_app(tmp_path, fake_python_exe):
     stage = _stage(tmp_path, marker_present=True)
     scripts_dir = stage / ".venv" / "Scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -152,14 +183,24 @@ def _stage_with_app(tmp_path, fake_python_exe, *, app_exit_code=0):
 
 
 def test_app_success_does_not_pause(tmp_path, fake_python_exe):
-    stage = _stage_with_app(tmp_path, fake_python_exe, app_exit_code=0)
+    stage = _stage_with_app(tmp_path, fake_python_exe)
     result = _run(stage, extra_env={"FAKE_APP_EXIT_CODE": "0"})
     assert "FAKE APP RAN" in result.stdout
     assert "exited with an error" not in result.stdout
 
 
 def test_app_nonzero_exit_pauses_with_a_message(tmp_path, fake_python_exe):
-    stage = _stage_with_app(tmp_path, fake_python_exe, app_exit_code=1)
+    stage = _stage_with_app(tmp_path, fake_python_exe)
     result = _run(stage, extra_env={"FAKE_APP_EXIT_CODE": "1"})
+    assert "FAKE APP RAN" in result.stdout
+    assert "exited with an error" in result.stdout
+
+
+def test_app_negative_exit_code_still_pauses_with_a_message(tmp_path, fake_python_exe):
+    """#9 regression: a negative NTSTATUS-style app.py exit code (e.g. an
+    access violation, 0xC0000005 -> -1073741819) must still trigger the pause
+    -- the old `if errorlevel 1` check silently missed it."""
+    stage = _stage_with_app(tmp_path, fake_python_exe)
+    result = _run(stage, extra_env={"FAKE_APP_EXIT_CODE": "-1073741819"})
     assert "FAKE APP RAN" in result.stdout
     assert "exited with an error" in result.stdout
