@@ -132,6 +132,31 @@ def test_multi_block_guided_prefers_last_block_with_main_guard():
     assert "teaching snippet" not in code
 
 
+def test_multi_block_main_guard_outranks_a_later_def_block():
+    # #3 regression: the OLD code lumped __main__/class Solution/def into one
+    # "has some marker" test and just took the LAST such block — so a
+    # `__main__` solution followed by a "Common mistakes" section (itself
+    # fenced with a `def`) wrongly returned the mistakes snippet, since it
+    # came later. `__main__` must outrank a bare `def` regardless of order.
+    md = (
+        "```python\n"
+        "def two_sum(nums, target):\n"
+        "    return [0, 1]\n\n"
+        "if __name__ == \"__main__\":\n"
+        "    print(two_sum([2, 7], 9))\n"
+        "```\n\n"
+        "Common mistakes:\n"
+        "```python\n"
+        "def two_sum_buggy(nums, target):\n"
+        "    return []  # forgets to actually search\n"
+        "```\n"
+    )
+    code = parsing.extract_code(md, "python")
+    assert "__main__" in code
+    assert "def two_sum(" in code
+    assert "buggy" not in code
+
+
 def test_multi_block_no_marker_prefers_last_tagged_block():
     # No "solution" tag and no marker in either block: still prefer the LAST
     # language-tagged block (Guided puts the real answer last).
