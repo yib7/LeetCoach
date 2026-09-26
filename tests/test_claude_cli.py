@@ -647,3 +647,17 @@ def test_nonzero_exit_surfaces_stdout_error_when_stderr_empty():
         assert "sign in" in str(exc)                 # actionable re-login guidance
     else:
         raise AssertionError("expected ClaudeUnavailableError on nonzero exit")
+
+
+# --- SP2 M6: the suite fails closed ------------------------------------------
+
+def test_suite_default_binary_is_unresolvable_so_default_spawns_fail_closed():
+    import shutil
+
+    import pytest
+
+    assert shutil.which(config.claude_bin()) is None
+    # The real-runner path (no runner=) refuses before spawning anything.
+    with pytest.raises(claude_cli.ClaudeUnavailableError, match="not found on PATH"):
+        list(claude_cli.run("x"))
+    assert claude_cli.auth_status() == claude_cli.AuthStatus(installed=False, logged_in=False)
