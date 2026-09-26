@@ -20,8 +20,12 @@ index written before B22 has only that bucket, and its entries are honoured for
 every language (read as-is, never rewritten or dropped). New Learning / Guided
 runs record into their language's bucket, because a topic learned in Python
 (``heapq``) is not "already learned" in C++ (``priority_queue``). Every topic
-is sanitized on write and on read (B21) - an index entry is replayed into
-later prompts, so a legacy 4 KB "topic" must not survive the trip.
+is sanitized on read (B21) - an index entry is replayed into later prompts, so
+a legacy 4 KB "topic" must not survive the trip - and every NEW topic on write.
+SP2 M5: ``record`` never rewrites what is already on disk: legacy entries stay
+byte-for-byte as they were (only the touched lists get new topics appended),
+and if the file is unreadable or a section it must replace is malformed, the
+original is first copied once to ``<name>.pre-v1.5.bak``.
 
 Robustness is the whole point: a missing or corrupt file must NEVER crash a
 run — it just starts from an empty index. ``record`` merges new topics in (no
@@ -33,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 from pathlib import Path
 
@@ -100,18 +105,29 @@ def load(path=None) -> dict:
     returns a dict with ``by_type`` (dict), ``all`` (list) and ``by_language``
     (dict of language -> bucket) present, well-typed and sanitized.
     """
-    p = _path(path)
+    data, _existed = _read_raw(_path(path))
+    return _clean_index(data)
+
+
+def _read_raw(p: Path):
+    """``(parsed top-level dict or None, file_existed)``. Never raises."""
     try:
         raw = p.read_text(encoding="utf-8")
-    except (FileNotFoundError, OSError):
-        return _empty()
+    except FileNotFoundError:
+        return None, False
+    except OSError:
+        return None, True
     try:
         data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return _empty()
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return None, True
+    return (data if isinstance(data, dict) else None), True
+
+
+def _clean_index(data) -> dict:
+    """The sanitized, well-typed view of a raw index dict (``None`` -> empty)."""
     if not isinstance(data, dict):
         return _empty()
-
     out = {**_clean_bucket(data), "by_language": {}}
     by_language = data.get("by_language")
     if isinstance(by_language, dict):
@@ -133,13 +149,44 @@ def save(data: dict, path=None) -> str:
         "all": data.get("all", []),
         "by_language": data.get("by_language", {}),
     }
+    _write_json(p, normalized)
+    return str(p)
+
+
+def _write_json(p: Path, obj) -> None:
     # Atomic write: dump to a sibling temp file, then os.replace() onto the
     # target. os.replace is atomic on both Windows and POSIX, so a reader never
     # sees a half-written file and a crash mid-write can't corrupt the index.
+    p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
     os.replace(tmp, p)
-    return str(p)
+
+
+BACKUP_SUFFIX = ".pre-v1.5.bak"
+
+
+def _backup_once(p: Path) -> None:
+    """Copy the index to ``<name>.pre-v1.5.bak`` unless a backup already
+    exists (SP2 M5). Best-effort: never raises."""
+    backup = p.with_name(p.name + BACKUP_SUFFIX)
+    try:
+        if p.exists() and not backup.exists():
+            shutil.copy2(p, backup)
+    except OSError:
+        pass
+
+
+def _append_new(raw_list: list, incoming: list) -> list:
+    """``raw_list`` untouched, plus each ``incoming`` topic whose sanitized
+    form it does not already hold (legacy "Hash Map" == new "hash map")."""
+    seen = {patterns.sanitize_topic(v) for v in raw_list}
+    out = list(raw_list)
+    for topic in incoming:
+        if topic not in seen:
+            seen.add(topic)
+            out.append(topic)
+    return out
 
 
 def known_topics(path=None, *, limit=None, language=None) -> list:
@@ -187,21 +234,55 @@ def record(problem_type: str, topics, path=None, *, language=None) -> dict:
 
     # Hold the lock across the whole load->merge->save so a concurrent record()
     # can't read a stale index between our load and save and clobber our write.
+    #
+    # SP2 M5: the merge works on the RAW file content, not the sanitized
+    # load() view, so legacy entries are never lossily rewritten; only the two
+    # touched lists get the new topics appended. Anything that has to be
+    # replaced (unreadable file, a malformed section) is backed up first.
     with _RECORD_LOCK:
-        data = load(path)
+        p = _path(path)
+        raw, existed = _read_raw(p)
+        lossy = existed and raw is None
+        if raw is None:
+            raw = {}
+        raw.setdefault("by_type", {})
+        raw.setdefault("all", [])
         if key is None:
-            bucket = data
+            bucket = raw
         else:
-            bucket = data["by_language"].setdefault(key, _empty_bucket())
-        bucket["by_type"][ptype] = _dedupe(list(bucket["by_type"].get(ptype, [])) + incoming)
-        bucket["all"] = _dedupe(list(bucket["all"]) + incoming)
+            langs = raw.get("by_language")
+            if not isinstance(langs, dict):
+                lossy = lossy or "by_language" in raw
+                langs = raw["by_language"] = {}
+            lang_key = key if key in langs else next(
+                (k for k in langs if _language_key(k) == key), key)
+            bucket = langs.get(lang_key)
+            if not isinstance(bucket, dict):
+                lossy = lossy or lang_key in langs
+                bucket = langs[lang_key] = {}
+        by_type = bucket.get("by_type")
+        if not isinstance(by_type, dict):
+            lossy = lossy or "by_type" in bucket
+            by_type = bucket["by_type"] = {}
+        current = by_type.get(ptype)
+        if not isinstance(current, list):
+            lossy = lossy or ptype in by_type
+            current = []
+        by_type[ptype] = _append_new(current, incoming)
+        flat = bucket.get("all")
+        if not isinstance(flat, list):
+            lossy = lossy or "all" in bucket
+            flat = []
+        bucket["all"] = _append_new(flat, incoming)
 
+        if lossy:
+            _backup_once(p)
         try:
-            save(data, path)
+            _write_json(p, raw)
         except OSError:
             # Persisting is best-effort; the caller still gets the merged view.
             pass
-        return data
+        return _clean_index(raw)
 
 
 def _dedupe(items) -> list:
