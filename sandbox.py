@@ -39,6 +39,8 @@ Statuses (see :class:`VerifyResult`):
 """
 from __future__ import annotations
 
+import ast
+import math
 import os
 import re
 import shutil
@@ -220,6 +222,122 @@ def _normalize(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+# --- A3: tolerant structural output comparison ----------------------------
+#
+# The old comparison was ``_normalize(got) == _normalize(want)`` — whitespace
+# trimming only, so `[0, 1]` vs `[0,1]`, `True` vs `true`, and `'x'` vs `"x"`
+# all FAILED a correct solution (a real recorded Two Sum answer was graded
+# FAIL 0/3 for exactly this reason). :func:`_outputs_match` adds a tolerant
+# second tier that parses both sides as a structured value (Python-literal or
+# JSON-ish) and compares that structure, with a float tolerance. It stays
+# conservative by design: order-insensitivity is applied ONLY when the
+# problem text explicitly says "any order" AND the two sides are the same
+# multiset — a genuinely wrong (misordered when order matters, or a different
+# value entirely) answer must never become a PASS.
+
+_JSON_KEYWORD_RE = re.compile(r"\btrue\b|\bfalse\b|\bnull\b")
+_JSON_KEYWORD_MAP = {"true": "True", "false": "False", "null": "None"}
+
+
+def _try_parse_structured(text: str):
+    """Best-effort parse of ``text`` as a Python-literal/JSON-ish value (list,
+    tuple, dict, number, bool, ``None``, or string). Returns ``(True, value)``
+    on success, ``(False, None)`` if nothing sensible could be parsed. Never
+    raises."""
+    s = (text or "").strip()
+    if not s:
+        return False, None
+
+    candidates = [s]
+    # JSON spells booleans/null lowercase; Python's ast needs the capitalized
+    # spelling, so also try a translated candidate (`true` -> `True`, etc.).
+    translated = _JSON_KEYWORD_RE.sub(lambda m: _JSON_KEYWORD_MAP[m.group(0)], s)
+    if translated != s:
+        candidates.append(translated)
+
+    for candidate in candidates:
+        try:
+            return True, ast.literal_eval(candidate)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            continue
+
+    # Last resort: a bare, unquoted word/phrase with no literal syntax at all
+    # is treated as the string it visually is, so an unquoted `hello` matches
+    # a quoted `"hello"`. This can never produce a false PASS beyond what the
+    # tier-1 exact match already would: with no other structure to compare,
+    # it degrades to plain string equality of the trimmed text.
+    try:
+        return True, ast.literal_eval(repr(s))
+    except (ValueError, SyntaxError, TypeError):
+        return False, None
+
+
+def _values_equal(a, b, *, rel_tol: float = 1e-5, abs_tol: float = 1e-9) -> bool:
+    """Structural equality with a float tolerance. ``bool`` is checked before
+    the numeric branch (``bool`` is a subclass of ``int`` in Python) so
+    ``True`` never equals ``1``."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return math.isclose(float(a), float(b), rel_tol=rel_tol, abs_tol=abs_tol)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            return False
+        return all(_values_equal(x, y, rel_tol=rel_tol, abs_tol=abs_tol) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        if set(a.keys()) != set(b.keys()):
+            return False
+        return all(_values_equal(a[k], b[k], rel_tol=rel_tol, abs_tol=abs_tol) for k in a)
+    return a == b
+
+
+def _any_order_allowed(problem_text: str) -> bool:
+    """True only when the problem statement explicitly says the order of a
+    returned collection doesn't matter — the sole trigger for order-
+    insensitive comparison (A3 is deliberately conservative here)."""
+    return "any order" in (problem_text or "").lower()
+
+
+def _multiset_equal(a, b) -> bool:
+    """True iff sequences ``a``/``b`` hold the same elements irrespective of
+    order (each element matched at most once, via :func:`_values_equal`)."""
+    if not isinstance(a, (list, tuple)) or not isinstance(b, (list, tuple)):
+        return False
+    if len(a) != len(b):
+        return False
+    remaining = list(b)
+    for item in a:
+        for i, candidate in enumerate(remaining):
+            if _values_equal(item, candidate):
+                remaining.pop(i)
+                break
+        else:
+            return False
+    return True
+
+
+def _outputs_match(got: str, want: str, problem_text: str = "") -> bool:
+    """The verifier's comparison: exact-normalized first, then a tolerant
+    structural comparison, then (only if the problem allows it) order-
+    insensitive. Never raises."""
+    # Tier 1: exact, whitespace-normalized match — the fast, zero-risk path.
+    if _normalize(got) == _normalize(want):
+        return True
+
+    # Tier 2: tolerant structural comparison (JSON/Python-literal aware).
+    ok_got, val_got = _try_parse_structured(got)
+    ok_want, val_want = _try_parse_structured(want)
+    if not (ok_got and ok_want):
+        return False  # couldn't parse structurally on at least one side
+    if _values_equal(val_got, val_want):
+        return True
+
+    # Tier 3: order-insensitive, ONLY when the problem says so AND the two
+    # sides are the same multiset — never turns a genuinely wrong answer (a
+    # different value, or a misordered one when order matters) into a pass.
+    return _any_order_allowed(problem_text) and _multiset_equal(val_got, val_want)
+
+
 # --- run one Python snippet against fixed I/O ----------------------------
 
 def verify_python(
@@ -227,13 +345,17 @@ def verify_python(
     stdin_text: str,
     expected_stdout: str,
     *,
-    timeout: int = 10,
+    timeout: float = 10.0,
+    problem_text: str = "",
 ) -> VerifyResult:
     """Run ``code`` under ``sys.executable``, feeding ``stdin_text`` on stdin,
-    and compare captured stdout to ``expected_stdout`` (whitespace-normalized).
+    and compare captured stdout to ``expected_stdout`` via :func:`_outputs_match`
+    (exact-normalized, then tolerant structural, then — only when ``problem_text``
+    says "any order" — order-insensitive; see A3).
 
     Returns a :class:`VerifyResult` with status ``pass`` / ``fail`` / ``error``.
-    Never raises.
+    Never raises. ``timeout`` is a float end-to-end (B5): a sub-second budget
+    like ``0.5`` is honoured rather than truncated to ``0``.
 
     Containment (the code is untrusted): on timeout the whole process TREE is
     killed (grandchildren included), and each output stream is capped at
@@ -368,9 +490,7 @@ def verify_python(
                 }],
             )
 
-        got = _normalize(stdout)
-        want = _normalize(expected_stdout)
-        ok = got == want
+        ok = _outputs_match(stdout, expected_stdout, problem_text)
         return VerifyResult(
             status="pass" if ok else "fail",
             note="output matched" if ok else "output differed",
@@ -549,7 +669,9 @@ def verify_answer(code: str, problem_text: str, language: str) -> VerifyResult:
                 return VerifyResult(
                     status="not_verified", note="no sample I/O found in problem"
                 )
-            return _verify_python_samples(code, samples, timeout=config.verify_timeout())
+            return _verify_python_samples(
+                code, samples, timeout=config.verify_timeout(), problem_text=problem_text
+            )
 
         if lang in _COMPILERS:
             compiler, label = _COMPILERS[lang]
@@ -578,7 +700,7 @@ def verify_answer(code: str, problem_text: str, language: str) -> VerifyResult:
 
 
 def _verify_python_samples(
-    code: str, samples: list, *, timeout: float = 10.0
+    code: str, samples: list, *, timeout: float = 10.0, problem_text: str = ""
 ) -> VerifyResult:
     """Run ``code`` against each parsed sample and aggregate the verdict.
 
@@ -586,15 +708,31 @@ def _verify_python_samples(
     non-pass sample crashed), ``fail`` (at least one wrong-answer). A mixed run
     that both fails and errors reports ``fail`` but the note names the errored
     count too (``"X/Y passed, Z errored"``), so a crash is never silently folded
-    into a plain wrong-answer verdict.
+    into a plain wrong-answer verdict. ``timeout`` is passed straight through as
+    a float (B5) — no truncating ``int()`` cast, so a sub-second budget like
+    ``0.5`` is honoured instead of becoming ``0``.
     """
     total = len(samples)
     passed = 0
     errored = 0
     detail: list = []
     for idx, s in enumerate(samples, start=1):
-        r = verify_python(code, s.stdin, s.expected_stdout, timeout=int(timeout))
-        entry = {"sample": idx, "status": r.status}
+        r = verify_python(
+            code, s.stdin, s.expected_stdout, timeout=timeout, problem_text=problem_text
+        )
+        # B4: seed the entry with the sample's own stdin/expected AND the
+        # verifier's note (the timeout/crash reason) up front — some error
+        # paths (timeout, "could not run", ...) carry a `note` but no
+        # `detail`, and the note was previously dropped entirely, leaving the
+        # user with "errored 1/1" and no explanation. `r.detail`, when
+        # present, still overrides with the actual captured stdout/stderr.
+        entry = {
+            "sample": idx,
+            "status": r.status,
+            "note": r.note,
+            "stdin": s.stdin,
+            "expected": s.expected_stdout,
+        }
         if r.detail:
             entry.update(r.detail[0])
         detail.append(entry)

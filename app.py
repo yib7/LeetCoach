@@ -47,6 +47,7 @@ import sandbox
 import storage
 import topic_index
 
+
 def _maybe_load_dotenv(path: Path) -> None:
     """Load ``path`` as a dotenv file, unless ``LEETCOACH_NO_DOTENV`` is set
     (B8). Never overrides vars already set in the real environment; a missing
@@ -286,6 +287,13 @@ def _verification_detail(result) -> str:
         if rc is not None:
             header = header[:-2] + f" (exit code {rc})**"
         lines = [header, ""]
+        # B4: the verifier's own reason (e.g. "timed out after 10s") — some
+        # error paths (timeout, couldn't launch) have a note but no captured
+        # stdout at all, and it used to be dropped entirely, leaving the user
+        # with "errored 1/1" and no explanation.
+        note = str(entry.get("note") or "").strip()
+        if note:
+            lines += [note, ""]
         for label, key in (("Input", "stdin"), ("Expected", "expected"), ("Got", "stdout")):
             value = str(entry.get(key, "")).rstrip("\n")
             lines += [f"{label}:", "```", value, "```"]
