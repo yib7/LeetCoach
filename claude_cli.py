@@ -408,18 +408,87 @@ def auth_status(
     return AuthStatus(installed=True, logged_in=logged_in)
 
 
+# B2: sign-in guidance is shown ONLY when the CLI's own error text says the
+# problem is authentication. Everything else (usage limits, a bad model name,
+# prompt too long, a crash) is headlined with its real text instead.
+_AUTH_MARKER_RE = re.compile(
+    r"authenticat|oauth|unauthori[sz]ed|\b401\b|invalid api key|api key|"
+    r"not (?:logged|signed) in|log ?in\b|sign ?in\b|/login|credential|"
+    r"token (?:has )?expired|session expired",
+    re.IGNORECASE,
+)
+_LIMIT_MARKER_RE = re.compile(r"usage limit|rate limit|quota|\b429\b", re.IGNORECASE)
+
+_SIGN_IN_HINT = (
+    "This looks like a sign-in problem: run  claude auth login  in a terminal "
+    "to sign in, then click Run again."
+)
+_LIMIT_HINT = (
+    "This looks like a Claude usage limit: wait for it to reset (or pick a "
+    "cheaper model), then click Run again."
+)
+_DETAIL_CAP = 2000  # chars of CLI error text carried into the message
+
+
+def _hint_for(detail: str) -> str:
+    if _AUTH_MARKER_RE.search(detail):
+        return _SIGN_IN_HINT
+    if _LIMIT_MARKER_RE.search(detail):
+        return _LIMIT_HINT
+    return ""
+
+
+def _first_line(text: str) -> str:
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _compose_error(headline: str, detail: str) -> str:
+    """``headline`` + the rest of ``detail`` (capped) + a hint when the text
+    carries an auth / usage-limit marker."""
+    parts = [headline]
+    rest = detail.strip()
+    if rest and rest != _first_line(rest):
+        parts.append(rest[:_DETAIL_CAP])
+    hint = _hint_for(detail)
+    if hint:
+        parts.append(hint)
+    return "\n".join(parts)
+
+
 def failure_message(returncode: int, stderr: str, stream_detail: str = "") -> str:
-    """The user-facing message for a `claude` run that exited nonzero."""
-    detail = stderr or stream_detail
-    message = (
-        f"`{config.claude_bin()}` exited with code {returncode}. "
-        "You are most likely signed out of the `claude` CLI (an expired "
-        "login is the usual cause). Run  claude auth login  in a "
-        "terminal to sign in, then click Run again."
-    )
-    if detail:
-        message += f"\n{detail}"
-    return message
+    """The user-facing message for a `claude` run that exited nonzero (B2).
+
+    The headline is the CLI's real error: its stderr, or - since `claude`
+    reports auth / API failures on stdout - the ``is_error`` result text.
+    "Sign in" guidance is added only when that text carries an auth marker.
+    """
+    stderr = (stderr or "").strip()
+    stream_detail = (stream_detail or "").strip()
+    detail = "\n".join(d for d in (stderr, stream_detail) if d)
+    binary = config.claude_bin()
+    if not detail:
+        return (
+            f"`{binary}` exited with code {returncode} and printed no error details. "
+            "Try the run again; if it keeps failing, run  claude -p hello  in a "
+            "terminal to see what the CLI reports."
+        )
+    headline = f"`{binary}` failed (exit code {returncode}): {_first_line(detail)}"
+    return _compose_error(headline, detail)
+
+
+def result_error_message(obj: dict) -> str:
+    """The user-facing message for an error ``result`` event (B3) - reported
+    even when the CLI exits 0, so it is never saved as the answer."""
+    text = obj.get("result")
+    if not isinstance(text, str) or not text.strip():
+        subtype = obj.get("subtype")
+        text = f"the run ended with {subtype}" if isinstance(subtype, str) else "unknown error"
+    text = text.strip()
+    headline = f"`{config.claude_bin()}` reported an error: {_first_line(text)}"
+    return _compose_error(headline, text)
 
 
 def _error_from_stream(lines: Iterable[str]) -> str:
@@ -439,6 +508,8 @@ def _error_from_stream(lines: Iterable[str]) -> str:
         try:
             obj = json.loads(raw)
         except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict):
             continue
         if obj.get("type") == "result" and obj.get("is_error"):
             msg = obj.get("result")
@@ -729,6 +800,18 @@ def _raise_for_outcome(
 
 # --- stream-json parsing -------------------------------------------------
 
+def _as_dict(value) -> dict:
+    """``value`` if it is a dict, else an empty one (B3 type guard)."""
+    return value if isinstance(value, dict) else {}
+
+
+def _is_error_result(obj: dict) -> bool:
+    subtype = obj.get("subtype")
+    return obj.get("is_error") is True or (
+        isinstance(subtype, str) and subtype.startswith("error")
+    )
+
+
 def _iter_text_deltas(
     lines: Iterable[str], state: Optional["ClaudeRun"] = None
 ) -> Iterator[str]:
@@ -738,12 +821,19 @@ def _iter_text_deltas(
 
     * Prefer ``stream_event`` ``text_delta`` chunks — true incremental output.
     * If the whole stream contained no such events, fall back to emitting the
-      text content blocks from ``assistant`` messages (complete-block mode).
+      text content blocks from ``assistant`` messages (complete-block mode),
+      and failing that the ``result`` text itself.
+    * Stop at the terminal ``result`` event (A6). An error result
+      (``is_error`` or an ``error_*`` subtype) raises
+      :class:`ClaudeUnavailableError` even when the CLI exits 0 (B3), so an
+      error message is never passed off - or saved - as the answer.
     * Ignore everything else (system/init lines, thinking/signature deltas,
-      the final ``result`` echo, blank lines, and any non-JSON noise).
+      blank lines, non-JSON noise) and skip any event whose fields have an
+      unexpected type (B3): the parser must never crash on an odd shape.
     """
     saw_stream_event_text = False
     assistant_fallback: list[str] = []
+    result_fallback = ""
 
     # `lines` is typically the generator returned by `_real_runner`. When the
     # SSE client disconnects, Flask closes the OUTERMOST generator (the one
@@ -756,12 +846,14 @@ def _iter_text_deltas(
     # runs deterministically regardless of GC timing.
     try:
         for raw in lines:
+            if not isinstance(raw, str):
+                continue
             line = raw.strip()
             if not line:
                 continue
             try:
                 obj = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
                 # Defensive: a stray non-JSON line must never crash the stream.
                 continue
             if not isinstance(obj, dict):
@@ -777,35 +869,46 @@ def _iter_text_deltas(
                     state.session_id = sid
 
             if kind == "stream_event":
-                event = obj.get("event") or {}
+                event = _as_dict(obj.get("event"))
                 if event.get("type") == "content_block_delta":
-                    delta = event.get("delta") or {}
-                    if delta.get("type") == "text_delta":
-                        text = delta.get("text", "")
-                        if text:
-                            saw_stream_event_text = True
-                            yield text
+                    delta = _as_dict(event.get("delta"))
+                    text = delta.get("text")
+                    if delta.get("type") == "text_delta" and isinstance(text, str) and text:
+                        saw_stream_event_text = True
+                        yield text
                 # thinking/signature deltas and other event types: ignored
                 continue
 
             if kind == "assistant":
                 # Record assistant text in case no stream_event text ever appears.
-                message = obj.get("message") or {}
-                for block in message.get("content") or []:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        assistant_fallback.append(block.get("text", ""))
+                content = _as_dict(obj.get("message")).get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        block = _as_dict(block)
+                        text = block.get("text")
+                        if block.get("type") == "text" and isinstance(text, str):
+                            assistant_fallback.append(text)
                 continue
 
-            # system / result / rate_limit_event / anything else: not delta text.
+            if kind == "result":
+                if _is_error_result(obj):
+                    raise ClaudeUnavailableError(result_error_message(obj))
+                text = obj.get("result")
+                if isinstance(text, str):
+                    result_fallback = text
+                break  # A6: nothing after the result is part of the answer
+
+            # system / rate_limit_event / anything else: not delta text.
     finally:
         close = getattr(lines, "close", None)
         if callable(close):
             close()
 
-    if not saw_stream_event_text and assistant_fallback:
-        joined = "".join(assistant_fallback)
-        if joined:
-            yield joined
+    if saw_stream_event_text:
+        return
+    joined = "".join(assistant_fallback) or result_fallback
+    if joined:
+        yield joined
 
 
 # --- public entry point --------------------------------------------------
