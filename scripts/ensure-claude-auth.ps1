@@ -45,10 +45,14 @@ function Start-ClaudeLogin {
     if ($resolved) {
         return Start-Process -FilePath $resolved.Source -ArgumentList "auth", "login" -WindowStyle Normal -PassThru
     }
-    # No native Application under this name (e.g. ONLY a .ps1 shim exists) -
-    # launch through the command processor instead of ShellExecute. cmd.exe's
-    # own PATHEXT-based resolution never considers .ps1, so this sidesteps the
-    # Edit-verb problem entirely.
+    # No native Application under this name (e.g. Get-Command found nothing
+    # at all, or only a .ps1 shim, for which the "Application" CommandType
+    # never matches) - launch through the command processor instead of
+    # ShellExecute. This sidesteps the Edit-verb/Notepad-hang problem, since
+    # cmd.exe never invokes ShellExecute's file-association lookup - but it
+    # does NOT make a .ps1-only shim runnable: cmd.exe's own PATHEXT-based
+    # resolution never considers .ps1 either, so that case still just fails
+    # fast here with a normal "not recognized" error instead of hanging.
     return Start-Process -FilePath $env:ComSpec -ArgumentList "/c", $ClaudeBin, "auth", "login" -WindowStyle Normal -PassThru
 }
 

@@ -82,6 +82,25 @@ if "%PIP_INSTALL_FAIL%"=="1" exit /b 1
 exit /b 0
 """
 
+# Stub for the FAST-PATH check (`$PythonExe -c "..."`, run against an
+# ALREADY-EXISTING .venv, before any pip install). Varies its answer on the
+# `-c` argument's own content rather than always succeeding, so a test can
+# tell apart a venv that only has `flask` installed from one that has BOTH
+# `flask` AND `python-dotenv` (requirements.txt lists both; app.py imports
+# `dotenv` too). If the checked import statement doesn't even mention
+# `dotenv` (the OLD, buggy fast-path check - `import flask` alone), this
+# always reports success, since flask-only is exactly what that narrower
+# check was able to prove. Once `dotenv` IS part of the import statement (the
+# fixed check), success additionally depends on FASTPATH_MISSING_DOTENV, so a
+# test can simulate a partially-installed venv and prove it's rejected.
+_EXISTING_VENV_PYTHON_CMD = (
+    "@echo off\r\n"
+    "echo %* | findstr /I /C:\"dotenv\" >nul\r\n"
+    "if errorlevel 1 exit /b 0\r\n"
+    "if \"%FASTPATH_MISSING_DOTENV%\"==\"1\" exit /b 1\r\n"
+    "exit /b 0\r\n"
+)
+
 
 def _stage(tmp_path):
     """Copy setup.ps1 + a throwaway requirements.txt into an isolated
@@ -199,11 +218,12 @@ def test_existing_working_venv_skips_full_setup_without_py_launcher(tmp_path):
     invoked, not merely that it doesn't happen to be needed."""
     stage = _stage(tmp_path)
     (stage / ".venv").mkdir()  # a real pre-existing venv directory
-    # A pre-existing ".venv" whose "python" is a stub that succeeds `-c
-    # "import flask"` (LEETCOACH_SETUP_PYTHON_EXE stands in for the real
-    # `.venv\Scripts\python.exe` the same way the other tests use it).
+    # A pre-existing ".venv" whose "python" is a stub that succeeds BOTH
+    # `import flask` and `import flask, dotenv` (LEETCOACH_SETUP_PYTHON_EXE
+    # stands in for the real `.venv\Scripts\python.exe` the same way the
+    # other tests use it) - this venv genuinely has everything installed.
     python_stub = _write_stub(
-        stage, "existing_venv_python.cmd", "@echo off\r\nexit /b 0\r\n"
+        stage, "existing_venv_python.cmd", _EXISTING_VENV_PYTHON_CMD
     )
 
     ps_home = r"C:\Windows\System32\WindowsPowerShell\v1.0"
@@ -226,6 +246,45 @@ def test_existing_working_venv_skips_full_setup_without_py_launcher(tmp_path):
     assert (stage / ".venv" / ".setup-ok").exists()
     # Never even attempted to create a NEW venv (would show this message).
     assert "creating virtual environment" not in result.stdout.lower()
+
+
+def test_existing_venv_missing_dotenv_does_not_get_the_marker(tmp_path):
+    """requirements.txt lists BOTH `flask` and `python-dotenv` (app.py
+    imports `dotenv`) - the fast-path check must prove BOTH are importable,
+    not just `flask`. A venv with flask installed but dotenv missing must
+    NOT get the marker from the fast path; it must fall through to the full
+    `py`-launcher setup flow instead (which then fails here, since - like the
+    sibling test above - PATH is deliberately restricted to just System32 +
+    the PowerShell home dir, with no `py` launcher reachable at all)."""
+    stage = _stage(tmp_path)
+    (stage / ".venv").mkdir()  # a real pre-existing venv directory
+    python_stub = _write_stub(
+        stage, "existing_venv_python.cmd", _EXISTING_VENV_PYTHON_CMD
+    )
+
+    ps_home = r"C:\Windows\System32\WindowsPowerShell\v1.0"
+    env = dict(os.environ)
+    env["PATH"] = r"C:\Windows\System32;" + ps_home
+    env["LEETCOACH_SETUP_PYTHON_EXE"] = str(python_stub)
+    env["FASTPATH_MISSING_DOTENV"] = "1"
+
+    result = subprocess.run(
+        [
+            str(Path(ps_home) / "powershell.exe"), "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", str(stage / "setup.ps1"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+        cwd=str(stage),
+    )
+    # Fast path correctly refused to mark this venv OK, and fell through to
+    # the full setup flow - which fails here because there's no `py`
+    # launcher reachable on the restricted PATH.
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not (stage / ".venv" / ".setup-ok").exists()
+    assert "'py' launcher was not found" in result.stdout
 
 
 def test_setup_is_dollar_psscriptroot_relative_not_cwd_relative(tmp_path):
