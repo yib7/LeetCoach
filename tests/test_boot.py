@@ -47,3 +47,41 @@ def test_all_core_modules_import():
     import sandbox  # noqa: F401
     import storage  # noqa: F401
     import topic_index  # noqa: F401
+
+
+# --- B8: LEETCOACH_NO_DOTENV must actually gate the dotenv load ------------
+
+def test_maybe_load_dotenv_skips_when_no_dotenv_flag_set(tmp_path, monkeypatch):
+    import os
+
+    envfile = tmp_path / ".env"
+    envfile.write_text("LEETCOACH_SENTINEL_B8=from_dotenv\n", encoding="utf-8")
+    monkeypatch.delenv("LEETCOACH_SENTINEL_B8", raising=False)
+    monkeypatch.setenv("LEETCOACH_NO_DOTENV", "1")
+
+    app_module._maybe_load_dotenv(envfile)
+
+    assert "LEETCOACH_SENTINEL_B8" not in os.environ
+
+
+def test_maybe_load_dotenv_loads_when_flag_unset(tmp_path, monkeypatch):
+    import os
+
+    envfile = tmp_path / ".env"
+    envfile.write_text("LEETCOACH_SENTINEL_B8=from_dotenv\n", encoding="utf-8")
+    monkeypatch.delenv("LEETCOACH_SENTINEL_B8", raising=False)
+    monkeypatch.delenv("LEETCOACH_NO_DOTENV", raising=False)
+
+    app_module._maybe_load_dotenv(envfile)
+
+    assert os.environ.get("LEETCOACH_SENTINEL_B8") == "from_dotenv"
+    monkeypatch.delenv("LEETCOACH_SENTINEL_B8", raising=False)
+
+
+def test_suite_env_isolation_sets_no_dotenv_and_private_output_dir():
+    """The autouse fixture in tests/conftest.py (B8) must have already isolated
+    this test's environment by the time it runs."""
+    import os
+
+    assert os.environ.get("LEETCOACH_NO_DOTENV") == "1"
+    assert "leetcoach-output" in os.environ.get("LEETCOACH_OUTPUT_DIR", "")
