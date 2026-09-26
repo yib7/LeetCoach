@@ -151,6 +151,32 @@ def test_passing_run_saves_no_detail_block(tmp_path, monkeypatch):
     assert "Got:" not in saved
 
 
+# --- B4: the error reason (e.g. a timeout) reaches the saved .md -----------
+
+TIMEOUT_ANSWER = (
+    "Reasoning: this one hangs forever.\n\n"
+    "```python\n"
+    "while True:\n"
+    "    pass\n"
+    "```\n\n"
+    "Complexity: O(n).\n"
+)
+
+
+def test_timed_out_sample_note_lands_in_saved_md(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "1")
+    c = _make_client(tmp_path, monkeypatch, TIMEOUT_ANSWER)
+    resp = _post_run(c, "answer")
+    assert resp.status_code == 200
+    resp.get_data(as_text=True)
+
+    saved = _saved_md(tmp_path, "answers")
+    assert "✗ Sample tests ERROR" in saved
+    # the per-sample block must name WHY it errored, not just "error" with no
+    # reason (the old aggregation dropped the note for a timeout entirely).
+    assert "timed out" in saved.lower()
+
+
 # --- P2-13: extract_code runs exactly once per run --------------------------
 
 @pytest.mark.parametrize(

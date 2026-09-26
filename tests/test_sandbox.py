@@ -76,6 +76,87 @@ def test_timeout_is_an_error():
     assert "out" in r.note.lower()  # "timed out"
 
 
+# --- A3: structural (tolerant) output comparison --------------------------
+
+def test_outputs_match_exact_is_always_a_match():
+    assert sandbox._outputs_match("[0,1]", "[0,1]") is True
+
+
+def test_outputs_match_two_sum_list_spacing_regression():
+    # The real recorded bug: a correct Two Sum answer prints `[0, 1]` (a space
+    # after the comma, Python's default list repr) against an expected
+    # `[0,1]` (LeetCode's compact style) and used to false-FAIL.
+    assert sandbox._outputs_match("[0, 1]", "[0,1]") is True
+
+
+def test_outputs_match_bool_vs_json_lowercase():
+    assert sandbox._outputs_match("True", "true") is True
+    assert sandbox._outputs_match("False", "false") is True
+    assert sandbox._outputs_match("[True, False]", "[true, false]") is True
+
+
+def test_outputs_match_none_vs_json_null():
+    assert sandbox._outputs_match("None", "null") is True
+    assert sandbox._outputs_match("[1, None, 3]", "[1, null, 3]") is True
+
+
+def test_outputs_match_float_tolerance():
+    assert sandbox._outputs_match("3.14159", "3.141590001") is True
+    assert sandbox._outputs_match("2.0", "1.0") is False
+
+
+def test_outputs_match_unquoted_vs_quoted_string():
+    assert sandbox._outputs_match("hello", '"hello"') is True
+    assert sandbox._outputs_match("hello", "'hello'") is True
+
+
+def test_outputs_match_genuinely_wrong_value_stays_a_mismatch():
+    assert sandbox._outputs_match("[9,9]", "[0,1]") is False
+    assert sandbox._outputs_match("43", "42") is False
+
+
+def test_outputs_match_order_matters_by_default():
+    # Without "any order" in the problem text, a permutation is NOT a match —
+    # never silently turn a wrong (order-dependent) answer into a pass.
+    assert sandbox._outputs_match("[1,0]", "[0,1]", "") is False
+
+
+def test_outputs_match_any_order_allowed_when_problem_says_so():
+    problem = "Return the two indices, in any order."
+    assert sandbox._outputs_match("[1,0]", "[0,1]", problem) is True
+
+
+def test_outputs_match_any_order_still_rejects_different_multiset():
+    problem = "You may return the answer in any order."
+    assert sandbox._outputs_match("[0,2]", "[0,1]", problem) is False
+
+
+def test_outputs_match_unparseable_falls_back_to_exact_normalized():
+    # Neither side parses as a literal/JSON value at all after the bare-word
+    # fallback still disagrees -> must not silently pass.
+    assert sandbox._outputs_match("foo bar baz", "totally different") is False
+
+
+def test_verify_python_two_sum_list_spacing_end_to_end():
+    # End-to-end regression for the real recorded bug (A3): a solution that
+    # prints Python's default `[0, 1]` list repr against a `[0,1]`-style
+    # expected output must PASS, not FAIL.
+    good = (
+        "import ast, sys\n"
+        "line = sys.stdin.readline()\n"
+        "nums = ast.literal_eval(line.split('nums = ')[1].split(', target')[0])\n"
+        "target = int(line.split('target = ')[1])\n"
+        "seen = {}\n"
+        "for i, n in enumerate(nums):\n"
+        "    if target - n in seen:\n"
+        "        print([seen[target - n], i])\n"
+        "        break\n"
+        "    seen[n] = i\n"
+    )
+    r = sandbox.verify_python(good, "nums = [2,7,11,15], target = 9\n", "[0,1]")
+    assert r.status == "pass", r
+
+
 # --- timeout tree-kill + bounded output (audit6 P1-2 step 1) --------------
 
 def _windows_pid_alive(pid: int) -> bool:
@@ -531,6 +612,31 @@ def test_aggregation_all_errored_is_a_pure_error():
     assert "2/2" in r.note, r.note
 
 
+# --- B4: the per-sample error reason (timeout/crash note) survives ---------
+
+def test_aggregation_keeps_the_timeout_note_per_sample():
+    """A sample that times out must carry its OWN reason ("timed out after
+    Xs") into the aggregated detail — the old code dropped the note entirely
+    (r.detail was empty for a timeout), leaving "errored 1/1" with no why."""
+    loop = "while True:\n    pass\n"
+    samples = [sandbox.Sample(stdin="", expected_stdout="anything")]
+    r = sandbox._verify_python_samples(code=loop, samples=samples, timeout=1)
+    assert r.status == "error", r
+    assert len(r.detail) == 1
+    entry = r.detail[0]
+    assert "timed out" in entry.get("note", "").lower(), entry
+    # the sample's own stdin/expected are present too, even with no captured
+    # stdout (a timeout never produces a `detail` payload from verify_python).
+    assert entry.get("expected") == "anything"
+
+
+def test_aggregation_keeps_the_note_for_a_passing_sample_too():
+    samples = [sandbox.Sample(stdin="21\n", expected_stdout="42")]
+    r = sandbox._verify_python_samples(GOOD_DOUBLE, samples, timeout=5)
+    assert r.status == "pass", r
+    assert r.detail[0]["note"] == "output matched"
+
+
 # --- P2-4: LEETCOACH_VERIFY_TIMEOUT knob -----------------------------------
 
 def test_verify_timeout_env_knob_defaults_and_invalid_values_fall_back(monkeypatch):
@@ -551,13 +657,75 @@ def test_verify_timeout_env_knob_defaults_and_invalid_values_fall_back(monkeypat
     assert config.verify_timeout() == 4.0
 
 
+# --- B5: timeouts are floats end-to-end; config clamps to (0, 86400] -------
+
+def test_verify_timeout_rejects_inf_and_out_of_range(monkeypatch):
+    import config
+    # +inf/-inf must not disable the containment timeout (B5).
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "inf")
+    assert config.verify_timeout() == 10.0
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "-inf")
+    assert config.verify_timeout() == 10.0
+    # far above a sane wall-clock ceiling (24h) also falls back.
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "999999")
+    assert config.verify_timeout() == 10.0
+    # the ceiling itself is accepted.
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "86400")
+    assert config.verify_timeout() == 86400.0
+    # a genuine sub-second float is kept, not truncated.
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "0.5")
+    assert config.verify_timeout() == 0.5
+
+
+def test_run_timeout_rejects_inf_and_out_of_range(monkeypatch):
+    import config
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "inf")
+    assert config.run_timeout() == 600.0
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "999999")
+    assert config.run_timeout() == 600.0
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "86400")
+    assert config.run_timeout() == 86400.0
+
+
+def test_verify_python_honours_a_sub_second_float_timeout():
+    """A 0.5s budget must actually be ~0.5s, not truncated to 0 by an int()
+    cast (the old `_verify_python_samples` passed `int(timeout)`, so 0.5
+    silently became 0 and every verify with a sub-second budget mis-timed)."""
+    loop = "while True:\n    pass\n"
+    start = time.monotonic()
+    r = sandbox.verify_python(loop, "", "anything", timeout=0.5)
+    elapsed = time.monotonic() - start
+    assert r.status == "error", r
+    assert "timed out after 0.5s" in r.note, r.note
+    assert elapsed < 5, f"took {elapsed:.1f}s -- sub-second timeout was not honoured"
+
+
+def test_verify_python_samples_does_not_truncate_fractional_timeout():
+    """`_verify_python_samples` must pass the float timeout straight through to
+    `verify_python`, not `int(timeout)` (which turned 0.5 into 0)."""
+    seen = []
+
+    def spy_verify_python(code, stdin_text, expected_stdout, *, timeout, problem_text=""):
+        seen.append(timeout)
+        return sandbox.VerifyResult(status="pass", note="ok")
+
+    orig = sandbox.verify_python
+    sandbox.verify_python = spy_verify_python
+    try:
+        samples = [sandbox.Sample(stdin="", expected_stdout="x")]
+        sandbox._verify_python_samples("print('x')\n", samples, timeout=0.5)
+    finally:
+        sandbox.verify_python = orig
+    assert seen == [0.5], seen
+
+
 def test_verify_answer_threads_the_configured_timeout(monkeypatch):
     """`verify_answer` must feed each sample-verify subprocess the configured
     timeout, not a hardcoded 10s — so the knob actually bounds runaway code."""
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "3")
     seen = []
 
-    def spy_verify_python(code, stdin_text, expected_stdout, *, timeout):
+    def spy_verify_python(code, stdin_text, expected_stdout, *, timeout, problem_text=""):
         seen.append(timeout)
         return sandbox.VerifyResult(status="pass", note="ok")
 

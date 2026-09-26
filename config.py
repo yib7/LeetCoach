@@ -30,6 +30,7 @@ environment without re-importing the module.
 """
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
 
@@ -44,6 +45,14 @@ DEFAULT_CLAUDE_BIN = "claude"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 DEFAULT_RUN_TIMEOUT = 600.0  # seconds; generous — Opus study material can be slow
 DEFAULT_VERIFY_TIMEOUT = 10.0  # seconds; per sample-verification subprocess
+
+# Upper bound accepted for either timeout knob (B5): 24h is already an absurd
+# wait for a local tool, so anything past it is almost certainly a typo/bad
+# input, not a deliberate choice — falling back to the default is safer than
+# honouring it (and, critically, `inf` MUST be rejected here: an infinite
+# verify timeout would defeat the whole point of the sandbox's containment
+# watchdog, hanging forever instead of tree-killing the child).
+MAX_TIMEOUT_SECONDS = 86400.0
 
 
 def model() -> str:
@@ -100,24 +109,36 @@ def claude_bin() -> str:
     return os.environ.get("LEETCOACH_CLAUDE_BIN", DEFAULT_CLAUDE_BIN)
 
 
+def _clamped_timeout(env_var: str, default: float) -> float:
+    """Shared parsing for both timeout knobs (B5): a float in
+    ``(0, MAX_TIMEOUT_SECONDS]``, else ``default``.
+
+    Rejects everything that could defeat a wall-clock containment watchdog: an
+    unparseable value, zero, negatives, ``NaN`` (``NaN > 0`` is ``False``,
+    catching it in the same comparison), ``inf``/``-inf`` (explicitly checked —
+    ``inf > 0`` is otherwise ``True``), and anything past the 24h ceiling.
+    """
+    raw = os.environ.get(env_var, "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if not value > 0 or math.isinf(value) or value > MAX_TIMEOUT_SECONDS:
+        return default
+    return value
+
+
 def run_timeout() -> float:
     """Wall-clock cap (seconds) for a single `claude` run.
 
     ``claude_cli``'s watchdog tree-kills the subprocess after this long and the
     run fails with a clear "timed out" error, instead of a hung CLI (network
     stall, stuck auth prompt, wedged node) wedging the Flask worker forever.
-    Override with ``LEETCOACH_RUN_TIMEOUT``; invalid or non-positive values
-    fall back to the default (a broken knob must never disable the watchdog or
-    crash a run).
+    Override with ``LEETCOACH_RUN_TIMEOUT``; invalid, non-positive, infinite, or
+    over-ceiling values fall back to the default (a broken knob must never
+    disable the watchdog or crash a run).
     """
-    raw = os.environ.get("LEETCOACH_RUN_TIMEOUT", "")
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_RUN_TIMEOUT
-    if not value > 0:  # rejects 0, negatives, and NaN in one comparison
-        return DEFAULT_RUN_TIMEOUT
-    return value
+    return _clamped_timeout("LEETCOACH_RUN_TIMEOUT", DEFAULT_RUN_TIMEOUT)
 
 
 def verify_timeout() -> float:
@@ -125,18 +146,11 @@ def verify_timeout() -> float:
 
     The sandbox tree-kills a generated solution after this long so a wedged or
     infinite-looping answer can't hang a run (each parsed sample is bounded
-    independently). Override with ``LEETCOACH_VERIFY_TIMEOUT``; invalid or
-    non-positive values fall back to the default (a broken knob must never
-    disable the containment timeout).
+    independently). Override with ``LEETCOACH_VERIFY_TIMEOUT``; invalid,
+    non-positive, infinite, or over-ceiling values fall back to the default (a
+    broken knob must never disable the containment timeout).
     """
-    raw = os.environ.get("LEETCOACH_VERIFY_TIMEOUT", "")
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_VERIFY_TIMEOUT
-    if not value > 0:  # rejects 0, negatives, and NaN in one comparison
-        return DEFAULT_VERIFY_TIMEOUT
-    return value
+    return _clamped_timeout("LEETCOACH_VERIFY_TIMEOUT", DEFAULT_VERIFY_TIMEOUT)
 
 
 def output_dir() -> Path:
