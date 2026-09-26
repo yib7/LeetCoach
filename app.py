@@ -88,6 +88,11 @@ ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
 # stored list is insertion-ordered, so "the most recent N" is its tail.
 LEARNED_TOPICS_CAP = 50
 
+# A6: the longest a finished answer waits on the background classifier before
+# saving under the fallback type (and cancelling the classifier call). The
+# classifier normally answers in a few seconds on the cheap model.
+CLASSIFIER_JOIN_TIMEOUT = 60.0
+
 # Extensions the library browser (SP10) will list and serve. Everything the
 # app itself writes (storage._LANG_EXT + .md, .txt fallback, topic_index.json)
 # is covered; anything else in the output dir is invisible to the read path.
@@ -582,6 +587,39 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
         out = [""]  # accumulator shared with the helper above
 
+        # A6: the classifier call(s) this run started, so they can be
+        # cancelled when the run no longer needs them (bounded join expired,
+        # client disconnected, answer failed). Anything run_fn returns that
+        # has a cancel() (claude_cli.ClaudeRun does) is cancellable; test
+        # fakes without one are simply left to finish.
+        cls_calls: list = []
+        cls_calls_lock = threading.Lock()
+        cls_cancelled = [False]
+
+        def _cancel_call(call) -> None:
+            cancel = getattr(call, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:  # noqa: BLE001 - cancelling is best-effort
+                    app.logger.exception("could not cancel the classifier call")
+
+        def _classifier_run_fn(prompt, **kwargs):
+            call = run_fn(prompt, **kwargs)
+            with cls_calls_lock:
+                cls_calls.append(call)
+                late = cls_cancelled[0]
+            if late:  # the run was already over when this call started
+                _cancel_call(call)
+            return call
+
+        def _cancel_classifier() -> None:
+            with cls_calls_lock:
+                cls_cancelled[0] = True
+                calls = list(cls_calls)
+            for call in calls:
+                _cancel_call(call)
+
         def event_stream():
             try:
                 # 1) classify on a background thread (audit6 P2-4). The short
@@ -599,7 +637,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 def _classify_in_background():
                     try:
                         cls_holder[0] = classifier.classify(
-                            problem, run_fn=run_fn, model=config.classifier_model()
+                            problem,
+                            run_fn=_classifier_run_fn,
+                            model=config.classifier_model(),
                         )
                     except Exception:  # noqa: BLE001 - fallback already seeded above
                         app.logger.exception("background classification failed")
@@ -612,12 +652,23 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 cls_thread.start()
 
                 def _classification():
-                    """Join the classifier thread and return its result. The
-                    join is deliberately unbounded: classify rides the same
-                    claude_cli machinery as every run, whose wall-clock watchdog
-                    (LEETCOACH_RUN_TIMEOUT) already bounds a hung CLI — a second
-                    timeout here would only mask that one."""
-                    cls_thread.join()
+                    """Join the classifier thread and return its result.
+
+                    A6: the join is bounded. The answer is complete and
+                    streamed by now; a classifier that is still not back after
+                    CLASSIFIER_JOIN_TIMEOUT (a wedged CLI, or a fake that never
+                    returns) must not hold the save hostage for the full run
+                    watchdog. Its call is cancelled and the run saves under
+                    the fallback type."""
+                    cls_thread.join(CLASSIFIER_JOIN_TIMEOUT)
+                    if cls_thread.is_alive():
+                        app.logger.warning(
+                            "classifier still running after %ss; saving as %s",
+                            CLASSIFIER_JOIN_TIMEOUT,
+                            classifier.FALLBACK_TYPE,
+                        )
+                        _cancel_classifier()
+                        return classifier.Classification(classifier.FALLBACK_TYPE, [])
                     return cls_holder[0]
 
                 # 2) build the mode-specific prompt; 3) stream + accumulate;
@@ -717,6 +768,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 app.logger.exception("run failed (mode=%s)", mode)
                 yield _sse_event("error", f"Run failed: {exc}")
             finally:
+                # A6: a classifier call still running is no longer needed -
+                # the client left (GeneratorExit), the answer failed, or the
+                # save is done - so stop its `claude` process. A no-op for a
+                # call that already finished.
+                _cancel_classifier()
                 # Release the in-flight key no matter how the stream ends —
                 # normal completion, error, or a client disconnect (which raises
                 # GeneratorExit here, bypassing the except above). Frees an
