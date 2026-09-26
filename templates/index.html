@@ -4,10 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>LeetCoach</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="stylesheet" href="/static/vendor/highlight-github-dark.min.css" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body data-claude-available="__CLAUDE_AVAILABLE__">
+<body data-claude-available="__CLAUDE_AVAILABLE__" data-claude-logged-in="__CLAUDE_LOGGED_IN__" data-claude-model="__CLAUDE_MODEL__">
   <div class="app">
 
     <!-- ===== top bar ===== -->
@@ -19,10 +20,11 @@
       <nav class="nav" aria-label="Primary">
         <a class="on" data-view="console" role="button" tabindex="0">Console</a>
         <a data-view="library" role="button" tabindex="0">Library</a>
-        <a class="inert" aria-disabled="true">Stats</a>
+        <a data-view="stats" role="button" tabindex="0">Stats</a>
       </nav>
       <div class="tb-spacer"></div>
-      <div class="tb-search inert" aria-hidden="true" title="Search is not available yet">
+      <div class="tb-search" id="tb-search" role="button" tabindex="0"
+           title="Search your library (Ctrl/&#8984; + K)" aria-label="Search your library">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
         <span class="ph">Search…</span>
         <span class="k"><kbd>&#8984;</kbd><kbd>K</kbd></span>
@@ -31,7 +33,7 @@
         <span class="dot"></span>
         <span class="tb-status-label">claude CLI</span>
       </span>
-      <button class="iconbtn inert" type="button" title="Keyboard shortcuts" aria-hidden="true" tabindex="-1">
+      <button class="iconbtn" id="shortcuts-btn" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>
       </button>
     </header>
@@ -47,10 +49,9 @@
         <nav class="side-nav" aria-label="Sections">
           <a class="on" data-view="console" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-4 6 4 6M16 6l4 6-4 6"/></svg> Console</a>
           <a data-view="library" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4h3v16H5zM10.5 4h3v16h-3z"/><path d="m16 5 3 .8-3.2 14-3-.8z"/></svg> Library</a>
-          <a class="inert" aria-disabled="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10l2 2h6.5A1.5 1.5 0 0 1 20 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18Z"/></svg> Bookmarks</a>
-          <a class="inert" aria-disabled="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-3"/></svg> Stats</a>
+          <a data-view="stats" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-3"/></svg> Stats</a>
         </nav>
-        <div class="side-lbl">Recent runs <a class="inert" aria-disabled="true">Clear</a></div>
+        <div class="side-lbl">Recent runs</div>
         <div class="recents" id="recents" aria-label="Recent runs"></div>
         <div class="side-foot">
           <div class="t"><span class="dot"></span> Local &amp; offline</div>
@@ -61,13 +62,22 @@
       <!-- ===== content ===== -->
       <main class="content">
 
-        <!-- claude CLI availability warning (JS reveals from body flag) -->
+        <!-- claude CLI availability / sign-in warning (JS reveals from body flags) -->
         <section id="claude-warning" class="banner" hidden>
           <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 4 3 19h18Z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg></div>
           <div>
-            <div class="bt">The <code>claude</code> CLI was not found on PATH</div>
-            <div class="bd">Runs will fail until Claude Code is installed and authenticated (or set
-              <code>LEETCOACH_CLAUDE_BIN</code>), then reload this page.</div>
+            <!-- shown when the binary isn't on PATH -->
+            <div data-banner="missing" hidden>
+              <div class="bt">The <code>claude</code> CLI was not found on PATH</div>
+              <div class="bd">Runs will fail until Claude Code is installed (or set
+                <code>LEETCOACH_CLAUDE_BIN</code> to its full path), then reload this page.</div>
+            </div>
+            <!-- shown when the binary is present but signed out -->
+            <div data-banner="signedout" hidden>
+              <div class="bt">You&#8217;re signed out of the <code>claude</code> CLI</div>
+              <div class="bd">Runs will fail until you sign in. In a terminal, run
+                <code class="cmd">claude auth login</code>, then reload this page.</div>
+            </div>
           </div>
         </section>
 
@@ -79,6 +89,7 @@
               <div class="sub">Paste a problem, pick a mode, and <b>run</b> — coaching streams in and saves to your library.</div>
             </div>
             <div class="r">
+              <span class="streak-badge" id="streak-badge" hidden></span>
               <span class="hint"><span class="kbd"><kbd>&#8984;</kbd><kbd>&#8629;</kbd></span> to run</span>
             </div>
           </div>
@@ -119,11 +130,19 @@
                 </div>
               </div>
               <div class="tgroup" data-seg="tier">
-                <span class="tlabel">Tier</span>
-                <div class="seg" data-seg="tier" role="group" aria-label="Tier">
-                  <button class="seg-btn" type="button" data-val="simple">Simple</button>
+                <span class="tlabel">Code Quality</span>
+                <div class="seg" data-seg="tier" role="group" aria-label="Code Quality">
+                  <button class="seg-btn" type="button" data-val="basic">Basic</button>
                   <button class="seg-btn on" type="button" data-val="normal">Normal</button>
-                  <button class="seg-btn" type="button" data-val="complex">Complex</button>
+                  <button class="seg-btn" type="button" data-val="optimal">Optimal</button>
+                </div>
+              </div>
+              <div class="tgroup" data-seg="model">
+                <span class="tlabel">Model</span>
+                <div class="seg" data-seg="model" role="group" aria-label="Model">
+                  <button class="seg-btn" type="button" data-val="opus">Opus</button>
+                  <button class="seg-btn" type="button" data-val="sonnet">Sonnet</button>
+                  <button class="seg-btn" type="button" data-val="haiku">Haiku</button>
                 </div>
               </div>
               <div class="tb-spacer"></div>
@@ -231,7 +250,139 @@
           </div>
         </section>
 
+        <!-- ===== STATS VIEW ===== -->
+        <section id="view-stats" hidden>
+          <div class="ctx">
+            <div>
+              <h1>Stats</h1>
+              <div class="sub">Your practice activity — derived from the <b>study library</b> you build as you run.</div>
+            </div>
+            <div class="r">
+              <span class="hint">Local &amp; offline · from <b>output/</b></span>
+            </div>
+          </div>
+
+          <!-- empty state (JS toggles vs #stats-body) -->
+          <div class="stats-empty" id="stats-empty" hidden>
+            <div class="se-flame">&#128293;</div>
+            <div class="se-t">No runs yet</div>
+            <div class="se-d">Solve your first problem to start your streak.</div>
+            <button class="btn green" id="stats-empty-cta" type="button">Go to the Console</button>
+          </div>
+
+          <!-- populated stats -->
+          <div id="stats-body">
+            <div class="stat-tiles">
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic">&#128293;</span><span class="st-lbl">Current streak</span></div>
+                <div class="st-val" id="stat-streak">0</div>
+                <div class="st-sub" id="stat-streak-sub">days</div>
+              </div>
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic">&#127942;</span><span class="st-lbl">Longest streak</span></div>
+                <div class="st-val" id="stat-longest">0</div>
+                <div class="st-sub" id="stat-longest-sub">days best</div>
+              </div>
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic">&#9989;</span><span class="st-lbl">Solved today</span></div>
+                <div class="st-val" id="stat-today">0</div>
+                <div class="st-sub" id="stat-today-sub">this week: 0</div>
+              </div>
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic">&#128218;</span><span class="st-lbl">Total solved</span></div>
+                <div class="st-val" id="stat-total">0</div>
+                <div class="st-sub" id="stat-total-sub">0 problems</div>
+              </div>
+            </div>
+
+            <section class="panel stats-panel">
+              <div class="p-head">
+                <span class="p-title">Activity <span class="tag">last 17 weeks</span></span>
+                <div class="hm-legend">
+                  <span>Less</span>
+                  <span class="hm-cell hm-0"></span>
+                  <span class="hm-cell hm-1"></span>
+                  <span class="hm-cell hm-2"></span>
+                  <span class="hm-cell hm-3"></span>
+                  <span class="hm-cell hm-4"></span>
+                  <span>More</span>
+                </div>
+              </div>
+              <div class="hm-scroll">
+                <div class="hm-inner">
+                  <div class="hm-months" id="hm-months"></div>
+                  <div class="hm-grid" id="hm-grid"></div>
+                </div>
+              </div>
+            </section>
+
+            <div class="stats-breakdowns">
+              <section class="panel stats-panel">
+                <div class="p-head"><span class="p-title">By mode</span></div>
+                <div class="bd-list" id="bd-mode"></div>
+              </section>
+              <section class="panel stats-panel">
+                <div class="p-head"><span class="p-title">By language</span></div>
+                <div class="bd-list" id="bd-language"></div>
+              </section>
+              <section class="panel stats-panel">
+                <div class="p-head"><span class="p-title">Top topics</span></div>
+                <div class="bd-list" id="bd-topic"></div>
+              </section>
+            </div>
+          </div>
+        </section>
+
       </main>
+    </div>
+  </div>
+
+  <!-- ===== keyboard shortcuts help modal (C1) ===== -->
+  <div class="overlay" id="shortcuts-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="modal-head">
+        <h2 class="modal-title" id="shortcuts-title">Keyboard shortcuts</h2>
+        <button class="iconbtn" id="shortcuts-close" type="button" aria-label="Close shortcuts">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="sc-row">
+          <span class="sc-desc">Run the current problem</span>
+          <span class="sc-keys"><kbd>Ctrl</kbd><span class="sc-or">/</span><kbd>&#8984;</kbd><kbd>Enter</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Search your library</span>
+          <span class="sc-keys"><kbd>Ctrl</kbd><span class="sc-or">/</span><kbd>&#8984;</kbd><kbd>K</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Show this shortcuts dialog</span>
+          <span class="sc-keys"><kbd>?</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Ask in Quick Ask</span>
+          <span class="sc-keys"><kbd>Enter</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Close a dialog or search</span>
+          <span class="sc-keys"><kbd>Esc</kbd></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== search palette (C2) ===== -->
+  <div class="overlay overlay-top" id="search-palette" hidden>
+    <div class="palette" role="dialog" aria-modal="true" aria-label="Search your library">
+      <div class="pal-head">
+        <svg class="pal-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+        <input id="search-input" class="pal-input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Search problems, topics, modes, languages…"
+               role="combobox" aria-controls="search-results" aria-expanded="true" aria-autocomplete="list"
+               aria-label="Search your library" />
+        <kbd class="pal-esc">Esc</kbd>
+      </div>
+      <div class="pal-results" id="search-results" role="listbox" aria-label="Search results"></div>
     </div>
   </div>
 

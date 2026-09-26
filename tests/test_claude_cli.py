@@ -200,6 +200,62 @@ def test_is_available_uses_configured_binary_name(monkeypatch):
     assert seen["name"] == "my-claude"
 
 
+# --- (c2) auth_status: sign-in probe via `claude auth status` -------------
+
+import types  # noqa: E402 - grouped with the auth-probe tests it supports
+
+
+def _fake_proc(stdout):
+    return types.SimpleNamespace(stdout=stdout, returncode=0)
+
+
+def test_auth_status_reports_logged_in():
+    seen = {}
+
+    def fake_run(argv):
+        seen["argv"] = argv
+        return _fake_proc('{"loggedIn": true, "authMethod": "oauth"}')
+
+    st = claude_cli.auth_status(run=fake_run, which=lambda name: "/usr/bin/claude")
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=True)
+    # it asks the CLI the right question
+    assert seen["argv"][-2:] == ["auth", "status"]
+
+
+def test_auth_status_reports_logged_out():
+    st = claude_cli.auth_status(
+        run=lambda argv: _fake_proc('{"loggedIn": false, "authMethod": "none"}'),
+        which=lambda name: "/usr/bin/claude",
+    )
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=False)
+
+
+def test_auth_status_missing_binary_is_not_installed():
+    # No binary on PATH -> installed False, and the runner is never called.
+    def boom(argv):
+        raise AssertionError("runner must not be called when the binary is missing")
+
+    st = claude_cli.auth_status(run=boom, which=lambda name: None)
+    assert st == claude_cli.AuthStatus(installed=False, logged_in=False)
+
+
+def test_auth_status_malformed_output_is_safe():
+    # Non-JSON output must not raise; treat as installed-but-signed-out.
+    st = claude_cli.auth_status(
+        run=lambda argv: _fake_proc("not json at all"),
+        which=lambda name: "/usr/bin/claude",
+    )
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=False)
+
+
+def test_auth_status_runner_crash_is_safe():
+    def boom(argv):
+        raise OSError("spawn failed")
+
+    st = claude_cli.auth_status(run=boom, which=lambda name: "/usr/bin/claude")
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=False)
+
+
 def test_run_raises_clear_error_when_unavailable():
     # If the wrapper is asked to run while claude is unavailable, the error
     # message must clearly name the missing dependency.
@@ -545,5 +601,49 @@ def test_real_runner_surfaces_stderr_on_nonzero_exit():
     except claude_cli.ClaudeUnavailableError as exc:
         assert "boom diagnostic detail" in str(exc)
         assert "3" in str(exc)
+    else:
+        raise AssertionError("expected ClaudeUnavailableError on nonzero exit")
+
+
+def test_error_from_stream_extracts_stdout_failure():
+    """`_error_from_stream` returns the message of a terminal is_error result line
+    (claude reports auth/API errors there, not on stderr)."""
+    lines = [
+        '{"type":"system","subtype":"init"}\n',
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}\n',
+        '{"type":"result","subtype":"success","is_error":true,'
+        '"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}\n',
+    ]
+    assert claude_cli._error_from_stream(lines) == (
+        "Failed to authenticate: OAuth session expired and could not be refreshed"
+    )
+
+
+def test_error_from_stream_empty_without_error_result():
+    """No is_error result line -> empty string (a normal run reports nothing)."""
+    lines = [
+        '{"type":"result","subtype":"success","is_error":false,"result":"ok"}\n',
+        "not json at all\n",
+        "\n",
+    ]
+    assert claude_cli._error_from_stream(lines) == ""
+
+
+def test_nonzero_exit_surfaces_stdout_error_when_stderr_empty():
+    """Integration: `claude` reports the auth failure on STDOUT (stderr empty) and
+    exits nonzero — the runner reads the reason back so the user sees the real
+    cause plus actionable re-login guidance, not a bare exit code."""
+    script = (
+        "import sys, json\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':True,"
+        "'result':'Failed to authenticate: OAuth session expired and could not be refreshed'}))\n"
+        "sys.exit(1)\n"
+    )
+    try:
+        _drive_real_runner([sys.executable, "-c", script], "ping")
+    except claude_cli.ClaudeUnavailableError as exc:
+        assert "OAuth session expired" in str(exc)   # the real reason, surfaced
+        assert "sign in" in str(exc)                 # actionable re-login guidance
     else:
         raise AssertionError("expected ClaudeUnavailableError on nonzero exit")
