@@ -34,6 +34,7 @@ afterward and win, since that happens later in the same fixture-teardown stack.
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 from _helpers import FAKE_CLAUDE_HELP
@@ -67,5 +68,15 @@ def _isolate_leetcoach_env(tmp_path, monkeypatch):
     # test with an empty probe cache.
     monkeypatch.setattr(claude_cli, "_probe_help_text", lambda argv: FAKE_CLAUDE_HELP)
     claude_cli.clear_flag_cache()
+    # B1: same for the sign-in probe - `claude auth status` is never spawned
+    # (tests that exercise the real runner capture it at import time and
+    # point it at a Python stand-in), and the 60 s cache starts empty.
+    monkeypatch.setattr(
+        claude_cli,
+        "_default_auth_runner",
+        lambda argv: SimpleNamespace(returncode=0, stdout='{"loggedIn": true}'),
+    )
+    claude_cli.clear_auth_cache()
     yield
     claude_cli.clear_flag_cache()
+    claude_cli.clear_auth_cache()

@@ -63,6 +63,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
 import config
@@ -109,6 +110,7 @@ FLAG_NO_PERSIST = "--no-session-persistence"
 FORBIDDEN_FLAGS = frozenset({"--bare"})
 
 FLAG_PROBE_TIMEOUT = 15.0       # seconds for `claude --help`
+AUTH_PROBE_TIMEOUT = 15.0       # seconds for `claude auth status` (B1)
 FLAG_PROBE_FAILURE_TTL = 60.0   # a failed probe is retried after this long
 
 _monotonic = time.monotonic     # indirection so tests can drive the clock
@@ -365,16 +367,17 @@ def _run_bounded(argv: list[str], *, timeout: float, cwd: Optional[str] = None):
 
 
 def _default_auth_runner(argv: list[str]):
-    """Run ``claude auth status`` for real, returning the completed process.
+    """Run ``claude auth status`` for real, returning ``.returncode``/``.stdout``.
 
-    Resolves argv[0] via PATHEXT (Windows shim), captures stdout, caps the wait,
-    and suppresses a console window on Windows — mirroring :func:`_real_runner`.
+    B1: goes through :func:`_run_bounded` - Popen in a kill-on-close job /
+    own process group, the WHOLE tree killed on timeout (the old
+    ``subprocess.run`` killed only the ``cmd.exe`` shim and then waited on the
+    pipe the real ``node`` child still held), output decoded as UTF-8 with
+    replacement (never the console code page), in the neutral cwd (A7).
+    Raises :class:`subprocess.TimeoutExpired` on timeout; the caller degrades.
     """
-    resolved = shutil.which(argv[0]) or argv[0]
-    kwargs: dict = {"capture_output": True, "text": True, "timeout": 15}
-    if os.name == "nt":
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return subprocess.run([resolved, *argv[1:]], **kwargs)
+    returncode, out = _run_bounded(argv, timeout=AUTH_PROBE_TIMEOUT, cwd=ensure_claude_cwd())
+    return SimpleNamespace(returncode=returncode, stdout=out)
 
 
 def auth_status(
@@ -406,6 +409,66 @@ def auth_status(
     except Exception:  # noqa: BLE001 - an auth probe must never raise
         return AuthStatus(installed=True, logged_in=False)
     return AuthStatus(installed=True, logged_in=logged_in)
+
+
+# --- cached sign-in state (B1) ---------------------------------------------
+#
+# The page used to run `claude auth status` synchronously on EVERY `GET /`.
+# A signed-in result is now reused for AUTH_CACHE_TTL seconds and, once stale,
+# served as-is while ONE background thread refreshes it (a sign-out shows up on
+# the next reload). A negative result (signed out / not installed / probe
+# failed) is re-checked synchronously after only AUTH_NEGATIVE_TTL seconds, so
+# the reload right after `claude auth login` reflects the new state.
+
+AUTH_CACHE_TTL = 60.0
+AUTH_NEGATIVE_TTL = 5.0
+
+_auth_cache: dict = {}      # binary -> (AuthStatus, probed_at)
+_auth_refreshing: set = set()
+_auth_lock = threading.Lock()
+
+
+def clear_auth_cache() -> None:
+    """Forget the cached sign-in state (tests; after `claude auth login`)."""
+    with _auth_lock:
+        _auth_cache.clear()
+
+
+def _probe_and_store(key: str) -> AuthStatus:
+    try:
+        status = auth_status()
+    except Exception:  # noqa: BLE001 - auth_status never raises; belt and braces
+        status = AuthStatus(installed=True, logged_in=False)
+    with _auth_lock:
+        _auth_cache[key] = (status, _monotonic())
+        _auth_refreshing.discard(key)
+    return status
+
+
+def cached_auth_status() -> AuthStatus:
+    """:func:`auth_status`, cached per configured binary (B1). Never raises."""
+    key = config.claude_bin()
+    now = _monotonic()
+    with _auth_lock:
+        hit = _auth_cache.get(key)
+        if hit is not None:
+            status, probed_at = hit
+            age = now - probed_at
+            if status.logged_in:
+                if age < AUTH_CACHE_TTL:
+                    return status
+                if key not in _auth_refreshing:
+                    _auth_refreshing.add(key)
+                    threading.Thread(
+                        target=_probe_and_store,
+                        args=(key,),
+                        name="leetcoach-auth-refresh",
+                        daemon=True,
+                    ).start()
+                return status  # stale-while-revalidate
+            if age < AUTH_NEGATIVE_TTL:
+                return status
+    return _probe_and_store(key)
 
 
 # B2: sign-in guidance is shown ONLY when the CLI's own error text says the
