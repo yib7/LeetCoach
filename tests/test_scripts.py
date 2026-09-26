@@ -167,3 +167,34 @@ def test_missing_claude_binary_warns_and_exits_zero(tmp_path):
     result = _run_ensure_script(missing)
     assert result.returncode == 0
     assert "not found on path" in result.stdout.lower()
+
+
+# --- C8: CRLF pinned for .ps1/.cmd; README shows the Bypass invocation -----
+
+def test_gitattributes_pins_ps1_and_cmd_to_crlf():
+    text = (REPO_ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "*.cmd text eol=crlf" in text
+    assert "*.ps1 text eol=crlf" in text
+
+
+def test_tracked_launcher_scripts_are_actually_crlf_on_disk():
+    """The .gitattributes rule only matters if the working tree files
+    actually reflect it (a stale checkout from before the rule existed would
+    still be LF) - checked at the byte level, not through a shell pipe (CRLF
+    can get silently translated away in some shell pipelines)."""
+    for path in PS1_FILES + CMD_FILES:
+        raw = path.read_bytes()
+        assert b"\r\n" in raw, f"{path.name} should be CRLF"
+        # every bare \n must be part of a \r\n pair (no MIXED line endings)
+        lone_lf = sum(
+            1 for i, b in enumerate(raw) if b == 0x0A and raw[i - 1:i] != b"\r"
+        )
+        assert lone_lf == 0, f"{path.name} has {lone_lf} lone-LF line(s)"
+
+
+def test_readme_shows_execution_policy_bypass_invocations():
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "powershell -ExecutionPolicy Bypass -File .\\setup.ps1" in text
+    assert (
+        "powershell -ExecutionPolicy Bypass -File .\\scripts\\create-shortcut.ps1" in text
+    )

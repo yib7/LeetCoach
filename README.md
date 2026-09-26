@@ -72,8 +72,12 @@ cd LeetCoach
 the runtime dependencies:
 
 ```powershell
-.\setup.ps1
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
+
+(`-ExecutionPolicy Bypass` sidesteps the default policy that blocks unsigned scripts, for
+this one process only - it changes nothing system-wide. Every LeetCoach `.ps1`/`.cmd`
+launcher, including `LeetCoach.cmd` itself, invokes scripts this same way.)
 
 (Not on Windows? Run `python3 -m venv .venv`, activate it, then `pip install -r requirements.txt`.)
 
@@ -90,9 +94,10 @@ answer streams in live and is saved under `output/`. `python app.py` is the sing
 point for every later run.
 
 **Daily use.** After the one-time setup you do not need the terminal. Run
-`.\scripts\create-shortcut.ps1` once to put a **LeetCoach** shortcut on your Desktop; from
-then on, double-click it (or run `.\LeetCoach.cmd`) to start the app and open it in your
-browser. If port 5000 is busy it picks the next free port. Close the window to stop the app.
+`powershell -ExecutionPolicy Bypass -File .\scripts\create-shortcut.ps1` once to put a
+**LeetCoach** shortcut on your Desktop; from then on, double-click it (or run
+`.\LeetCoach.cmd`) to start the app and open it in your browser. If port 5000 is busy it
+picks the next free port. Close the window to stop the app.
 
 (Optional) Copy `.env.example` to `.env` to change the model or paths; all settings are
 optional, see [Configuration](#configuration).

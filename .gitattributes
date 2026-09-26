@@ -2,6 +2,12 @@
 # clone doesn't churn CRLF into diffs. Minified vendor assets are text too (LF).
 * text=auto eol=lf
 
+# Windows launcher scripts (C8): cmd.exe/PowerShell are pickiest about their
+# own native line ending, and core.autocrlf varies per developer machine - so
+# these are pinned to CRLF here rather than left to that setting.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
 # Real binary media: store/serve verbatim, never normalized or diffed.
 *.png  binary
 *.jpg  binary
