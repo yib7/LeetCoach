@@ -77,6 +77,49 @@ def test_legacy_oversized_topic_is_sanitized_on_read(idx):
     assert not any(";" in t or "." in t for t in known)
 
 
+def test_first_record_does_not_rewrite_raw_legacy_entries(idx):
+    # SP2 M5: sanitizing is for what gets READ into prompts; the file on disk
+    # keeps the learner's legacy entries exactly as they were.
+    long_topic = "Dynamic Programming on Trees with Rerooting Technique"  # > 40
+    legacy = {
+        "by_type": {"Two Pointers": ["Two-Pointers!", long_topic], "odd": "not a list"},
+        "all": ["Two-Pointers!", long_topic, "Hash Map"],
+        "note": "kept",
+    }
+    idx.write_text(json.dumps(legacy), encoding="utf-8")
+    topic_index.record("heap", ["heapq"], language="python")
+    data = json.loads(idx.read_text(encoding="utf-8"))
+    assert data["by_type"] == legacy["by_type"]
+    assert data["all"] == legacy["all"]
+    assert data["note"] == "kept"
+    assert data["by_language"]["python"] == {"by_type": {"heap": ["heapq"]}, "all": ["heapq"]}
+    # reads are still sanitized
+    known = topic_index.known_topics(language="python")
+    assert "two-pointers" in known and "hash map" in known and "heapq" in known
+    assert all(len(t) <= 40 for t in known)
+
+
+def test_unkeyed_record_appends_to_raw_legacy_lists_without_rewriting_them(idx):
+    legacy = {"by_type": {"x": ["Hash Map"]}, "all": ["Hash Map", "BFS / DFS"]}
+    idx.write_text(json.dumps(legacy), encoding="utf-8")
+    topic_index.record("x", ["hash map", "trie"])  # "hash map" == legacy "Hash Map"
+    data = json.loads(idx.read_text(encoding="utf-8"))
+    assert data["by_type"]["x"] == ["Hash Map", "trie"]
+    assert data["all"] == ["Hash Map", "BFS / DFS", "trie"]
+
+
+def test_unreadable_or_malformed_legacy_index_is_backed_up_before_rewrite(idx):
+    idx.write_text("{not json", encoding="utf-8")
+    topic_index.record("x", ["a"], language="python")
+    backup = idx.with_name(idx.name + ".pre-v1.5.bak")
+    assert backup.read_text(encoding="utf-8") == "{not json"
+    assert topic_index.known_topics(language="python") == ["a"]
+    # one-time: a later lossy rewrite never overwrites the first backup
+    idx.write_text('{"all": "oops"}', encoding="utf-8")
+    topic_index.record("x", ["b"], language="python")
+    assert backup.read_text(encoding="utf-8") == "{not json"
+
+
 @pytest.mark.parametrize("by_language", [
     [], "python", {"python": []}, {"python": {"all": "x"}}, {"python": {"by_type": []}},
     {"": {"all": ["a"]}}, {"python": {"all": [None, 3, {"a": 1}]}},
