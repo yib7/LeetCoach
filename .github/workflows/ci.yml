@@ -32,5 +32,19 @@ jobs:
       - name: Lint (ruff)
         run: python -m ruff check .
 
+      - name: Windows launcher script syntax check (A1/C14)
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem -Path . -Recurse -Filter *.ps1 | ForEach-Object {
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$parseErrors)
+            if ($parseErrors.Count -gt 0) {
+              Write-Error "$($_.FullName): $($parseErrors -join '; ')"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
       - name: Test (pytest)
         run: python -m pytest -q
