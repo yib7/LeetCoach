@@ -640,7 +640,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.auth_status) -> F
                         code=code,
                         reasoning=reasoning,
                     )
-                    paths = [code_path, reasoning_path]
+                    # B24: code_path is None when no code block was extracted
+                    # (an empty code file would otherwise land in the library).
+                    paths = [p for p in (code_path, reasoning_path) if p]
                 elif mode == "learning":
                     # SP5: feed already-learned topics so Claude skips/cross-links
                     # covered tech, then record this run's topics afterward.
