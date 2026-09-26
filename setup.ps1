@@ -32,6 +32,31 @@ function Exit-OnFailure {
 # a stale "setup is fine" marker behind (B9).
 if (Test-Path $MarkerPath) { Remove-Item $MarkerPath -Force }
 
+# #10: if THIS .venv already has a working install (its own python can
+# actually `import flask`), just confirm it and write the marker - no `py`
+# launcher, no pip, no network needed. This is what makes re-running the
+# shortcut work OFFLINE, or on a machine where the `py` launcher isn't
+# installed at all, once .venv already has a working install from an earlier
+# successful setup (e.g. the marker was lost, or setup is simply being
+# re-run defensively). A broken/incomplete .venv (missing python, or import
+# fails) falls through to the full install flow below exactly as before.
+# Test-Path guards the call itself: with $ErrorActionPreference = "Stop",
+# invoking a path that doesn't exist at all is a TERMINATING error, not just
+# a nonzero exit code, and would abort the whole script instead of falling
+# through on a fresh machine with no .venv yet.
+if (Test-Path $PythonExe) {
+    & $PythonExe -c "import flask" *> $null
+    if ($LASTEXITCODE -eq 0) {
+        New-Item -ItemType Directory -Force -Path $VenvPath | Out-Null
+        Set-Content -Path $MarkerPath -Value (Get-Date -Format "o")
+        Write-Host "Existing .venv already has the dependencies installed." -ForegroundColor Green
+        Write-Host "Setup complete. To run LeetCoach:" -ForegroundColor Green
+        Write-Host "  .\.venv\Scripts\Activate.ps1"
+        Write-Host "  python app.py"
+        exit 0
+    }
+}
+
 if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
     Exit-OnFailure "The 'py' launcher was not found. Install Python 3.12+ from https://python.org and retry."
 }
@@ -57,9 +82,14 @@ if (-not (Test-Path $VenvPath)) {
 }
 
 Write-Host "Installing dependencies..."
+# #10: a failed pip SELF-upgrade is not fatal - warn and keep going with
+# whatever pip version the venv already has. Blocking all of setup on this
+# step (as before) needlessly failed offline/flaky-network runs that would
+# otherwise have succeeded fine with the venv's bundled pip; the actual
+# dependency install below is still a hard failure.
 & $PythonExe -m pip install --upgrade pip | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    Exit-OnFailure "Failed to upgrade pip (exit code $LASTEXITCODE)."
+    Write-Host "Warning: failed to upgrade pip (exit code $LASTEXITCODE); continuing with the existing pip." -ForegroundColor Yellow
 }
 
 & $PythonExe -m pip install -r $RequirementsPath
