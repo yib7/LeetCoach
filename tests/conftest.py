@@ -24,7 +24,10 @@ still can't touch the real study library. It also points
 it as the default for ``app.config["DOTENV_PATH"]`` (#7) — so EVERY
 ``create_app()`` call in the suite is redirected away from the real ``.env`` by
 default, not just the couple of tests that happen to override
-``app.config["DOTENV_PATH"]`` by hand. Tests that need a specific location call
+``app.config["DOTENV_PATH"]`` by hand. Finally (A7) it points the neutral
+``claude`` working directory at a tmp path and replaces the ``claude --help``
+flag probe with canned text, so no test ever spawns the real CLI or creates the
+real ``%LOCALAPPDATA%`` directory. Tests that need a specific location call
 ``monkeypatch.setenv(...)`` / set ``application.config[...]`` themselves
 afterward and win, since that happens later in the same fixture-teardown stack.
 """
@@ -33,6 +36,9 @@ from __future__ import annotations
 import os
 
 import pytest
+from _helpers import FAKE_CLAUDE_HELP
+
+import claude_cli
 
 # See module docstring: must run at import time, not inside a fixture.
 os.environ.setdefault("LEETCOACH_NO_DOTENV", "1")
@@ -53,4 +59,13 @@ def _isolate_leetcoach_env(tmp_path, monkeypatch):
     # #7: no test (whichever create_app() call it uses) can ever write the
     # real project `.env`, even if it never touches app.config itself.
     monkeypatch.setenv("LEETCOACH_DOTENV_PATH", str(tmp_path / ".env.leetcoach-test"))
+    # A7: the neutral directory `claude` runs in defaults to the real
+    # %LOCALAPPDATA%\LeetCoach\claude-cwd — keep every test out of it.
+    monkeypatch.setenv("LEETCOACH_CLAUDE_CWD", str(tmp_path / "claude-cwd"))
+    # A7: the optional-flag gate probes `claude --help`. No test may spawn the
+    # real CLI for that, so feed the probe canned help text and start each
+    # test with an empty probe cache.
+    monkeypatch.setattr(claude_cli, "_probe_help_text", lambda argv: FAKE_CLAUDE_HELP)
+    claude_cli.clear_flag_cache()
     yield
+    claude_cli.clear_flag_cache()
