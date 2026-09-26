@@ -553,8 +553,14 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.auth_status) -> F
             """
             out[0] = ""  # reset accumulator for this call
             full = []
+            # A7: study runs carry the tutor persona and KEEP their session
+            # (in the neutral cwd's project bucket) for a later --resume.
             try:
-                for delta in run_fn(prompt):
+                for delta in run_fn(
+                    prompt,
+                    system_prompt=prompts.TUTOR_SYSTEM_PROMPT,
+                    persist_session=True,
+                ):
                     if delta:
                         full.append(delta)
                         yield _sse_text(delta)
@@ -765,7 +771,14 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.auth_status) -> F
             problem=problem[:QUICK_ASK_PROBLEM_CONTEXT_CAP],
         )
         try:
-            answer = "".join(run_fn(prompt, model=config.quick_ask_model())).strip()
+            answer = "".join(
+                run_fn(
+                    prompt,
+                    model=config.quick_ask_model(),
+                    system_prompt=prompts.QUICK_ASK_SYSTEM_PROMPT,
+                    persist_session=False,  # A7: utility call, never resumed
+                )
+            ).strip()
         except Exception as exc:  # noqa: BLE001 - surface as a clean 502, log the rest
             app.logger.exception("quick ask failed")
             return jsonify({"error": f"Quick Ask failed: {exc}"}), 502

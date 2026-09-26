@@ -24,6 +24,12 @@ These knobs are the only machine-specific settings the app needs:
 - ``LEETCOACH_VERIFY_TIMEOUT`` — wall-clock cap in seconds for each Answer-mode
                               sample-verification subprocess (default ``10``); a
                               wedged solution is tree-killed after this long.
+- ``LEETCOACH_CLAUDE_CWD``  — neutral working directory every ``claude`` call runs
+                              in (A7), so the CLI never picks up this repo's
+                              ``CLAUDE.md``/settings and its saved sessions land
+                              in their own project bucket (default
+                              ``%LOCALAPPDATA%\\LeetCoach\\claude-cwd`` on Windows,
+                              ``~/.local/share/leetcoach/claude-cwd`` elsewhere).
 
 Reading env at *call time* (not import time) keeps tests able to monkeypatch the
 environment without re-importing the module.
@@ -187,6 +193,39 @@ def topic_index_path() -> Path:
     if override:
         return Path(override)
     return output_dir() / "topic_index.json"
+
+
+def default_claude_cwd(*, os_name=None, env=None, home=None) -> Path:
+    """The platform default for :func:`claude_cwd` (A7).
+
+    Windows: ``%LOCALAPPDATA%\\LeetCoach\\claude-cwd`` (falling back to
+    ``~/AppData/Local`` when the variable is missing); elsewhere
+    ``~/.local/share/leetcoach/claude-cwd``. The parameters exist only so tests
+    can exercise both branches on one machine.
+    """
+    os_name = os.name if os_name is None else os_name
+    env = os.environ if env is None else env
+    home = Path.home() if home is None else Path(home)
+    if os_name == "nt":
+        base = env.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        return Path(base) / "LeetCoach" / "claude-cwd"
+    return home / ".local" / "share" / "leetcoach" / "claude-cwd"
+
+
+def claude_cwd() -> Path:
+    """Neutral working directory for every ``claude`` subprocess (A7).
+
+    Running ``claude -p`` in the repo made it load this project's
+    ``CLAUDE.md``/``.claude`` settings and filed every run under the repo's
+    session history. A dedicated directory keeps the CLI's view of the world
+    empty and gives LeetCoach's persisted sessions (needed for ``--resume``)
+    their own project bucket. Override with ``LEETCOACH_CLAUDE_CWD``; the
+    directory is created on demand by ``claude_cli.ensure_claude_cwd``.
+    """
+    override = os.environ.get("LEETCOACH_CLAUDE_CWD")
+    if override:
+        return Path(override)
+    return default_claude_cwd()
 
 
 def _env_line_key(line: str) -> str | None:

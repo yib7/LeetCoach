@@ -24,11 +24,12 @@ KNOWN_SETTINGS = [
     "LEETCOACH_VERIFY_TIMEOUT",
     "LEETCOACH_NO_BROWSER",
     "LEETCOACH_NO_DOTENV",
+    "LEETCOACH_CLAUDE_CWD",
 ]
 
 # Settings whose default is computed relative to the app (or otherwise
 # footgun-y to set verbatim) and so must ship commented out.
-PATH_SETTINGS = {"LEETCOACH_OUTPUT_DIR", "LEETCOACH_TOPIC_INDEX"}
+PATH_SETTINGS = {"LEETCOACH_OUTPUT_DIR", "LEETCOACH_TOPIC_INDEX", "LEETCOACH_CLAUDE_CWD"}
 
 
 def _lines():

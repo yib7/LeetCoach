@@ -154,8 +154,8 @@ A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.
 
 ## Configuration
 
-All ten settings are environment variables, overridable in your shell or a `.env` file.
-All are optional. `.env.example` has the same list, ready to copy to `.env` (the two path
+All eleven settings are environment variables, overridable in your shell or a `.env` file.
+All are optional. `.env.example` has the same list, ready to copy to `.env` (the three path
 settings ship commented out there — see why in the table below).
 
 | Variable               | Default                        | What it does                                                        |
@@ -166,6 +166,7 @@ settings ship commented out there — see why in the table below).
 | `LEETCOACH_CLAUDE_BIN` | `claude`                       | Name or absolute path of the `claude` executable.                   |
 | `LEETCOACH_OUTPUT_DIR` | `output` next to the app       | Where the study library is written. Relative to the app's own directory unless you set this — a relative value here instead resolves against your current working directory, so it's commented out in `.env.example` by default. |
 | `LEETCOACH_TOPIC_INDEX`| `<output_dir>/topic_index.json`| Path to the persisted topic index JSON. Same relative-path caveat as above. |
+| `LEETCOACH_CLAUDE_CWD` | `%LOCALAPPDATA%\LeetCoach\claude-cwd` (Windows), `~/.local/share/leetcoach/claude-cwd` (elsewhere) | Neutral directory every `claude` call runs in, so the CLI never loads this repo's `CLAUDE.md`/settings and LeetCoach's saved sessions stay out of your own Claude Code history. Created on demand. |
 | `LEETCOACH_RUN_TIMEOUT`| `600`                          | Wall-clock cap in seconds for a single `claude` run.                |
 | `LEETCOACH_VERIFY_TIMEOUT`| `10`                        | Wall-clock cap in seconds for each Answer-mode sample verification. |
 | `LEETCOACH_NO_BROWSER`   | *(unset)*                      | Set to `1`/`true` to stop `python app.py` opening your browser on launch.            |

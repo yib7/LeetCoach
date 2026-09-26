@@ -29,7 +29,7 @@ def make_recording_runner(lines):
     """Return (runner, calls) where runner records argv + stdin and yields `lines`."""
     calls = []
 
-    def runner(argv, stdin_text):
+    def runner(argv, stdin_text, **kwargs):  # kwargs: cwd / handle (A7)
         calls.append({"argv": list(argv), "stdin": stdin_text})
         for line in lines:
             yield line
@@ -396,11 +396,11 @@ def test_run_full_chain_kills_subprocess_on_early_close():
         "sys.stdout.write('second\\n')\n"
     )
 
-    def real_argv_runner(argv, stdin_text):
+    def real_argv_runner(argv, stdin_text, **kwargs):
         # Ignore the real argv claude_cli.run() built (it targets `claude`);
         # substitute this python stand-in script instead, but otherwise go
         # through the exact same _real_runner code path.
-        return claude_cli._real_runner([sys.executable, "-c", script], stdin_text)
+        return claude_cli._real_runner([sys.executable, "-c", script], stdin_text, **kwargs)
 
     gen = claude_cli.run("hi", runner=real_argv_runner)
     first = next(gen)

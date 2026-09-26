@@ -22,11 +22,12 @@ dependency (pywin32/psutil) is pulled in.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 
 
-def kill_process_tree(proc: "subprocess.Popen[str]") -> bool:
+def kill_process_tree(proc: "subprocess.Popen[str]", *, group: bool = False) -> bool:
     """Best-effort kill of `proc` AND its descendants. Returns True if a
     tree-kill mechanism was invoked (not necessarily that it succeeded).
 
@@ -36,6 +37,12 @@ def kill_process_tree(proc: "subprocess.Popen[str]") -> bool:
     taskkill itself fails to launch. Callers should still ``wait()`` on the
     process afterwards to reap it (and ``kill()`` as a last resort if the
     wait times out).
+
+    ``group=True`` (C5, POSIX only) is for a child spawned with
+    ``start_new_session=True``: its pid is also its process-group id, so
+    ``killpg`` takes down every descendant still in that group — including
+    ones that outlived the direct child. Only pass it for a child you started
+    in its own session; otherwise the pid is not a group you own.
     """
     if sys.platform == "win32":
         try:
@@ -47,7 +54,16 @@ def kill_process_tree(proc: "subprocess.Popen[str]") -> bool:
             return True
         except OSError:
             pass  # taskkill missing/unusable — fall through to terminate()
-    proc.terminate()
+    elif group and hasattr(os, "killpg"):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            return True
+        except (OSError, AttributeError):
+            pass  # group already gone / not ours — fall through to terminate()
+    try:
+        proc.terminate()
+    except OSError:
+        pass  # already exited
     return False
 
 
@@ -124,6 +140,8 @@ if os.name == "nt":
         _k32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
         _k32.CloseHandle.restype = wintypes.BOOL
         _k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        _k32.TerminateJobObject.restype = wintypes.BOOL
+        _k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
 
         _job_api = _k32
         _ExtendedLimits = _ExtLimits
@@ -158,6 +176,28 @@ def create_job_with_caps(
     unexpected environments), which means "proceed without caps": a cap is
     defense-in-depth and must never break a verification run. Never raises.
     """
+    return _create_job(memory_bytes=memory_bytes, active_processes=active_processes)
+
+
+def create_kill_on_close_job():
+    """Windows only: a Job Object with ONLY ``KILL_ON_JOB_CLOSE`` — no memory
+    or process-count caps (A6).
+
+    For the ``claude`` CLI: it is trusted, needs far more than the sandbox's
+    512 MB, and spawns helpers, so caps would break it. What it does need is a
+    kill switch that reaches descendants even after the direct child exited
+    (``taskkill /T`` walks parent pids, so it cannot find a grandchild whose
+    parent is already gone — e.g. one still holding the stdout pipe open).
+    :func:`terminate_job` / :func:`close_job` provide that. Same lifecycle and
+    graceful-degradation contract as :func:`create_job_with_caps`: ``None`` on
+    POSIX or any API failure, never raises.
+    """
+    return _create_job(memory_bytes=None, active_processes=None)
+
+
+def _create_job(*, memory_bytes, active_processes):
+    """Shared Job Object factory: KILL_ON_JOB_CLOSE always, plus the memory /
+    process caps when given (``None`` = no such cap)."""
     if _job_api is None:
         return None
     try:
@@ -166,13 +206,14 @@ def create_job_with_caps(
             return None
         try:
             info = _ExtendedLimits()
-            info.BasicLimitInformation.LimitFlags = (
-                _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
-                | _JOB_OBJECT_LIMIT_PROCESS_MEMORY
-                | _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            )
-            info.BasicLimitInformation.ActiveProcessLimit = active_processes
-            info.ProcessMemoryLimit = memory_bytes
+            flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if active_processes is not None:
+                flags |= _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+                info.BasicLimitInformation.ActiveProcessLimit = active_processes
+            if memory_bytes is not None:
+                flags |= _JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                info.ProcessMemoryLimit = memory_bytes
+            info.BasicLimitInformation.LimitFlags = flags
             ok = _job_api.SetInformationJobObject(
                 job,
                 _JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -234,3 +275,16 @@ def close_job(job_handle) -> None:
         _job_api.CloseHandle(job_handle)
     except Exception:  # noqa: BLE001 - cleanup must never raise
         pass
+
+
+def terminate_job(job_handle) -> bool:
+    """Kill every process currently inside the job, without closing the
+    handle (``None`` is a no-op returning False). Used by a watchdog that must
+    stop the whole ``claude`` tree mid-run; the owner still calls
+    :func:`close_job` in its cleanup. Never raises."""
+    if not job_handle or _job_api is None:
+        return False
+    try:
+        return bool(_job_api.TerminateJobObject(job_handle, 1))
+    except Exception:  # noqa: BLE001 - a kill helper must never raise
+        return False
