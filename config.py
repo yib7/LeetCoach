@@ -47,11 +47,13 @@ DEFAULT_RUN_TIMEOUT = 600.0  # seconds; generous — Opus study material can be 
 DEFAULT_VERIFY_TIMEOUT = 10.0  # seconds; per sample-verification subprocess
 
 # Upper bound accepted for either timeout knob (B5): 24h is already an absurd
-# wait for a local tool, so anything past it is almost certainly a typo/bad
-# input, not a deliberate choice — falling back to the default is safer than
-# honouring it (and, critically, `inf` MUST be rejected here: an infinite
+# wait for a local tool. A value past it is CLAMPED to this ceiling (#6) rather
+# than silently discarded in favor of the (much shorter) default — a user who
+# deliberately asked for a long-running verify/run budget still gets the
+# longest sane wait, not a surprise 10s/600s instead. `inf`/NaN/non-positive
+# values are still rejected outright and fall back to the default: an infinite
 # verify timeout would defeat the whole point of the sandbox's containment
-# watchdog, hanging forever instead of tree-killing the child).
+# watchdog, hanging forever instead of tree-killing the child.
 MAX_TIMEOUT_SECONDS = 86400.0
 
 
@@ -110,21 +112,27 @@ def claude_bin() -> str:
 
 
 def _clamped_timeout(env_var: str, default: float) -> float:
-    """Shared parsing for both timeout knobs (B5): a float in
-    ``(0, MAX_TIMEOUT_SECONDS]``, else ``default``.
+    """Shared parsing for both timeout knobs (B5/#6): a float in
+    ``(0, MAX_TIMEOUT_SECONDS]``, clamping anything above the ceiling down to
+    it, else ``default``.
 
-    Rejects everything that could defeat a wall-clock containment watchdog: an
-    unparseable value, zero, negatives, ``NaN`` (``NaN > 0`` is ``False``,
-    catching it in the same comparison), ``inf``/``-inf`` (explicitly checked —
-    ``inf > 0`` is otherwise ``True``), and anything past the 24h ceiling.
+    Rejects (falls back to ``default``) everything that could defeat a
+    wall-clock containment watchdog: an unparseable value, zero, negatives,
+    ``NaN`` (``NaN > 0`` is ``False``, catching it in the same comparison), and
+    ``inf``/``-inf`` (explicitly checked — ``inf > 0`` is otherwise ``True``).
+    A finite value past the 24h ceiling is CLAMPED to the ceiling instead of
+    being discarded (#6) — a deliberately long timeout still gets the longest
+    sane wait rather than silently reverting to the (much shorter) default.
     """
     raw = os.environ.get(env_var, "")
     try:
         value = float(raw)
     except ValueError:
         return default
-    if not value > 0 or math.isinf(value) or value > MAX_TIMEOUT_SECONDS:
+    if not value > 0 or math.isinf(value):
         return default
+    if value > MAX_TIMEOUT_SECONDS:
+        return MAX_TIMEOUT_SECONDS
     return value
 
 
@@ -134,9 +142,10 @@ def run_timeout() -> float:
     ``claude_cli``'s watchdog tree-kills the subprocess after this long and the
     run fails with a clear "timed out" error, instead of a hung CLI (network
     stall, stuck auth prompt, wedged node) wedging the Flask worker forever.
-    Override with ``LEETCOACH_RUN_TIMEOUT``; invalid, non-positive, infinite, or
-    over-ceiling values fall back to the default (a broken knob must never
-    disable the watchdog or crash a run).
+    Override with ``LEETCOACH_RUN_TIMEOUT``; invalid, non-positive, or infinite
+    values fall back to the default (a broken knob must never disable the
+    watchdog or crash a run); an over-ceiling value is clamped to
+    :data:`MAX_TIMEOUT_SECONDS` instead of discarded.
     """
     return _clamped_timeout("LEETCOACH_RUN_TIMEOUT", DEFAULT_RUN_TIMEOUT)
 
@@ -147,8 +156,9 @@ def verify_timeout() -> float:
     The sandbox tree-kills a generated solution after this long so a wedged or
     infinite-looping answer can't hang a run (each parsed sample is bounded
     independently). Override with ``LEETCOACH_VERIFY_TIMEOUT``; invalid,
-    non-positive, infinite, or over-ceiling values fall back to the default (a
-    broken knob must never disable the containment timeout).
+    non-positive, or infinite values fall back to the default (a broken knob
+    must never disable the containment timeout); an over-ceiling value is
+    clamped to :data:`MAX_TIMEOUT_SECONDS` instead of discarded.
     """
     return _clamped_timeout("LEETCOACH_VERIFY_TIMEOUT", DEFAULT_VERIFY_TIMEOUT)
 
