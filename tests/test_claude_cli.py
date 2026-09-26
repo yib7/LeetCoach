@@ -479,6 +479,36 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
     assert str(FakeProc.pid) in cmd
 
 
+def test_kill_process_tree_taskkill_timeout_falls_back_to_terminate(monkeypatch):
+    """SP2 M6 review: `taskkill` was run with no timeout, so a hung/wedged
+    taskkill (rare, but observed on some Windows setups) could block the
+    caller forever. It must be bounded and, on a timeout, fall through to the
+    same terminate() backstop used when taskkill itself is unusable.
+    """
+    import subprocess
+
+    monkeypatch.setattr(proc_util.sys, "platform", "win32")
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs.get("timeout") == 10
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
+
+    monkeypatch.setattr(proc_util.subprocess, "run", fake_run)
+
+    terminated = {"called": False}
+
+    class FakeProc:
+        pid = 4242
+
+        def terminate(self):
+            terminated["called"] = True
+
+    invoked_tree_kill = claude_cli._kill_process_tree(FakeProc())
+
+    assert invoked_tree_kill is False
+    assert terminated["called"] is True
+
+
 def test_kill_process_tree_falls_back_to_terminate_on_non_windows(monkeypatch):
     monkeypatch.setattr(proc_util.sys, "platform", "linux")
     terminated = {"called": False}
