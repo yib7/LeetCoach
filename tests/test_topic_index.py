@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -101,6 +102,40 @@ def test_record_on_corrupt_file_recovers(idx_path):
     idx_path.write_text("garbage", encoding="utf-8")
     topic_index.record("dp", ["memoization"])  # starts from empty, then records
     assert "memoization" in topic_index.known_topics()
+
+
+def test_record_on_transient_read_error_skips_write_without_losing_data(idx_path, monkeypatch):
+    """SP2 M6 review: a corrupt/unreadable file is backed up once and then
+    replaced - correct for genuinely bad content. But an OSError reading the
+    file (e.g. a transient lock held by another process) is NOT corruption;
+    treating it the same way overwrote the whole index with an empty one
+    (losing everything already recorded) just because of a momentary lock.
+
+    record() must instead skip the write entirely on a read OSError and
+    leave the on-disk file completely untouched.
+    """
+    existing = {"by_type": {"dp": ["memoization"]}, "all": ["memoization"],
+                "by_language": {}}
+    topic_index._write_json(idx_path, existing)
+    original_bytes = idx_path.read_bytes()
+
+    real_read_text = Path.read_text
+
+    def flaky_read_text(self, *args, **kwargs):
+        if self == idx_path:
+            raise PermissionError("simulated transient lock")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    topic_index.record("graphs", ["bfs"])  # must not raise
+
+    monkeypatch.undo()  # restore real Path.read_text before reading back
+    assert idx_path.read_bytes() == original_bytes  # untouched, not overwritten
+    backup = idx_path.with_name(idx_path.name + topic_index.BACKUP_SUFFIX)
+    assert not backup.exists()  # no backup either - nothing was replaced
+    # the topic genuinely was not recorded (we could not safely merge)
+    assert "bfs" not in json.loads(idx_path.read_text(encoding="utf-8"))["all"]
 
 
 # --- concurrency: record() under many threads loses no topics ------------
