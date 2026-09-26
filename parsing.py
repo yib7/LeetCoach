@@ -49,16 +49,25 @@ _LANG_ALIASES = {
 
 # Substrings/patterns that mark a block as the REAL runnable answer rather
 # than an earlier teaching/illustrative snippet (A2) — a `__main__` driver, a
-# LeetCode-style `class Solution`, or any function definition.
+# LeetCode-style `class Solution`, or any function definition. These are
+# checked as separate, RANKED tiers (not lumped into one "has some marker"
+# test, #3): a block with a `__main__` driver outranks one that merely has a
+# `def` (e.g. a later "Common mistakes" section defining a buggy snippet),
+# which would otherwise win just for appearing further down the document.
 _MAIN_MARKER = "__main__"
 _CLASS_SOLUTION_MARKER = "class solution"
 _DEF_RE = re.compile(r"(?m)^\s*def\s")
 
 
-def _has_solution_marker(body: str) -> bool:
-    lowered = body.lower()
-    if _MAIN_MARKER in lowered or _CLASS_SOLUTION_MARKER in lowered:
-        return True
+def _has_main_guard(body: str) -> bool:
+    return _MAIN_MARKER in body.lower()
+
+
+def _has_class_solution(body: str) -> bool:
+    return _CLASS_SOLUTION_MARKER in body.lower()
+
+
+def _has_def(body: str) -> bool:
     return _DEF_RE.search(body) is not None
 
 
@@ -85,18 +94,22 @@ def _dedent(indent: str, body: str) -> str:
 def extract_code(markdown: str, language: str) -> str:
     """Return the primary fenced code block from ``markdown``.
 
-    Selection order (A2 — Guided/Answer docs often lead with a teaching
-    snippet before the real answer, so "first" is the wrong default):
+    Selection order (A2/#3 — Guided/Answer docs often lead with a teaching
+    snippet, and sometimes TRAIL with an illustrative "Common mistakes" `def`,
+    so neither "first" nor "any marker, last wins" is the right default):
 
     1. The (first) block tagged with the requested language AND the word
        ``solution`` in its fence line (the doc contract's
        ```` ```<lang> solution```` ), e.g. ```python solution```.
-    2. Otherwise the LAST language-tagged block that looks like a real answer
-       (contains ``__main__``, ``class Solution``, or a ``def``).
-    3. Otherwise the LAST block tagged with the requested language.
-    4. Otherwise the first fenced block of any language (Claude sometimes
+    2. Otherwise (Python only) the LAST language-tagged block containing a
+       ``__main__`` guard — the strongest "this is the real runnable answer"
+       signal, and one a later teaching snippet's bare `def` must not outrank.
+    3. Otherwise the LAST language-tagged block containing ``class Solution``.
+    4. Otherwise the LAST language-tagged block containing a ``def``.
+    5. Otherwise the LAST block tagged with the requested language.
+    6. Otherwise the first fenced block of any language (Claude sometimes
        omits or mis-tags the tag).
-    5. Otherwise the empty string — the caller treats the whole document as
+    7. Otherwise the empty string — the caller treats the whole document as
        reasoning when there is no extractable code.
 
     The returned code is stripped of a single trailing newline only; internal
@@ -117,7 +130,9 @@ def extract_code(markdown: str, language: str) -> str:
         for indent, tag, trailing, body in raw_blocks
     ]
 
-    wanted = _LANG_ALIASES.get((language or "").lower(), set())
+    normalized_lang = (language or "").lower()
+    wanted = _LANG_ALIASES.get(normalized_lang, set())
+    is_python = normalized_lang in _LANG_ALIASES["python"]
 
     if wanted:
         lang_blocks = [b for b in blocks if b[0].lower() in wanted]
@@ -126,14 +141,24 @@ def extract_code(markdown: str, language: str) -> str:
             for tag, trailing, body in lang_blocks:
                 if "solution" in trailing.lower():
                     return body
-            # 2) the LAST block that looks like a real runnable answer.
-            marker_blocks = [b for b in lang_blocks if _has_solution_marker(b[2])]
-            if marker_blocks:
-                return marker_blocks[-1][2]
-            # 3) no signal either way: the LAST language-tagged block (Guided
+            # 2) (Python only) the LAST block with a __main__ guard — outranks
+            #    a bare `def` even if that `def` block comes later in the doc.
+            if is_python:
+                main_blocks = [b for b in lang_blocks if _has_main_guard(b[2])]
+                if main_blocks:
+                    return main_blocks[-1][2]
+            # 3) the LAST block with a LeetCode-style `class Solution`.
+            class_blocks = [b for b in lang_blocks if _has_class_solution(b[2])]
+            if class_blocks:
+                return class_blocks[-1][2]
+            # 4) the LAST block with a plain `def`.
+            def_blocks = [b for b in lang_blocks if _has_def(b[2])]
+            if def_blocks:
+                return def_blocks[-1][2]
+            # 5) no signal either way: the LAST language-tagged block (Guided
             #    pipes restate -> teach -> reason -> answer, so the real
             #    solution is the one furthest down, not the first).
             return lang_blocks[-1][2]
 
-    # 4) no block matched the requested language at all: first fence of any kind.
+    # 6) no block matched the requested language at all: first fence of any kind.
     return blocks[0][2]
