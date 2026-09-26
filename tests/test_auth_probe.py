@@ -171,14 +171,110 @@ def test_stale_signed_in_result_is_served_while_refreshing_in_background(monkeyp
     assert len(calls) == 2  # refreshed off the request path
 
 
-def test_signed_out_result_is_rechecked_quickly(monkeypatch, clock):
+def _wait_for(pred, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not pred() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return pred()
+
+
+def test_signed_out_result_is_rechecked_quickly_in_the_background(monkeypatch, clock):
     # After `claude auth login` the user reloads: a negative result must not
-    # stick for a full minute.
-    calls = _counting_probe(monkeypatch, claude_cli.AuthStatus(True, False))
+    # stick for a full minute - but (SP2 M2) it is refreshed in the background
+    # like a positive one, never re-probed synchronously on GET /.
+    results = [claude_cli.AuthStatus(True, False), claude_cli.AuthStatus(True, True)]
+    calls = []
+
+    def fake_auth_status(**kwargs):
+        calls.append(1)
+        return results[min(len(calls), len(results)) - 1]
+
+    monkeypatch.setattr(claude_cli, "auth_status", fake_auth_status)
+    assert claude_cli.cached_auth_status() == claude_cli.AuthStatus(True, False)
+    clock.now += 1
     claude_cli.cached_auth_status()
+    assert len(calls) == 1  # fresh negative result is reused
     clock.now += claude_cli.AUTH_NEGATIVE_TTL + 0.5
+    # stale: served as-is while one background refresh runs
+    assert claude_cli.cached_auth_status() == claude_cli.AuthStatus(True, False)
+    assert _wait_for(lambda: len(calls) == 2)
+    assert _wait_for(lambda: claude_cli.cached_auth_status().logged_in)
+
+
+def _blocking_probe(monkeypatch, result):
+    """A probe that blocks until ``release`` is set; counts its calls."""
+    calls = []
+    release = threading.Event()
+
+    def fake_auth_status(**kwargs):
+        calls.append(1)
+        release.wait(10)
+        return result
+
+    monkeypatch.setattr(claude_cli, "auth_status", fake_auth_status)
+    return calls, release
+
+
+@pytest.mark.parametrize("logged_in", [True, False])
+def test_stale_result_never_probes_synchronously_and_refreshes_once(
+    monkeypatch, clock, logged_in
+):
+    status = claude_cli.AuthStatus(True, logged_in)
+    calls = _counting_probe(monkeypatch, status)
+    claude_cli.cached_auth_status()  # prime the cache
+    assert len(calls) == 1
+    calls, release = _blocking_probe(monkeypatch, status)
+    clock.now += claude_cli.AUTH_CACHE_TTL + 1
+    out = []
+
+    def page_load():
+        start = time.monotonic()
+        out.append((claude_cli.cached_auth_status(), time.monotonic() - start))
+
+    threads = [threading.Thread(target=page_load) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    try:
+        assert len(out) == 8
+        assert all(s == status and dt < 1.0 for s, dt in out), out  # no one blocked
+        assert _wait_for(lambda: len(calls) == 1)
+        time.sleep(0.1)
+        assert len(calls) == 1  # one in-flight refresh, not eight
+    finally:
+        release.set()
+
+
+def test_first_ever_concurrent_calls_share_one_probe(monkeypatch, clock):
+    calls, release = _blocking_probe(monkeypatch, claude_cli.AuthStatus(True, True))
+    out = []
+    threads = [
+        threading.Thread(target=lambda: out.append(claude_cli.cached_auth_status()))
+        for _ in range(6)
+    ]
+    for t in threads:
+        t.start()
+    assert _wait_for(lambda: len(calls) == 1)
+    time.sleep(0.1)
+    release.set()
+    for t in threads:
+        t.join(5)
+    assert len(calls) == 1
+    assert out == [claude_cli.AuthStatus(True, True)] * 6
+
+
+def test_refresh_finishing_after_clear_does_not_repopulate_the_cache(monkeypatch, clock):
+    calls = _counting_probe(monkeypatch, claude_cli.AuthStatus(True, True))
     claude_cli.cached_auth_status()
-    assert len(calls) == 2
+    calls, release = _blocking_probe(monkeypatch, claude_cli.AuthStatus(True, False))
+    clock.now += claude_cli.AUTH_CACHE_TTL + 1
+    claude_cli.cached_auth_status()  # starts a background refresh
+    assert _wait_for(lambda: len(calls) == 1)
+    claude_cli.clear_auth_cache()
+    release.set()
+    time.sleep(0.2)
+    assert claude_cli._auth_cache == {}
 
 
 def test_index_uses_the_cached_probe_by_default(monkeypatch, clock):
