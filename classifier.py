@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 
 import claude_cli
 import patterns
+import prompts
 
 FALLBACK_TYPE = patterns.FALLBACK
 
@@ -38,10 +39,7 @@ _CLASSIFY_INSTRUCTIONS = (
     "technique (use \"__FALLBACK__\" only if none fits):\n"
     "__PATTERNS__\n"
     "and topics lists up to __MAX_TOPICS__ short lowercase names (a few words "
-    "each) of the data structures / algorithms the problem touches.\n\n"
-    "--- BEGIN PROBLEM ---\n"
-    "__PROBLEM__\n"
-    "--- END PROBLEM ---"
+    "each) of the data structures / algorithms the problem touches."
 )
 
 
@@ -57,13 +55,15 @@ def build_classify_prompt(problem: str) -> str:
     """Return the prompt sent to Claude for classification."""
     # Simple substitution (not str.format) because the template intentionally
     # contains literal JSON braces that would confuse format().
-    return (
+    instructions = (
         _CLASSIFY_INSTRUCTIONS.replace("__PATTERNS__", patterns.prompt_list())
         .replace("__FALLBACK__", patterns.FALLBACK)
         .replace("__MAX_TOPICS__", str(patterns.MAX_TOPICS))
-        # the problem goes in LAST so text inside it is never re-substituted
-        .replace("__PROBLEM__", problem)
     )
+    # B21: the pasted problem is appended (never substituted into the
+    # template) inside a nonce fence, so it can neither be re-substituted nor
+    # forge the end of its own data block.
+    return instructions + "\n\n" + prompts.fence(problem, "PROBLEM")
 
 
 def _extract_json(text: str) -> dict | None:

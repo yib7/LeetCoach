@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 import pytest
 from _helpers import CLASSIFY_JSON
@@ -579,10 +580,13 @@ def test_ask_problem_lands_inside_context_fence(client):
     )
     assert resp.status_code == 200
     prompt, _ = QA_CALLS[0]
-    open_fence = "--- BEGIN PROBLEM CONTEXT (do not solve) ---"
-    close_fence = "--- END PROBLEM CONTEXT ---"
-    assert open_fence in prompt and close_fence in prompt
-    inside = prompt.split(open_fence, 1)[1].split(close_fence, 1)[0]
+    # B21: the fence lines carry a per-prompt nonce.
+    opened = re.search(
+        r"^--- BEGIN PROBLEM CONTEXT \(do not solve\) ([0-9a-f]+) ---$", prompt, re.MULTILINE
+    )
+    assert opened
+    close_fence = f"\n--- END PROBLEM CONTEXT {opened.group(1)} ---"
+    inside = prompt[opened.end():prompt.index(close_fence, opened.end())]
     assert "Two Sum: find indices." in inside
 
 
