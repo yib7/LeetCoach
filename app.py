@@ -620,6 +620,21 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             for call in calls:
                 _cancel_call(call)
 
+        def _learned_topics() -> list:
+            """Topics already studied in THIS language (plus legacy,
+            language-agnostic ones), capped to the most recent
+            LEARNED_TOPICS_CAP so the prompt stays bounded (audit6 P2-12)."""
+            try:
+                return topic_index.known_topics(limit=LEARNED_TOPICS_CAP, language=language)
+            except Exception:  # noqa: BLE001 - index is best-effort
+                return []
+
+        def _record_topics(cls) -> None:
+            try:
+                topic_index.record(cls.problem_type, cls.topics, language=language)
+            except Exception:  # noqa: BLE001 - recording is best-effort
+                app.logger.exception("could not record topics")
+
         def event_stream():
             try:
                 # 1) classify on a background thread (audit6 P2-4). The short
@@ -712,10 +727,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     # covered tech, then record this run's topics afterward.
                     # Capped to the most recent LEARNED_TOPICS_CAP so the
                     # prompt stays bounded as the index grows (audit6 P2-12).
-                    try:
-                        learned = topic_index.known_topics(limit=LEARNED_TOPICS_CAP)
-                    except Exception:  # noqa: BLE001 - index is best-effort
-                        learned = []
+                    learned = _learned_topics()
                     prompt = prompts.build_learning(
                         problem,
                         language=language,
@@ -724,12 +736,17 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     yield from _stream_and_accumulate(prompt)
                     cls = _classification()  # join before the save needs its result
                     paths = [storage.save_learning(problem, cls.problem_type, out[0])]
-                    try:
-                        topic_index.record(cls.problem_type, cls.topics)
-                    except Exception:  # noqa: BLE001 - recording is best-effort
-                        pass
+                    _record_topics(cls)
                 else:  # mode == "guided" (validation guarantees a valid tier)
-                    prompt = prompts.build_guided(problem, tier=tier, language=language)
+                    # B22: Guided teaches the stack too - skip what is known,
+                    # and remember what this run covered.
+                    learned = _learned_topics()
+                    prompt = prompts.build_guided(
+                        problem,
+                        tier=tier,
+                        language=language,
+                        already_learned_topics=learned or None,
+                    )
                     yield from _stream_and_accumulate(prompt)
                     body = out[0]
 
@@ -746,6 +763,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     )
                     cls = _classification()  # join before the save needs its result
                     paths = [storage.save_guided(problem, cls.problem_type, saved)]
+                    _record_topics(cls)
 
                 # A new artifact just landed under output/ — drop the library
                 # cache so the next /library (the frontend refreshes right after

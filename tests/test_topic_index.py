@@ -74,23 +74,27 @@ def test_record_persists_to_disk(idx_path):
 
 # --- robustness: missing / corrupt file ----------------------------------
 
+# B22: the index also carries a per-language section.
+EMPTY = {"by_type": {}, "all": [], "by_language": {}}
+
+
 def test_missing_file_loads_empty(idx_path):
     assert not idx_path.exists()
     data = topic_index.load()
-    assert data == {"by_type": {}, "all": []}
+    assert data == EMPTY
     assert topic_index.known_topics() == []
 
 
 def test_corrupt_file_loads_empty_without_crashing(idx_path):
     idx_path.write_text("{not valid json at all ::::", encoding="utf-8")
     data = topic_index.load()  # must not raise
-    assert data == {"by_type": {}, "all": []}
+    assert data == EMPTY
 
 
 def test_wrong_shape_file_loads_empty(idx_path):
     # A JSON array (not an object) is the wrong shape -> empty, no crash.
     idx_path.write_text("[1, 2, 3]", encoding="utf-8")
-    assert topic_index.load() == {"by_type": {}, "all": []}
+    assert topic_index.load() == EMPTY
 
 
 def test_record_on_corrupt_file_recovers(idx_path):
@@ -194,8 +198,9 @@ def test_learning_route_passes_known_topics_to_prompt(tmp_path, monkeypatch):
     assert captured.get("topics") is not None
     assert "sliding_window" in captured["topics"]
 
-    # (b) the classifier's topic was recorded back into the index
-    known = topic_index.known_topics()
+    # (b) the classifier's topic was recorded back into the index (B22: under
+    # the run's language; the seeded legacy entry is language-agnostic)
+    known = topic_index.known_topics(language="python")
     assert "binary_search" in known
     # the pre-existing topic is still there too
     assert "sliding_window" in known

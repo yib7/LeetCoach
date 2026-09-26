@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import secrets
 
+import patterns
+
 # --- personas (A7) -------------------------------------------------------
 #
 # Passed as `claude --system-prompt`, replacing Claude Code's agent system
@@ -183,7 +185,9 @@ def _teach_fragment(language: str, already_learned_topics=None) -> str:
     """The 'teach the tech stack' block shared by Learning and Guided."""
     lang_name = _LANG_NAME[language]
     stdlib = _LANG_STDLIB[language]
-    topics = list(already_learned_topics or [])
+    # B21: sanitized again here (defense in depth) - these come from the topic
+    # index, which may hold anything a legacy version recorded.
+    topics = patterns.sanitize_topics(list(already_learned_topics or []), limit=None)
     if topics:
         skip = (
             "The learner has ALREADY studied these topics: "
@@ -310,11 +314,14 @@ def build_answer(problem: str, *, tier: str, language: str) -> str:
     )
 
 
-def build_guided(problem: str, *, tier: str, language: str) -> str:
+def build_guided(
+    problem: str, *, tier: str, language: str, already_learned_topics=None
+) -> str:
     """Build the Guided-Learning prompt for ``tier`` x ``language``.
 
     One piped document: restate -> teach (Learning fragment) -> reason -> answer
     (Answer fragment). Inherits the Big-O requirement from the Answer fragment.
+    B22: like Learning, it is told which topics the learner already knows.
     """
     _check_tier(tier)
     _check_language(language)
@@ -324,7 +331,7 @@ def build_guided(problem: str, *, tier: str, language: str) -> str:
             _problem_block(problem),
             "Work through this as ONE flowing document with these stages:",
             "1) Restate the problem in your own words so the learner is oriented.",
-            "2) " + _teach_fragment(language),
+            "2) " + _teach_fragment(language, already_learned_topics),
             "3) Reason step-by-step toward a solution.",
             "4) " + _answer_fragment(tier, language, with_tradeoff=False),
         ]
