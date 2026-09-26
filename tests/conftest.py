@@ -45,6 +45,7 @@ import claude_cli
 os.environ.setdefault("LEETCOACH_NO_DOTENV", "1")
 
 _LEETCOACH_PREFIX = "LEETCOACH_"
+NONEXISTENT_CLAUDE_BIN = "leetcoach-test-no-such-claude-binary-7f3a"
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +64,11 @@ def _isolate_leetcoach_env(tmp_path, monkeypatch):
     # A7: the neutral directory `claude` runs in defaults to the real
     # %LOCALAPPDATA%\LeetCoach\claude-cwd — keep every test out of it.
     monkeypatch.setenv("LEETCOACH_CLAUDE_CWD", str(tmp_path / "claude-cwd"))
+    # SP2 M6: fail closed. Any spawn that falls through to the default binary
+    # (a runner/probe a test forgot to fake) finds nothing on PATH and errors,
+    # instead of reaching the real `claude` CLI and spending subscription
+    # usage. Tests that need a resolvable name set their own.
+    monkeypatch.setenv("LEETCOACH_CLAUDE_BIN", NONEXISTENT_CLAUDE_BIN)
     # A7: the optional-flag gate probes `claude --help`. No test may spawn the
     # real CLI for that, so feed the probe canned help text and start each
     # test with an empty probe cache.
