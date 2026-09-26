@@ -60,9 +60,14 @@ exit /b 0
 # so it never has to literally be a valid Win32 .exe): a plain .cmd is fine.
 #   -m pip install --upgrade pip   -> exit 1 if PIP_UPGRADE_FAIL=1, else 0
 #   -m pip install -r <req file>   -> exit 1 if PIP_INSTALL_FAIL=1, else 0
-# Flat/goto-based for the same reason as the `py` stub above.
+# Flat/goto-based for the same reason as the `py` stub above. Matches on the
+# LITERAL "--upgrade" flag (not a bare "upgrade" substring): the requirements
+# file path is under pytest's own tmp_path, which is named after the TEST
+# FUNCTION -- a test named e.g. "..._pip_upgrade_failure_..." would put the
+# substring "upgrade" in that path too, and a bare-substring match would
+# misroute the (unrelated) `-r <path>` install call to the :upgrade branch.
 _STUB_PYTHON_CMD = r"""@echo off
-echo %* | findstr /I "upgrade" >nul
+echo %* | findstr /I /C:"--upgrade" >nul
 if not errorlevel 1 goto :upgrade
 echo %* | findstr /I "install" >nul
 if not errorlevel 1 goto :install
@@ -144,11 +149,17 @@ def test_venv_creation_failure_aborts_with_no_marker(tmp_path):
     assert not (stage / ".venv" / ".setup-ok").exists()
 
 
-def test_pip_upgrade_failure_aborts_with_no_marker(tmp_path):
+def test_pip_upgrade_failure_is_non_fatal_and_setup_still_succeeds(tmp_path):
+    """#10: a failed pip SELF-upgrade must not abort setup - only warn and
+    keep going with the existing pip. Blocking all of setup on this step (the
+    old behavior) needlessly failed offline/flaky-network runs that would
+    otherwise succeed fine with the venv's own bundled pip; only the actual
+    dependency install (exercised in the next test) remains a hard failure."""
     stage, result = _run_setup(tmp_path, extra_env={"PIP_UPGRADE_FAIL": "1"})
-    assert result.returncode != 0
+    assert result.returncode == 0, result.stdout + result.stderr
     assert "pip" in result.stdout.lower()
-    assert not (stage / ".venv" / ".setup-ok").exists()
+    assert "warning" in result.stdout.lower()
+    assert (stage / ".venv" / ".setup-ok").exists()
 
 
 def test_pip_install_failure_aborts_with_no_marker(tmp_path):
@@ -173,6 +184,48 @@ def test_stale_marker_from_a_prior_run_is_removed_on_failure(tmp_path):
     # this reruns against the SAME staged setup.ps1/.venv from the first call
     assert result2.returncode != 0
     assert not marker.exists()
+
+
+def test_existing_working_venv_skips_full_setup_without_py_launcher(tmp_path):
+    """#10: if .venv's own python can already `import flask`, setup must just
+    confirm it and write the marker - no `py` launcher, no pip, no network
+    needed at all. This is what makes re-running the launcher work OFFLINE,
+    or on a machine where the `py` launcher was never installed, once .venv
+    already has a working install (e.g. the marker was lost some other way).
+
+    PATH is restricted to just System32 + the PowerShell home dir (no
+    C:\\Windows root, where the real `py` launcher lives on a machine that has
+    it - see the repo's own `py.exe`) so this genuinely proves `py` is never
+    invoked, not merely that it doesn't happen to be needed."""
+    stage = _stage(tmp_path)
+    (stage / ".venv").mkdir()  # a real pre-existing venv directory
+    # A pre-existing ".venv" whose "python" is a stub that succeeds `-c
+    # "import flask"` (LEETCOACH_SETUP_PYTHON_EXE stands in for the real
+    # `.venv\Scripts\python.exe` the same way the other tests use it).
+    python_stub = _write_stub(
+        stage, "existing_venv_python.cmd", "@echo off\r\nexit /b 0\r\n"
+    )
+
+    ps_home = r"C:\Windows\System32\WindowsPowerShell\v1.0"
+    env = dict(os.environ)
+    env["PATH"] = r"C:\Windows\System32;" + ps_home
+    env["LEETCOACH_SETUP_PYTHON_EXE"] = str(python_stub)
+
+    result = subprocess.run(
+        [
+            str(Path(ps_home) / "powershell.exe"), "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", str(stage / "setup.ps1"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+        cwd=str(stage),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (stage / ".venv" / ".setup-ok").exists()
+    # Never even attempted to create a NEW venv (would show this message).
+    assert "creating virtual environment" not in result.stdout.lower()
 
 
 def test_setup_is_dollar_psscriptroot_relative_not_cwd_relative(tmp_path):
