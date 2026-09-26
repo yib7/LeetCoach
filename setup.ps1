@@ -1,15 +1,76 @@
-# One-command setup for LeetCoach on Windows.  Run:  .\setup.ps1
+# One-command setup for LeetCoach on Windows.  Run:
+#   powershell -ExecutionPolicy Bypass -File .\setup.ps1
 # Creates a local .venv and installs the runtime dependencies.
 $ErrorActionPreference = "Stop"
 
-if (-not (Test-Path ".venv")) {
+# Resolve every path relative to THIS SCRIPT's own directory, not the caller's
+# current working directory (B9) - so `setup.ps1` behaves the same whether
+# it's run as `.\setup.ps1`, via a full path, or from LeetCoach.cmd.
+Set-Location -Path $PSScriptRoot
+
+$VenvPath = Join-Path $PSScriptRoot ".venv"
+$MarkerPath = Join-Path $VenvPath ".setup-ok"
+$RequirementsPath = Join-Path $PSScriptRoot "requirements.txt"
+
+# Test seam only: lets tests point pip installs at a fake stub instead of a
+# real interpreter, without a real `.venv` ever being created. Unset (the
+# normal case), this is exactly `.venv\Scripts\python.exe`.
+$PythonExe = $env:LEETCOACH_SETUP_PYTHON_EXE
+if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+    $PythonExe = Join-Path $VenvPath "Scripts\python.exe"
+}
+
+function Exit-OnFailure {
+    param([string]$Message)
+    Write-Host ""
+    Write-Host $Message -ForegroundColor Red
+    exit 1
+}
+
+# A marker from a PREVIOUS successful run must not survive a failed run that
+# reuses the same .venv - remove it up front so a crash partway never leaves
+# a stale "setup is fine" marker behind (B9).
+if (Test-Path $MarkerPath) { Remove-Item $MarkerPath -Force }
+
+if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
+    Exit-OnFailure "The 'py' launcher was not found. Install Python 3.12+ from https://python.org and retry."
+}
+
+# Python >= 3.12 check (B9): LeetCoach's code relies on 3.12+ stdlib behavior.
+$versionText = & py -3 -c "import sys; print(str(sys.version_info[0]) + '.' + str(sys.version_info[1]))" 2>$null
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($versionText)) {
+    Exit-OnFailure "Could not determine the Python version from 'py -3'. Install Python 3.12+ and retry."
+}
+$versionParts = $versionText.Trim() -split '\.'
+$pyMajor = [int]$versionParts[0]
+$pyMinor = [int]$versionParts[1]
+if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 12)) {
+    Exit-OnFailure "Python $pyMajor.$pyMinor found via 'py -3', but LeetCoach needs Python 3.12 or newer."
+}
+
+if (-not (Test-Path $VenvPath)) {
     Write-Host "Creating virtual environment (.venv)..."
-    py -m venv .venv
+    py -3 -m venv $VenvPath
+    if ($LASTEXITCODE -ne 0) {
+        Exit-OnFailure "Failed to create the virtual environment ('py -3 -m venv' exited $LASTEXITCODE)."
+    }
 }
 
 Write-Host "Installing dependencies..."
-& ".\.venv\Scripts\python.exe" -m pip install --upgrade pip | Out-Null
-& ".\.venv\Scripts\python.exe" -m pip install -r requirements.txt
+& $PythonExe -m pip install --upgrade pip | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Exit-OnFailure "Failed to upgrade pip (exit code $LASTEXITCODE)."
+}
+
+& $PythonExe -m pip install -r $RequirementsPath
+if ($LASTEXITCODE -ne 0) {
+    Exit-OnFailure "Failed to install dependencies (exit code $LASTEXITCODE)."
+}
+
+# Written only once every step above has actually succeeded (B9).
+# LeetCoach.cmd checks for THIS marker, not just .venv's existence, before
+# deciding setup doesn't need to run again.
+Set-Content -Path $MarkerPath -Value (Get-Date -Format "o")
 
 Write-Host ""
 Write-Host "Setup complete. To run LeetCoach:" -ForegroundColor Green
