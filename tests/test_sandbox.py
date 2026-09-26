@@ -256,7 +256,11 @@ def test_timeout_kills_grandchildren_on_windows(tmp_path):
         "time.sleep(60)\n"
     )
     start = time.monotonic()
-    r = sandbox.verify_python(code, str(pidfile) + "\n", "whatever", timeout=2)
+    # audit_hook=False: this tests the tree-kill layer, so the grandchild must
+    # be allowed to spawn (the C6 hook would otherwise refuse it up front).
+    r = sandbox.verify_python(
+        code, str(pidfile) + "\n", "whatever", timeout=2, audit_hook=False
+    )
     elapsed = time.monotonic() - start
     assert elapsed < 10, (
         f"took {elapsed:.1f}s -- verify_python blocked on the grandchild's pipe"
@@ -368,7 +372,9 @@ def test_fork_bomb_is_stopped_by_active_process_cap_on_windows():
         "print('SPAWNED-ALL')\n"
     )
     start = time.monotonic()
-    r = sandbox.verify_python(bomb, "", "SPAWNED-ALL", timeout=30)
+    # audit_hook=False: exercise the job's process cap itself, not the C6
+    # hook (which would refuse the very first spawn).
+    r = sandbox.verify_python(bomb, "", "SPAWNED-ALL", timeout=30, audit_hook=False)
     elapsed = time.monotonic() - start
     assert elapsed < 25, f"took {elapsed:.1f}s -- process cap did not stop the bomb"
     # The bomb was contained: it never spawned all 32 and printed the marker, so

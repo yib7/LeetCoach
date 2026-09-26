@@ -16,6 +16,10 @@ analysis code (``statlee/sandbox.py``):
   the venv launcher stub). It blocks on a one-byte handshake that the parent
   sends only after the job is assigned, so no untrusted line can run outside
   the caps, however long a GIL-starved parent takes to assign it;
+* an **audit hook** installed by that bootstrap (C6) refuses writes outside the
+  run dir, reads of known secret paths (:func:`_secret_paths`), sockets,
+  process creation and ctypes loading — defence in depth, NOT a security
+  boundary (SECURITY.md says so);
 * ``subprocess.Popen`` with both output pipes drained on capped reader threads
   (never more than ``_OUTPUT_LIMIT`` retained — a runaway print loop gets the
   child killed, not hundreds of MB buffered) and a **whole-tree kill** on
@@ -83,6 +87,44 @@ _BOOTSTRAP_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "sandbox_bootstrap.py"
 )
 _GO = b""
+
+_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _secret_paths() -> list:
+    """Paths the C6 audit hook refuses to open or list (defence in depth).
+
+    Deliberately short: the Claude Code login/config (``~/.claude``,
+    ``~/.claude.json``, ``$CLAUDE_CONFIG_DIR``), this repo's ``.env`` (plus the
+    one ``LEETCOACH_DOTENV_PATH`` points at), SSH / cloud / git / GitHub CLI
+    credentials, and the Windows credential stores. Only paths are computed
+    here — nothing is ever opened.
+    """
+    home = os.path.expanduser("~")
+    paths = [
+        os.path.join(home, ".claude"),
+        os.path.join(home, ".claude.json"),
+        os.path.join(home, ".ssh"),
+        os.path.join(home, ".aws"),
+        os.path.join(home, ".git-credentials"),
+        os.path.join(home, ".netrc"),
+        os.path.join(home, ".config", "gh"),
+        os.path.join(_REPO_DIR, ".env"),
+    ]
+    for var in ("CLAUDE_CONFIG_DIR", "LEETCOACH_DOTENV_PATH"):
+        if os.environ.get(var):
+            paths.append(os.environ[var])
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        paths += [
+            os.path.join(appdata, "Microsoft", "Credentials"),
+            os.path.join(appdata, "Microsoft", "Protect"),
+            os.path.join(appdata, "GitHub CLI"),
+        ]
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        paths.append(os.path.join(localappdata, "Microsoft", "Credentials"))
+    return paths
 
 
 def _child_python() -> str:
@@ -421,6 +463,7 @@ def verify_python(
     *,
     timeout: float = 10.0,
     problem_text: str = "",
+    audit_hook: bool = True,
 ) -> VerifyResult:
     """Run ``code`` through the trusted bootstrap (A5; see
     :func:`_child_python`), feeding ``stdin_text`` on stdin,
@@ -439,6 +482,11 @@ def verify_python(
     the child also runs inside a Job Object capping memory and process count
     (best effort — a job API failure degrades to an uncapped run, never an
     error); POSIX gets the equivalent rlimits via ``preexec_fn``.
+
+    ``audit_hook=False`` skips the C6 audit hook. It exists ONLY so tests can
+    exercise the other containment layers (job caps, tree kill, grandchild
+    pipe capture) by spawning a grandchild on purpose; production callers
+    never pass it.
     """
     run_dir = tempfile.mkdtemp(prefix="leetcoach_run_")
     job_handle = None
@@ -476,7 +524,11 @@ def verify_python(
         argv = [
             _child_python(), "-I", "-X", "utf8", "-B",
             _BOOTSTRAP_PATH, script_path, run_dir,
-            json.dumps({"run_dir": run_dir}),
+            json.dumps({
+                "run_dir": run_dir,
+                "audit": bool(audit_hook),
+                "secret_paths": _secret_paths(),
+            }),
         ]
         try:
             proc = subprocess.Popen(
