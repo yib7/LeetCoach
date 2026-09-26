@@ -33,7 +33,11 @@ jobs:
         run: python -m ruff check .
 
       - name: Windows launcher script syntax check (A1/C14)
-        shell: pwsh
+        # Windows PowerShell 5.1, not pwsh (PowerShell 7) — the launcher
+        # scripts themselves target 5.1, and a 5.1-only parse bug (like the
+        # em-dash encoding issue A1 fixed) would NOT be caught by pwsh, which
+        # decodes source files differently (#5).
+        shell: powershell
         run: |
           $failed = $false
           Get-ChildItem -Path . -Recurse -Filter *.ps1 | ForEach-Object {
