@@ -102,6 +102,7 @@ present, is fenced as context only to power that guardrail.
 | `prompts.py` | Prompt templates per mode x tier x language, with the always-on Big-O instruction. |
 | `parsing.py` | Pulls the runnable code block out of Claude's markdown answer. Flask-free so the sandbox can import it. |
 | `sandbox.py` | Best-effort sample-I/O verification: runs the generated Python against the problem's examples in a throwaway, secret-free directory with a timeout, capped output capture, and resource limits (a Windows Job Object caps memory and process count; POSIX rlimits elsewhere). |
+| `sandbox_bootstrap.py` | Trusted, stdlib-only first stage of the sandbox child. It waits for a one-byte go signal that the parent sends only after the Job Object is assigned, then runs the solution with `runpy`. Runs under the real interpreter with `-I`. |
 | `proc_util.py` | Windows process containment shared by `sandbox.py` and `claude_cli.py`: Job Object creation (memory / process-count / kill-on-close caps) and whole-tree kill. No-ops cleanly on POSIX. |
 | `storage.py` | Writes outputs under `output/`. The `slug()` function is the single containment chokepoint that keeps every write inside the output tree. |
 | `topic_index.py` | Records what Learning has covered and feeds it back so later runs skip and cross-link known topics. |

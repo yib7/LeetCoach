@@ -8,10 +8,14 @@ analysis code (``statlee/sandbox.py``):
   key or any other app secret — only the bare minimum Windows/CPython needs;
 * POSIX ``resource`` rlimits where available; on Windows a **Job Object**
   (``proc_util.create_job_with_caps`` created+configured *before* the spawn,
-  ``assign_to_job`` — one syscall — right after) caps per-process memory
-  (512 MB, parity with ``RLIMIT_AS``) and active process count (16), with
-  KILL_ON_JOB_CLOSE so closing the job handle in the ``finally`` nukes any
-  straggler;
+  ``assign_to_job`` right after) caps per-process memory (512 MB, parity with
+  ``RLIMIT_AS``) and active process count (16), with KILL_ON_JOB_CLOSE so
+  closing the job handle in the ``finally`` nukes any straggler;
+* a **trusted bootstrap** (``sandbox_bootstrap.py``, SP3 A5) is what the child
+  actually runs, under the REAL interpreter (``sys._base_executable -I``, never
+  the venv launcher stub). It blocks on a one-byte handshake that the parent
+  sends only after the job is assigned, so no untrusted line can run outside
+  the caps, however long a GIL-starved parent takes to assign it;
 * ``subprocess.Popen`` with both output pipes drained on capped reader threads
   (never more than ``_OUTPUT_LIMIT`` retained — a runaway print loop gets the
   child killed, not hundreds of MB buffered) and a **whole-tree kill** on
@@ -20,8 +24,8 @@ analysis code (``statlee/sandbox.py``):
 
 The public surface:
 
-* :func:`verify_python` — write Python to the throwaway dir, run it under
-  ``sys.executable`` feeding ``stdin_text`` on stdin, diff stdout vs expected.
+* :func:`verify_python` — write Python to the throwaway dir, run it via the
+  bootstrap feeding ``stdin_text`` on stdin, diff stdout vs expected.
 * :func:`parse_samples` — pull ``Input:`` / ``Output:`` example pairs out of a
   pasted LeetCode problem (best effort; ``[]`` when none found).
 * :func:`verify_answer` — orchestrator. Python is first-class (parse samples ->
@@ -40,6 +44,7 @@ Statuses (see :class:`VerifyResult`):
 from __future__ import annotations
 
 import ast
+import json
 import math
 import os
 import re
@@ -69,6 +74,32 @@ _MEM_LIMIT_BYTES = 512 * 1024 * 1024
 # solution needs 1 process (maybe a few for multiprocessing), so 16 is ample
 # headroom and stops a fork bomb almost immediately.
 _JOB_PROCESS_CAP = 16
+
+# A5: the trusted bootstrap the child runs first (see sandbox_bootstrap.py). It
+# blocks on a one-byte handshake until the parent has assigned the job object,
+# then runs the solution. The go byte is sent as the first byte of the child's
+# stdin, immediately followed by the sample input.
+_BOOTSTRAP_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "sandbox_bootstrap.py"
+)
+_GO = b""
+
+
+def _child_python() -> str:
+    """The interpreter the untrusted child runs under (A5).
+
+    ``sys._base_executable`` — the REAL interpreter — rather than
+    ``sys.executable``: inside a Windows venv the latter is a launcher stub
+    that re-spawns the real ``python.exe`` as its own child, and that
+    grandchild can be created before the parent assigns the stub to the job
+    object, i.e. entirely outside the memory / process caps. Falls back to
+    ``sys.executable`` when there is no distinct base (not a venv, or an
+    embedded interpreter without the attribute / file).
+    """
+    base = getattr(sys, "_base_executable", None)
+    if base and os.path.isfile(base):
+        return base
+    return sys.executable
 
 
 @dataclass
@@ -192,18 +223,21 @@ class _CappedReader(threading.Thread):
                 pass
 
     def text(self) -> str:
-        """The retained output, with a truncation marker if any was dropped."""
-        joined = "".join(self._chunks)
+        """The retained output decoded once at the end (a multi-byte character
+        split across reads or by the cap can't raise), with a truncation
+        marker if any was dropped."""
+        joined = b"".join(self._chunks).decode("utf-8", errors="replace")
         if self._total > self._kept:
             joined += f"\n... [truncated at {_OUTPUT_LIMIT // 1024} KB]"
         return joined
 
 
-def _feed_stdin(stdin_pipe, text: str) -> None:
-    """Write ``text`` to the child's stdin and close it (own daemon thread: a
-    child that never reads stdin must not deadlock the parent's write)."""
+def _feed_stdin(stdin_pipe, data: bytes) -> None:
+    """Write ``data`` (go byte + sample input) to the child's stdin and close it
+    (own daemon thread: a child that never reads stdin must not deadlock the
+    parent's write)."""
     try:
-        stdin_pipe.write(text)
+        stdin_pipe.write(data)
     except (BrokenPipeError, OSError, ValueError):
         pass  # child exited / closed stdin without reading — not an error
     finally:
@@ -388,7 +422,8 @@ def verify_python(
     timeout: float = 10.0,
     problem_text: str = "",
 ) -> VerifyResult:
-    """Run ``code`` under ``sys.executable``, feeding ``stdin_text`` on stdin,
+    """Run ``code`` through the trusted bootstrap (A5; see
+    :func:`_child_python`), feeding ``stdin_text`` on stdin,
     and compare captured stdout to ``expected_stdout`` via :func:`_outputs_match`
     (exact-normalized, then tolerant structural, then — only when ``problem_text``
     says "any order" — order-insensitive; see A3).
@@ -433,29 +468,38 @@ def verify_python(
             active_processes=_JOB_PROCESS_CAP,
         )
 
+        # A5: the child is the REAL interpreter in isolated mode (-I: no user
+        # site, no PYTHON* env, script dir off sys.path; -X utf8: UTF-8 stdio
+        # regardless of the console code page; -B: no .pyc writes) running the
+        # trusted bootstrap, which blocks until we release it below. Binary
+        # pipes: output is read raw and decoded once at the end (B6).
+        argv = [
+            _child_python(), "-I", "-X", "utf8", "-B",
+            _BOOTSTRAP_PATH, script_path, run_dir,
+            json.dumps({"run_dir": run_dir}),
+        ]
         try:
             proc = subprocess.Popen(
-                [sys.executable, script_path],
+                argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",   # matches PYTHONIOENCODING in _safe_env
-                errors="replace",   # mojibake beats an unexpected decode raise
                 **popen_kwargs,
             )
         except (OSError, ValueError) as exc:
             return VerifyResult(status="error", note=f"could not run: {exc}")
 
-        # Post-spawn, the ONLY remaining job step: one AssignProcessToJobObject
-        # syscall (microseconds) against the child's ~20ms+ interpreter startup
-        # — `python solution.py` cannot execute a line of untrusted code before
-        # it lands inside the job, so nothing allocates or spawns outside the
-        # caps (the CREATE_SUSPENDED trade-off is documented on the helper).
+        # A5 ordering: assign the job FIRST, and only then release the go byte.
+        # Until the bootstrap reads it, no untrusted line has run — so it no
+        # longer matters how long this thread takes to get here (the old
+        # "one syscall beats ~20ms of interpreter startup" argument lost to GIL
+        # contention: a busy parent let a 700 MB allocation escape 19/20 runs).
         assign_to_job(job_handle, proc)
 
         threading.Thread(
-            target=_feed_stdin, args=(proc.stdin, stdin_text or ""), daemon=True
+            target=_feed_stdin,
+            args=(proc.stdin, _GO + (stdin_text or "").encode("utf-8")),
+            daemon=True,
         ).start()
         out_reader = _CappedReader(proc.stdout)
         err_reader = _CappedReader(proc.stderr)
