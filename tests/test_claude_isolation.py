@@ -23,6 +23,8 @@ import config
 import prompts
 
 ALL_FLAGS = claude_cli.parse_help_flags(FAKE_CLAUDE_HELP)
+# Captured at import, before the suite-wide autouse fixture swaps in canned help.
+REAL_PROBE_HELP_TEXT = claude_cli._probe_help_text
 
 
 def recording_runner(lines=None):
@@ -53,6 +55,37 @@ def test_parse_help_flags_finds_long_options():
                  "--no-session-persistence", "--model", "--print"):
         assert flag in flags
     assert claude_cli.parse_help_flags("") == frozenset()
+
+
+def test_parse_help_flags_ignores_flags_only_mentioned_in_descriptions():
+    # SP2 M4: a flag the CLI does NOT support, named only inside another
+    # option's description, must not be taken as supported.
+    text = (
+        "Usage: claude [options]\n\n"
+        "Options:\n"
+        "  -p, --print                 Print response and exit (see also --safe-mode)\n"
+        "  --model <model>             Model; replaces the old --system-prompt\n"
+        "  --strict-mcp-config         Only use MCP servers from --mcp-config\n"
+        "  --no-session-persistence    Disable session persistence\n"
+    )
+    flags = claude_cli.parse_help_flags(text)
+    assert flags == frozenset(
+        {"--print", "--model", "--strict-mcp-config", "--no-session-persistence"}
+    )
+
+
+def test_help_probe_runs_in_the_neutral_cwd(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_bounded(argv, *, timeout, cwd=None):
+        seen["argv"], seen["cwd"] = argv, cwd
+        return 0, FAKE_CLAUDE_HELP
+
+    monkeypatch.setattr(claude_cli, "_run_bounded", fake_bounded)
+    monkeypatch.setenv("LEETCOACH_CLAUDE_CWD", str(tmp_path / "neutral"))
+    assert REAL_PROBE_HELP_TEXT(["no-such-claude", "--help"]) == FAKE_CLAUDE_HELP
+    assert seen["cwd"] == str(tmp_path / "neutral")
+    assert Path(seen["cwd"]).is_dir()
 
 
 def test_isolation_flags_present_when_cli_lists_them():

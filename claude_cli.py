@@ -117,7 +117,10 @@ _monotonic = time.monotonic     # indirection so tests can drive the clock
 _flag_cache: dict = {}          # resolved binary -> (flags, expires_at|None)
 _flag_lock = threading.Lock()
 
-_HELP_FLAG_RE = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
+# SP2 M4: only a flag in the OPTION COLUMN counts (an indented line starting
+# with the option, optionally after a short alias such as "-p, "); one merely
+# mentioned in another option's description is not a supported flag.
+_HELP_FLAG_RE = re.compile(r"^\s+(?:-\w,\s*)?(--[a-z][\w-]*)", re.MULTILINE)
 
 
 def parse_help_flags(text: str) -> frozenset:
@@ -133,8 +136,9 @@ def clear_flag_cache() -> None:
 
 def _probe_help_text(argv: list[str]) -> Optional[str]:
     """Run ``claude --help`` (bounded, tree-killed on timeout) and return its
-    stdout, or ``None`` on a nonzero exit. May raise; the caller degrades."""
-    returncode, out = _run_bounded(argv, timeout=FLAG_PROBE_TIMEOUT)
+    stdout, or ``None`` on a nonzero exit. Runs in the neutral cwd (A7, SP2 M4)
+    like every other `claude` spawn. May raise; the caller degrades."""
+    returncode, out = _run_bounded(argv, timeout=FLAG_PROBE_TIMEOUT, cwd=ensure_claude_cwd())
     return out if returncode == 0 else None
 
 
