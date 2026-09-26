@@ -30,14 +30,35 @@ best-effort. What the sandbox does:
   the cap kills the tree instead of buffering it;
 - on Windows, the child runs inside a **Job Object** that caps per-process memory
   at 512 MB and the tree at 16 active processes, with kill-on-job-close so nothing
-  survives the run;
-- on POSIX, the equivalent memory/CPU/file-size resource limits.
+  survives the run. The child is the real Python interpreter (not the venv launcher,
+  whose own child could start outside the job), and it runs a small trusted
+  bootstrap that waits for a go signal. That signal is only sent after the child is
+  inside the job, so no generated code runs before the caps apply;
+- on POSIX, the equivalent memory/CPU/file-size resource limits;
+- an **audit hook** (`sys.addaudithook`, installed by the bootstrap before any
+  generated code runs) that refuses:
+  - writing, deleting or renaming files outside the throwaway directory;
+  - opening or listing known secret locations: `~/.claude` and `~/.claude.json`,
+    this repo's `.env`, `~/.ssh`, `~/.aws`, git and GitHub CLI credentials, and
+    the Windows credential stores under `%APPDATA%` / `%LOCALAPPDATA%`;
+  - network connections and DNS lookups;
+  - starting processes (`subprocess`, `os.system`, `os.exec*`, `os.spawn*`,
+    `multiprocessing`);
+  - loading libraries through `ctypes`;
+  - creating symlinks or junctions, and writing to the registry.
 
-What it does **not** do: there is no filesystem confinement (beyond the scrubbed
-environment, the code runs as your user and can read or write anything you can)
-and no network confinement, so it can open sockets. Treat it like running any
-AI-generated snippet locally: don't paste a problem whose generated solution you
-would not be willing to run yourself.
+**The audit hook is defence in depth, not a security boundary.** Python's own
+documentation says audit hooks cannot sandbox malicious code, and there are known
+gaps (for example `dir_fd`-relative opens on POSIX, or native extension modules that
+skip the hooks). The hook exists to stop careless or prompt-injected solution code
+from reading your Claude login, touching the network, or writing across your disk.
+It does not stop code written specifically to get around it.
+
+What the sandbox does **not** do: there is no OS-level filesystem or network
+confinement. The code still runs as your user, and anything that gets past the audit
+hook can read what you can read. Treat it like running any AI-generated snippet
+locally: don't paste a problem whose generated solution you would not be willing to
+run yourself.
 
 ### Keep it local
 
