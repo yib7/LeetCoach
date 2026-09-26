@@ -234,19 +234,18 @@ def _create_job(*, memory_bytes, active_processes):
 def assign_to_job(job_handle, proc: "subprocess.Popen[str]") -> bool:
     """Assign a just-spawned ``proc`` to a job from :func:`create_job_with_caps`.
 
-    This is the ONLY post-spawn step: one ``AssignProcessToJobObject``
-    syscall, microseconds — everything slow (the one-time ctypes setup, job
-    creation, limit configuration) already happened at module import /
-    pre-spawn. Residual race, re-justified: the child is ``python
-    solution.py``, which needs ~20ms+ of interpreter startup before it can
-    execute a line of untrusted code, so one syscall cannot lose that race —
-    the child can neither allocate nor spawn outside the job first. Closing
-    the window completely would need ``CREATE_SUSPENDED``, and resuming
-    requires the main thread id which ``subprocess.Popen`` doesn't expose —
-    i.e. reimplementing CreateProcessW via ctypes or calling undocumented
-    ``NtResumeProcess``, where a failed resume would wedge every run. One
-    fast syscall against a ~20ms window is the robust trade, and
-    :func:`kill_process_tree` (taskkill /T) remains the backstop.
+    One ``AssignProcessToJobObject`` syscall — everything slow (the one-time
+    ctypes setup, job creation, limit configuration) already happened at
+    module import / pre-spawn. The call itself is NOT a race guard: an
+    earlier revision relied on "one syscall beats ~20ms of interpreter
+    startup", and GIL contention in the parent (other busy Python threads
+    delay this thread several switch intervals) let a 700 MB allocation
+    escape the cap in 19/20 runs. The sandbox therefore makes the child wait
+    for a go byte that is only sent after this returns (SP3 A5, see
+    ``sandbox_bootstrap.py``), and spawns the real interpreter rather than a
+    venv launcher stub whose grandchild would start outside the job.
+    ``CREATE_SUSPENDED`` is still avoided: resuming needs the main thread id
+    that ``subprocess.Popen`` doesn't expose.
 
     Returns True when the child is inside the job; False (``None`` handle,
     POSIX, or API failure) means the caller proceeds uncapped. Never raises.
