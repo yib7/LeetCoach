@@ -826,3 +826,31 @@ def test_config_model_rejects_missing_field(client):
     c, _ = client
     resp = c.post("/config/model", json={})
     assert resp.status_code == 400
+
+
+# --- #7: create_app() must never default to the real project .env ---------
+
+def test_create_app_default_dotenv_path_is_not_the_real_project_env():
+    """A test that calls ``create_app()`` and never overrides
+    ``app.config["DOTENV_PATH"]`` by hand (unlike the ``client`` fixture
+    above) must still be unable to write the real repo ``.env`` — the
+    tests/conftest.py autouse fixture points ``LEETCOACH_DOTENV_PATH`` at a
+    private tmp file, and ``app.create_app()`` honours it as the default."""
+    from pathlib import Path
+
+    application = app_module.create_app(run_fn=fake_run, auth_probe=_authed_probe)
+    real_env = Path(app_module.__file__).resolve().parent / ".env"
+    assert application.config["DOTENV_PATH"] != str(real_env)
+
+    # Snapshot the real .env (which may genuinely exist -- this is a real dev's
+    # working checkout) rather than asserting on its content, so the test
+    # can't produce a false failure/pass depending on what's already in it.
+    before = real_env.read_text(encoding="utf-8") if real_env.exists() else None
+
+    resp = application.test_client().post(
+        "/config/model", json={"model": "opus"}
+    )
+    assert resp.status_code == 200
+
+    after = real_env.read_text(encoding="utf-8") if real_env.exists() else None
+    assert after == before, "the real project .env must be untouched by create_app()"
