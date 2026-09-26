@@ -343,8 +343,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.auth_status) -> F
 
     # Where the model picker persists its choice. A config value (not a bare
     # constant) so tests can redirect it to a temp file instead of the real
-    # project `.env`.
-    app.config["DOTENV_PATH"] = str(HERE / ".env")
+    # project `.env`. #7: honours LEETCOACH_DOTENV_PATH (set by the test
+    # suite's autouse fixture, tests/conftest.py) so EVERY create_app() call
+    # across the whole suite is redirected away from the real `.env` by
+    # default, not just the couple of tests that override app.config by hand.
+    app.config["DOTENV_PATH"] = os.environ.get(
+        "LEETCOACH_DOTENV_PATH", str(HERE / ".env")
+    )
 
     # In-flight /run de-duplication (P2-12): a single-user local tool should not
     # fan the same (problem, mode, language, tier) into N concurrent Claude runs
