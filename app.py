@@ -326,13 +326,15 @@ def _verification_detail(result) -> str:
     return "\n**Failed samples:**\n\n" + "\n\n".join(blocks) + "\n"
 
 
-def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.auth_status) -> Flask:
+def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_status) -> Flask:
     """Build the Flask app.
 
     ``run_fn`` is the injectable Claude runner used by BOTH the classifier and
     the answer stream (tests pass a fake). ``auth_probe`` is the injectable
     sign-in probe the page uses to decide which (if any) CLI banner to show —
-    injectable so tests never spawn the real ``claude auth status``.
+    injectable so tests never spawn the real ``claude auth status``. The
+    default is the cached probe (B1): ``GET /`` no longer runs the CLI
+    synchronously on every page load.
     """
     app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
 
@@ -814,7 +816,8 @@ if __name__ == "__main__":
     # launcher script handles the interactive `claude auth login`; here we only
     # tell the user what to do).
     try:
-        _auth = claude_cli.auth_status()
+        # Also primes the B1 cache, so the first page load is instant.
+        _auth = claude_cli.cached_auth_status()
     except Exception:  # noqa: BLE001 - the probe must never stop the app launching
         _auth = claude_cli.AuthStatus(installed=False, logged_in=False)
     if not _auth.installed:
