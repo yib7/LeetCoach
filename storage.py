@@ -207,19 +207,27 @@ def save_answer(
     language: str,
     code: str,
     reasoning: str,
-) -> tuple[str, str]:
-    """Write an Answer's code file plus a sibling reasoning markdown.
+) -> tuple[str | None, str]:
+    """Write an Answer's reasoning markdown, plus a sibling code file when
+    there's actually code to save.
 
-    -> code:      ``output/answers/<problem_type>/<problem>__<tier>.<ext>``
+    -> code:      ``output/answers/<problem_type>/<problem>__<tier>.<ext>``,
+                   or ``None`` when ``code`` is blank (B24) — ``extract_code``
+                   returns ``""`` when the response had no fenced block at
+                   all, and writing a 0-byte "solution" file would silently
+                   look like a real (if empty) saved answer in the library.
     -> reasoning: ``output/answers/<problem_type>/<problem>__<tier>.md``
 
     Returns ``(code_path, reasoning_path)``. The extension is chosen from
     ``language`` (``py`` / ``cpp`` / ``java``), defaulting to ``txt``.
     """
     root = config.output_dir()
-    ext = _LANG_EXT.get(slug(language), "txt")
     folder = root / "answers" / slug(problem_type)
     stem = f"{_problem_name(problem)}__{slug(tier)}"
+    if not code.strip():
+        reasoning_path = _write_entry(folder, stem, [("md", reasoning)])[0]
+        return None, reasoning_path
+    ext = _LANG_EXT.get(slug(language), "txt")
     # The pair is ONE logical entry: resolve the stem for both siblings at
     # once so a collision on either moves code AND reasoning together.
     code_path, reasoning_path = _write_entry(

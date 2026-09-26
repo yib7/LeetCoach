@@ -259,6 +259,59 @@ def test_config_model_rejects_non_object_json_body(client, payload):
     assert not (tmp_path / ".env").exists()
 
 
+# --- B24: no extracted code -> no empty code file lands in the library -----
+
+NO_CODE_ANSWER_MARKDOWN = (
+    "I couldn't find a runnable solution to show here — this is reasoning "
+    "only, with no fenced code block at all."
+)
+
+
+def fake_run_no_code(prompt, **kwargs):
+    if "Classify the following" in prompt and "Respond with ONLY a tiny" in prompt:
+        text = json.dumps(CLASSIFY_JSON)
+    else:
+        text = NO_CODE_ANSWER_MARKDOWN
+    for i in range(0, len(text), 20):
+        yield text[i : i + 20]
+
+
+def test_run_answer_with_no_code_block_saves_no_empty_code_file(tmp_path, monkeypatch):
+    """``extract_code`` returns "" when Claude's answer has no fenced block at
+    all; B24 says the run must still save the reasoning .md but must NOT write
+    a 0-byte code file that would look like a real (if empty) answer."""
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+    application = app_module.create_app(run_fn=fake_run_no_code, auth_probe=_authed_probe)
+    application.config.update(TESTING=True)
+    application.config["DOTENV_PATH"] = str(tmp_path / ".env")
+    c = application.test_client()
+
+    resp = c.post(
+        "/run",
+        json={
+            "problem": "Two Sum: return indices of two numbers adding to target.",
+            "mode": "answer",
+            "language": "python",
+            "tier": "normal",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    _text_chunks, events = _parse_sse(body)
+    done = [p for (name, p) in events if name == "done"]
+    assert done, f"no done event in: {events}"
+    paths = done[0].get("paths") or []
+    assert paths, "reasoning file should still be saved"
+    assert None not in paths
+
+    answers_dir = tmp_path / "answers"
+    files = [p for p in answers_dir.rglob("*") if p.is_file()]
+    code_files = [p for p in files if p.suffix == ".py"]
+    assert not code_files, f"expected no .py code file, got {[p.name for p in files]}"
+    md_files = [p for p in files if p.suffix == ".md"]
+    assert md_files, "expected the reasoning .md to still be saved"
+
+
 # --- mid-stream subprocess failure -> SSE error event --------------------
 
 def test_run_answer_midstream_failure_emits_error_event(tmp_path, monkeypatch):

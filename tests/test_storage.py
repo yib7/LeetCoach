@@ -228,6 +228,46 @@ def test_returned_path_is_within_configured_root(out_root):
     assert common == str(out_root.resolve())
 
 
+# --- B24: no extracted code -> don't write an empty code husk -------------
+
+def test_save_answer_blank_code_writes_no_code_file(out_root):
+    """When ``extract_code`` found nothing, ``code`` is ``""``. Writing a
+    0-byte ``.py`` "solution" file would silently look like a real (if empty)
+    answer in the library, so B24 says: write the reasoning .md only and
+    return ``None`` for the code path."""
+    code_path, reasoning_path = storage.save_answer(
+        "Two Sum", "two_pointers", tier="normal", language="python",
+        code="", reasoning="No code block was found in the response.",
+    )
+    assert code_path is None
+    assert Path(reasoning_path).exists()
+    answers_dir = out_root / "answers" / "two_pointers"
+    files = [p for p in answers_dir.iterdir() if p.is_file()]
+    assert files == [Path(reasoning_path)], f"unexpected extra files: {files}"
+
+
+def test_save_answer_whitespace_only_code_writes_no_code_file(out_root):
+    """Whitespace-only ``code`` (e.g. a fence containing only blank lines)
+    counts as "no code" too."""
+    code_path, reasoning_path = storage.save_answer(
+        "Two Sum", "two_pointers", tier="normal", language="python",
+        code="   \n\t\n", reasoning="r",
+    )
+    assert code_path is None
+    assert Path(reasoning_path).exists()
+
+
+def test_save_answer_non_blank_code_still_writes_both_files(out_root):
+    # regression guard: the ordinary path (non-empty code) is unaffected
+    code_path, reasoning_path = storage.save_answer(
+        "Two Sum", "two_pointers", tier="normal", language="python",
+        code="def two_sum(): pass", reasoning="r",
+    )
+    assert code_path is not None
+    assert Path(code_path).exists()
+    assert Path(reasoning_path).exists()
+
+
 # --- collisions: suffix instead of clobber (P2-11) ------------------------
 
 def test_rerun_identical_content_is_idempotent(out_root):
