@@ -47,11 +47,24 @@ import sandbox
 import storage
 import topic_index
 
+def _maybe_load_dotenv(path: Path) -> None:
+    """Load ``path`` as a dotenv file, unless ``LEETCOACH_NO_DOTENV`` is set
+    (B8). Never overrides vars already set in the real environment; a missing
+    ``.env`` is a silent no-op either way. Split out as its own function (not
+    inlined at import time) so it's directly unit-testable without reloading
+    this module or touching the real project ``.env``.
+    """
+    if os.environ.get("LEETCOACH_NO_DOTENV", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    load_dotenv(path)
+
+
 # Load .env from the project root (next to this file) if present, so LEETCOACH_*
 # settings written to a .env take effect for `python app.py` and WSGI imports.
-# Never overrides vars already set in the real environment; a missing .env is a
-# silent no-op.
-load_dotenv(Path(__file__).resolve().parent / ".env")
+# The test suite sets LEETCOACH_NO_DOTENV=1 (tests/conftest.py) so importing
+# `app` never reads the developer's real .env or leaks its settings into the
+# test process.
+_maybe_load_dotenv(Path(__file__).resolve().parent / ".env")
 
 HERE = Path(__file__).resolve().parent
 TEMPLATES = HERE / "templates"
