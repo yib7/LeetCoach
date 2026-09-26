@@ -74,6 +74,40 @@ def test_usage_limit_gets_a_specific_hint():
     assert "signed out" not in msg.lower()
 
 
+@pytest.mark.parametrize("detail", [
+    "You've hit your limit \u00b7 resets 3pm (Europe/London)",
+    "5-hour limit reached \u2219 resets 7pm",
+    "Claude AI usage limit reached|1760000000",
+    "API Error: 429 rate limit exceeded",
+])
+def test_limit_wordings_get_the_limit_hint(detail):
+    # SP2 M3: the CLI's current wordings, not only "usage limit".
+    assert claude_cli._hint_for(detail) == claude_cli._LIMIT_HINT
+
+
+@pytest.mark.parametrize("detail", [
+    # a stack trace column is not an HTTP 401
+    "TypeError: x is undefined\n    at run (file:///C:/npm/claude/cli.js:401:12)",
+    "at Object.<anonymous> (cli.js:12:401)",
+    # "log in" / "sign in" inside other words
+    "Error: tool catalog in cache is corrupt",
+    "invalid design in prompt template",
+])
+def test_non_auth_text_does_not_trigger_the_sign_in_hint(detail):
+    assert claude_cli._hint_for(detail) != claude_cli._SIGN_IN_HINT
+
+
+@pytest.mark.parametrize("detail", [
+    "API Error: 401 Unauthorized",
+    "Request failed with status code 401",
+    "Please log in again",
+    "You must sign in to continue",
+    "run /login",
+])
+def test_real_auth_markers_still_trigger_the_sign_in_hint(detail):
+    assert claude_cli._hint_for(detail) == claude_cli._SIGN_IN_HINT
+
+
 def test_real_runner_nonzero_exit_headline_is_the_stderr_text():
     script = (
         "import sys\n"
