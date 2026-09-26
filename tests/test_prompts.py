@@ -21,6 +21,8 @@ holds:
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 import prompts
@@ -237,8 +239,11 @@ REDIRECT = (
     "the problem."
 )
 
-CONTEXT_OPEN = "--- BEGIN PROBLEM CONTEXT (do not solve) ---"
-CONTEXT_CLOSE = "--- END PROBLEM CONTEXT ---"
+# B21: the fence lines carry a per-prompt random nonce (see
+# tests/test_prompt_fences.py), so they are matched, not spelled out.
+CONTEXT_OPEN_RE = re.compile(
+    r"^--- BEGIN PROBLEM CONTEXT \(do not solve\) ([0-9a-f]+) ---$", re.MULTILINE
+)
 
 
 @pytest.mark.parametrize("lang", LANGS)
@@ -259,10 +264,12 @@ def test_quick_ask_ends_with_the_question():
 
 def test_quick_ask_fences_the_problem_as_context():
     p = prompts.build_quick_ask(QUESTION, language="python", problem=PROBLEM)
-    assert CONTEXT_OPEN in p
-    assert CONTEXT_CLOSE in p
+    opened = CONTEXT_OPEN_RE.search(p)
+    assert opened
+    close = f"\n--- END PROBLEM CONTEXT {opened.group(1)} ---"
+    assert close in p[opened.end():]
     # the problem text sits INSIDE the fence, not loose among the instructions
-    body = p.split(CONTEXT_OPEN)[1].split(CONTEXT_CLOSE)[0]
+    body = p[opened.end():p.index(close, opened.end())]
     assert PROBLEM in body
 
 
