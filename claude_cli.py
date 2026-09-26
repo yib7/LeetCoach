@@ -252,6 +252,10 @@ class ClaudeRun:
         return self._cancelled
 
     def cancel(self) -> None:
+        # The killer runs outside self._lock (it can block in taskkill). That
+        # is safe even if the run is tearing down concurrently: the runner's
+        # own kill lock makes a late killer a no-op once the job is closed and
+        # skips pid-based kills once the child is reaped (SP2 I2).
         with self._lock:
             self._cancelled = True
             killer = self._killer
@@ -303,7 +307,7 @@ def _spawn_kwargs() -> dict:
     return {"start_new_session": True}
 
 
-def _kill_claude_tree(proc: "subprocess.Popen", job=None) -> None:
+def _kill_claude_tree(proc: "subprocess.Popen", job=None, *, pid_ok: bool = True) -> None:
     """Kill a `claude` process and everything it spawned (A6/C5).
 
     Windows: ``taskkill /T`` (walks live parent links), then the kill-on-close
@@ -311,16 +315,22 @@ def _kill_claude_tree(proc: "subprocess.Popen", job=None) -> None:
     still holding the stdout pipe), then ``proc.kill()`` as a direct backstop
     in case taskkill could not run. POSIX: ``killpg`` on the child's own
     process group (it was started with ``start_new_session``). Never raises.
+
+    ``pid_ok=False`` (SP2 I2) skips the pid-based kills - the child was
+    already reaped, so its pid / process-group id may belong to an unrelated
+    process by now; only the job (still open, the caller guarantees) is used.
     """
-    try:
-        _kill_process_tree(proc, group=True)
-    except Exception:  # noqa: BLE001 - keep going with the other mechanisms
-        pass
+    if pid_ok:
+        try:
+            _kill_process_tree(proc, group=True)
+        except Exception:  # noqa: BLE001 - keep going with the other mechanisms
+            pass
     proc_util.terminate_job(job)
-    try:
-        proc.kill()
-    except Exception:  # noqa: BLE001 - already exited / reaped
-        pass
+    if pid_ok:
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001 - already exited / reaped
+            pass
 
 
 def _run_bounded(argv: list[str], *, timeout: float, cwd: Optional[str] = None):
@@ -666,8 +676,46 @@ def _real_runner(
     # that window is still covered by taskkill /T, which walks live parents.)
     proc_util.assign_to_job(job, proc)
 
+    # SP2 I2: the tree-kill runs on other threads too (ClaudeRun.cancel(), the
+    # watchdog), and a kill can block for a while inside `taskkill`. One
+    # per-run lock serializes every kill with the reap and the job close, so a
+    # killer can never act on a closed (possibly recycled) job handle nor, on
+    # POSIX, `killpg` a pid this runner already reaped. Every reap below goes
+    # through `_alive()` / `_reap()`, which poll under the lock.
+    kill_lock = threading.Lock()
+    reaped = False      # guarded by kill_lock
+    job_closed = False  # guarded by kill_lock
+
     def _kill_tree() -> None:
-        _kill_claude_tree(proc, job)
+        with kill_lock:
+            if job_closed:
+                return  # teardown finished: nothing left that is ours to kill
+            _kill_claude_tree(
+                proc, job, pid_ok=not reaped and proc.returncode is None
+            )
+
+    def _alive() -> bool:
+        nonlocal reaped
+        with kill_lock:
+            if proc.poll() is None:
+                return True
+            reaped = True
+            return False
+
+    def _reap(timeout: Optional[float]) -> int:
+        """``proc.wait(timeout)``, but every reap attempt holds the kill lock."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        delay = 0.005
+        while _alive():
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(proc.args, timeout)
+                time.sleep(min(delay, remaining))
+            else:
+                time.sleep(delay)
+            delay = min(delay * 2, 0.05)
+        return proc.returncode
 
     drained = False
     saw_result = False    # stopped at the terminal `result` event (A6)
@@ -775,11 +823,11 @@ def _real_runner(
         with watchdog_lock:
             reading_done = True
         watchdog.cancel()
-        if saw_result and proc.poll() is None:
+        if saw_result and _alive():
             # The CLI normally exits right after its result; give it a short
             # grace, then stop it rather than wait on it.
             try:
-                proc.wait(timeout=RESULT_EXIT_GRACE)
+                _reap(RESULT_EXIT_GRACE)
             except subprocess.TimeoutExpired:
                 stopped_after_result = True
                 _kill_tree()
@@ -788,7 +836,7 @@ def _real_runner(
         # next yield) or an exception unwound the consumer. The `claude`
         # subprocess would otherwise keep running to completion and keep
         # burning subscription usage, so kill its tree.
-        if not drained and not saw_result and proc.poll() is None:
+        if not drained and not saw_result and _alive():
             _kill_tree()
         # Reap the stdin feeder before reading `stdin_ok`/returncode below. Once
         # the child has exited (drained to EOF, killed, or crashed) the write
@@ -802,15 +850,21 @@ def _real_runner(
         except (OSError, AttributeError):
             pass
         try:
-            returncode = proc.wait(timeout=10)
+            returncode = _reap(10)
         except subprocess.TimeoutExpired:
             _kill_tree()
-            returncode = proc.wait()
+            returncode = _reap(None)
+        # SP2 I2: no new killer from here on; then wait for any in-flight one
+        # (the watchdog thread is joined; a cancel() killer holds kill_lock,
+        # which the close below takes) before the job handle goes away.
         if handle is not None:
             handle._attach_killer(None)
-        # Closing the kill-on-close job reaps any straggler still inside it
-        # (e.g. a grandchild that outlived a run we stopped at `result`).
-        proc_util.close_job(job)
+        watchdog.join(timeout=60)
+        with kill_lock:
+            job_closed = True
+            # Closing the kill-on-close job reaps any straggler still inside
+            # it (e.g. a grandchild that outlived a run we stopped at `result`).
+            proc_util.close_job(job)
         cancelled = handle is not None and handle.cancelled
         try:
             # Nobody is listening after a disconnect, and raising here would
