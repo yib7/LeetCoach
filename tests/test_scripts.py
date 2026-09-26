@@ -25,6 +25,34 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# #12: the path is handed to the child process via an ENV VAR, never
+# interpolated into the `-Command` string. A naive `f"'{path}'"` would break
+# (or worse, silently mis-parse) if the repo ever sat under a path containing
+# a single quote (e.g. `C:\Users\O'Brien\...`) — `$env:...` sidesteps PowerShell
+# string-quoting entirely, so the path's own content can never matter.
+_PARSE_CHECK_SCRIPT = (
+    "$errors = $null; "
+    "[void][System.Management.Automation.Language.Parser]::ParseFile("
+    "$env:LEETCOACH_TEST_PS1_PATH, [ref]$null, [ref]$errors); "
+    "if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 } "
+    "else { exit 0 }"
+)
+
+
+def _parse_ps1_with_powershell(path):
+    """Run `[Parser]::ParseFile` against ``path`` via a subprocess, passing the
+    path through the environment (see the module comment above)."""
+    env = dict(os.environ)
+    env["LEETCOACH_TEST_PS1_PATH"] = str(path)
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _PARSE_CHECK_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+
 @pytest.mark.parametrize("path", PS1_FILES, ids=lambda p: p.name)
 def test_ps1_file_parses_with_powershell_parser(path):
     """`[Parser]::ParseFile` must report zero syntax errors for every .ps1 (A1).
@@ -32,22 +60,25 @@ def test_ps1_file_parses_with_powershell_parser(path):
     This catches a broken script (bad quoting, mismatched braces, etc.) at
     test time instead of at double-click time on someone's desktop.
     """
-    ps_check = (
-        "$errors = $null; "
-        f"[void][System.Management.Automation.Language.Parser]::ParseFile("
-        f"'{path}', [ref]$null, [ref]$errors); "
-        "if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 } "
-        "else { exit 0 }"
-    )
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_check],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    result = _parse_ps1_with_powershell(path)
     assert result.returncode == 0, (
         f"{path.name} failed to parse:\n{result.stdout}\n{result.stderr}"
     )
+
+
+def test_ps1_parse_check_tolerates_a_single_quote_in_the_path(tmp_path):
+    """#12 regression: the OLD check built the PowerShell command with
+    `f"'{path}'"` — a repo checked out under a path containing an apostrophe
+    (e.g. `C:\\Users\\O'Brien\\...`) would break that quoting outright. Passing
+    the path via an env var instead must tolerate it cleanly. (A manually
+    built path, not `tmp_path_factory.mktemp`, since mktemp sanitizes its
+    basename and would strip the apostrophe we need to test.)"""
+    quirky_dir = tmp_path / "o'brien's repo"
+    quirky_dir.mkdir()
+    script = quirky_dir / "fine.ps1"
+    script.write_text("Write-Host 'hello'\n", encoding="ascii")
+    result = _parse_ps1_with_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("path", PS1_FILES + CMD_FILES, ids=lambda p: p.name)
@@ -167,6 +198,64 @@ def test_missing_claude_binary_warns_and_exits_zero(tmp_path):
     result = _run_ensure_script(missing)
     assert result.returncode == 0
     assert "not found on path" in result.stdout.lower()
+
+
+def test_bare_name_with_both_ps1_and_cmd_shims_on_path_resolves_to_the_cmd(tmp_path):
+    """#2 regression: a real npm global install on Windows puts BOTH
+    `claude.cmd` and `claude.ps1` on PATH under the SAME bare name.
+    `Start-Process -FilePath claude` (the old code) resolves a bare name via
+    Windows ShellExecute, which can pick the `.ps1` over the `.cmd` - and a
+    `.ps1`'s default verb is "Edit", so Start-Process actually opened the
+    script in Notepad instead of running `claude auth login`, hanging `-Wait`
+    forever (reproduced empirically: identical two-shim setup + bare
+    Start-Process opened Notepad on this machine). The fixed script resolves
+    to a concrete Application (never an ExternalScript/.ps1) before calling
+    Start-Process, so it must run the `.cmd` and never touch the `.ps1` shim
+    at all, regardless of which one Windows would have picked."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "claude.cmd").write_text(_STUB_CLAUDE_CMD, encoding="ascii")
+    # A same-named .ps1 shim that answers `auth status` the SAME way the .cmd
+    # does (checking the same shared marker file) so the STATUS checks (which
+    # go through PowerShell's OWN `&` resolution, unaffected by #2) see a
+    # consistent answer no matter which shim happens to serve them. Only
+    # `auth login` differs: it writes a DIFFERENT marker, so if Start-Process
+    # ever wrongly ran the `.ps1` for login (the old bug) instead of the
+    # `.cmd`, the shared `logged_in.marker` would never appear and the script
+    # would (wrongly) still report signed-out afterward.
+    ps1_stub = (
+        "$marker = Join-Path $PSScriptRoot 'logged_in.marker'\n"
+        "if ($args[0] -eq 'auth' -and $args[1] -eq 'status') {\n"
+        "    if (Test-Path $marker) { Write-Output '{\"loggedIn\": true}' }\n"
+        "    else { Write-Output '{\"loggedIn\": false}' }\n"
+        "    exit 0\n"
+        "}\n"
+        "if ($args[0] -eq 'auth' -and $args[1] -eq 'login') {\n"
+        "    New-Item -ItemType File -Force"
+        " -Path (Join-Path $PSScriptRoot 'ps1_login_ran.marker') | Out-Null\n"
+        "    exit 0\n"
+        "}\n"
+        "exit 1\n"
+    )
+    (bin_dir / "claude.ps1").write_text(ps1_stub, encoding="ascii")
+    env = dict(os.environ)
+    env["LEETCOACH_CLAUDE_BIN"] = "claude"  # a BARE name, not a full path
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", str(ENSURE_CLAUDE_AUTH),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "signing you in" in result.stdout.lower()
+    assert "still signed out" not in result.stdout.lower()
+    assert (bin_dir / "logged_in.marker").exists()
+    assert not (bin_dir / "ps1_login_ran.marker").exists()
 
 
 # --- C8: CRLF pinned for .ps1/.cmd; README shows the Bypass invocation -----

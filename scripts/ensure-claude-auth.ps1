@@ -18,11 +18,38 @@ if ([string]::IsNullOrWhiteSpace($ClaudeBin)) { $ClaudeBin = "claude" }
 
 function Get-ClaudeLoggedIn {
     # Returns $true / $false from `claude auth status` JSON, or $null if the
-    # state can't be read (binary missing, no output, unparseable).
+    # state can't be read (binary missing, no output, unparseable). The `&`
+    # call operator uses PowerShell's OWN command resolution (Get-Command),
+    # which runs an ExternalScript (.ps1) or a native Application correctly
+    # either way - unlike Start-Process below, this is not the buggy path.
     $text = (& $ClaudeBin auth status 2>$null | Out-String)
     if ([string]::IsNullOrWhiteSpace($text)) { return $null }
     try { return [bool]((ConvertFrom-Json $text).loggedIn) }
     catch { return $null }
+}
+
+function Start-ClaudeLogin {
+    # Start-Process's bare-name resolution goes through Windows' ShellExecute
+    # (OS file-association lookup), NOT PowerShell's Get-Command. When both a
+    # `claude.cmd` and a `claude.ps1` sit on PATH (a real npm global install on
+    # Windows ships both), ShellExecute can pick the `.ps1` - and a `.ps1`'s
+    # default verb is "Edit", so Start-Process actually opens the script in
+    # Notepad instead of running it, and `-Wait` then hangs forever waiting
+    # for Notepad to close (reproduced on this machine: identical repro with
+    # two same-named shims). Resolve to a concrete Application (.exe/.com/
+    # .bat/.cmd - Get-Command's "Application" type never includes an
+    # ExternalScript/.ps1) FIRST so Start-Process is always handed something
+    # it can actually execute.
+    $resolved = Get-Command $ClaudeBin -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($resolved) {
+        return Start-Process -FilePath $resolved.Source -ArgumentList "auth", "login" -WindowStyle Normal -PassThru
+    }
+    # No native Application under this name (e.g. ONLY a .ps1 shim exists) -
+    # launch through the command processor instead of ShellExecute. cmd.exe's
+    # own PATHEXT-based resolution never considers .ps1, so this sidesteps the
+    # Edit-verb problem entirely.
+    return Start-Process -FilePath $env:ComSpec -ArgumentList "/c", $ClaudeBin, "auth", "login" -WindowStyle Normal -PassThru
 }
 
 if (-not (Get-Command $ClaudeBin -ErrorAction SilentlyContinue)) {
@@ -36,9 +63,12 @@ if ((Get-ClaudeLoggedIn) -eq $true) {
 
 Write-Host ""
 Write-Host "You're signed out of the 'claude' CLI - signing you in now..." -ForegroundColor Cyan
-# A1: run login in its own normal (non-minimized) window and wait for it,
-# rather than inline in this console - see the header comment above.
-Start-Process -FilePath $ClaudeBin -ArgumentList "auth", "login" -WindowStyle Normal -Wait
+# A1: run login in its own normal (non-minimized) window - see the header
+# comment above. -PassThru + an explicit WaitForExit() (not -Wait) so we only
+# ever wait on the login process ITSELF, never a descendant browser process
+# `claude auth login` may open for its OAuth flow.
+$loginProcess = Start-ClaudeLogin
+$loginProcess.WaitForExit()
 
 if ((Get-ClaudeLoggedIn) -ne $true) {
     Write-Host ""
