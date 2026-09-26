@@ -74,6 +74,25 @@ def test_parse_help_flags_ignores_flags_only_mentioned_in_descriptions():
     )
 
 
+def test_parse_help_flags_ignores_wrapped_description_continuation_lines():
+    # SP2 M4 follow-up: a wrapped description continuation line is still
+    # indented, and if it happens to start with something that LOOKS like a
+    # flag (e.g. "--config" mentioned mid-sentence), the old unbounded
+    # `^\s+` indent must not mistake it for a real option-column entry. Real
+    # option lines sit at a shallow indent (2 spaces in `claude --help`);
+    # continuation lines are indented far past the option column.
+    text = (
+        "Usage: claude [options]\n\n"
+        "Options:\n"
+        "  --model <model>              Model name; falls back to whatever\n"
+        "                                --config sets by default when omitted\n"
+        "  --safe-mode                   Start with customizations disabled\n"
+    )
+    flags = claude_cli.parse_help_flags(text)
+    assert flags == frozenset({"--model", "--safe-mode"})
+    assert "--config" not in flags
+
+
 def test_help_probe_runs_in_the_neutral_cwd(monkeypatch, tmp_path):
     seen = {}
 

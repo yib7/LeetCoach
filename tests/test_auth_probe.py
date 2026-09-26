@@ -264,6 +264,34 @@ def test_first_ever_concurrent_calls_share_one_probe(monkeypatch, clock):
     assert out == [claude_cli.AuthStatus(True, True)] * 6
 
 
+def test_thread_start_failure_during_background_refresh_does_not_raise(monkeypatch, clock):
+    """SP2 M6 review: `cached_auth_status` is documented to never raise, but
+    the background-refresh path called `Thread(...).start()` unguarded. If
+    starting the thread itself fails (e.g. the process is out of threads),
+    that exception propagated straight out of a call site (page-load / the
+    launcher) that must never raise. It must instead clear the in-flight
+    marker (so a later call can retry) and serve the stale cached status.
+    """
+    calls = _counting_probe(monkeypatch, claude_cli.AuthStatus(True, True))
+    claude_cli.cached_auth_status()  # prime the cache
+    assert len(calls) == 1
+    clock.now += claude_cli.AUTH_CACHE_TTL + 1  # cache now stale
+
+    class ExplodingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(claude_cli.threading, "Thread", ExplodingThread)
+
+    status = claude_cli.cached_auth_status()  # must not raise
+
+    assert status == claude_cli.AuthStatus(True, True)  # stale value still served
+    assert claude_cli._auth_inflight == {}  # marker cleared, not stuck forever
+
+
 def test_refresh_finishing_after_clear_does_not_repopulate_the_cache(monkeypatch, clock):
     calls = _counting_probe(monkeypatch, claude_cli.AuthStatus(True, True))
     claude_cli.cached_auth_status()
