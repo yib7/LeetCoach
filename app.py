@@ -155,6 +155,17 @@ def _hostname(host: str) -> str:
     return host.rsplit(":", 1)[0]
 
 
+def _sweep_sandbox_temp() -> int:
+    """Startup housekeeping (SP3 B6): remove ``leetcoach_run_*`` sandbox dirs
+    older than a day that a crashed or killed run left in the temp dir.
+    Returns how many were removed; never raises, so a hiccup can't block
+    launch."""
+    try:
+        return sandbox.sweep_stale_run_dirs()
+    except Exception:  # noqa: BLE001 - housekeeping must never stop the app launching
+        return 0
+
+
 def _choose_port(preferred: int, host: str, *, span: int = 20) -> int:
     """Pick a bindable TCP port on ``host``, preferring ``preferred`` (SP-A).
 
@@ -886,6 +897,10 @@ if __name__ == "__main__":
             print(f"Migrated {len(renamed)} saved answer file(s) to the new tier names.")
     except Exception as exc:  # noqa: BLE001 - a migration hiccup must not block launch
         print(f"WARNING: could not migrate old tier filenames ({exc}).")
+    # Clear sandbox temp dirs a crashed/killed run left behind (B6).
+    _swept = _sweep_sandbox_temp()
+    if _swept:
+        print(f"Removed {_swept} stale sandbox temp dir(s).")
     # Surface the CLI sign-in state so a terminal launch is guided too (the
     # launcher script handles the interactive `claude auth login`; here we only
     # tell the user what to do).
