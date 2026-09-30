@@ -404,3 +404,178 @@ def test_audit_hook_can_be_disabled_for_containment_layer_tests():
     r = sandbox.verify_python(code, "", "7")
     assert r.status == "error", r
     assert "LeetCoach sandbox" in r.detail[0]["stderr"]
+
+
+# --- B6: raw-byte capture, rmtree retry, stale-dir sweep --------------------
+
+
+def test_stdout_is_not_lost_when_a_grandchild_holds_the_pipe(tmp_path):
+    """B6: the solution prints its answer and exits 0, but a grandchild it
+    spawned inherits stdout and keeps the pipe open. The old buffered
+    ``read(8192)`` blocked waiting for 8 KB-or-EOF with the answer stuck in
+    its buffer, so the bounded join gave up and the verdict saw EMPTY stdout
+    (a false FAIL). Raw reads hand over whatever has arrived."""
+    pidfile = tmp_path / "gc.pid"
+    code = (
+        "import subprocess, sys\n"
+        "pidfile = sys.stdin.readline().strip()\n"
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+        "                      stdout=sys.stdout, stderr=sys.stderr)\n"
+        "open(pidfile, 'w').write(str(gc.pid))\n"
+        "print(42)\n"
+    )
+    start = time.monotonic()
+    r = sandbox.verify_python(code, str(pidfile) + "\n", "42", timeout=15, audit_hook=False)
+    elapsed = time.monotonic() - start
+    assert r.status == "pass", r
+    assert elapsed < 10, f"took {elapsed:.1f}s -- blocked on the grandchild's pipe"
+    if os.name == "nt" and pidfile.exists():
+        gc_pid = int(pidfile.read_text())
+        subprocess.run(["taskkill", "/F", "/PID", str(gc_pid)], capture_output=True, check=False)
+
+
+def test_multibyte_output_split_across_reads_decodes_cleanly():
+    """B6: bytes are decoded once at the end, so a UTF-8 character straddling
+    a read boundary is never turned into replacement characters."""
+    code = "print('é' * 20000)\n"   # 40 000 bytes: crosses many read boundaries
+    r = sandbox.verify_python(code, "", "é" * 20000)
+    assert r.status == "pass", r
+
+
+def test_output_cap_is_enforced_in_bytes():
+    code = "import sys\nsys.stdout.write('é' * 40000)\nsys.stdout.flush()\n"  # 80 000 bytes
+    r = sandbox.verify_python(code, "", "x", timeout=15)
+    assert r.status == "error", r
+    assert "exceeded" in r.note
+    kept = r.detail[0]["stdout"]
+    assert len(kept.encode("utf-8")) <= sandbox._OUTPUT_LIMIT + 64
+
+
+def test_rmtree_retries_with_backoff_until_the_dir_is_gone(tmp_path, monkeypatch):
+    """B6: right after a kill, Windows can still hold a handle on a file in
+    the run dir for a moment; one ignore_errors rmtree leaked the dir (98
+    stale ``leetcoach_run_*`` dirs were found in %TEMP%)."""
+    victim = tmp_path / "leetcoach_run_x"
+    victim.mkdir()
+    (victim / "solution.py").write_text("x", encoding="utf-8")
+    real_rmtree = sandbox.shutil.rmtree
+    calls = []
+    sleeps = []
+
+    def flaky(path, *a, **k):
+        calls.append(path)
+        if len(calls) < 3:
+            raise PermissionError("[WinError 32] file in use")
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr(sandbox.shutil, "rmtree", flaky)
+    monkeypatch.setattr(sandbox, "_sleep", sleeps.append)
+    assert sandbox._rmtree_with_retry(str(victim)) is True
+    assert not victim.exists()
+    assert len(calls) == 3
+    assert sleeps == sorted(sleeps) and sleeps[0] > 0  # backoff grows
+
+
+def test_rmtree_retry_gives_up_quietly(tmp_path, monkeypatch):
+    victim = tmp_path / "leetcoach_run_stuck"
+    victim.mkdir()
+
+    def always_locked(path, *a, **k):
+        raise PermissionError("[WinError 32] file in use")
+
+    monkeypatch.setattr(sandbox.shutil, "rmtree", always_locked)
+    monkeypatch.setattr(sandbox, "_sleep", lambda s: None)
+    assert sandbox._rmtree_with_retry(str(victim)) is False  # never raises
+
+
+def test_verify_python_cleans_up_through_the_retrying_rmtree(monkeypatch):
+    seen = []
+    real = sandbox._rmtree_with_retry
+
+    def spy(path, **k):
+        seen.append(path)
+        return real(path, **k)
+
+    monkeypatch.setattr(sandbox, "_rmtree_with_retry", spy)
+    r = sandbox.verify_python("print(1)\n", "", "1")
+    assert r.status == "pass", r
+    assert len(seen) == 1 and os.path.basename(seen[0]).startswith("leetcoach_run_")
+    assert not os.path.exists(seen[0])
+
+
+def _age(path, days: float) -> None:
+    t = time.time() - days * 86400
+    os.utime(path, (t, t))
+
+
+def test_sweep_removes_only_stale_leetcoach_run_dirs(tmp_path):
+    """B6 startup sweep: only DIRECTORIES named ``leetcoach_run_*`` whose mtime
+    is older than a day. Everything else in the temp dir is left alone."""
+    stale = tmp_path / "leetcoach_run_stale"
+    stale.mkdir()
+    (stale / "solution.py").write_text("x", encoding="utf-8")
+    _age(stale, 2)
+    fresh = tmp_path / "leetcoach_run_fresh"
+    fresh.mkdir()
+    other = tmp_path / "someone_elses_dir"
+    other.mkdir()
+    _age(other, 30)
+    lookalike_file = tmp_path / "leetcoach_run_file.txt"
+    lookalike_file.write_text("keep", encoding="utf-8")
+    _age(lookalike_file, 30)
+    prefix_inside = tmp_path / "xleetcoach_run_old"
+    prefix_inside.mkdir()
+    _age(prefix_inside, 30)
+
+    removed = sandbox.sweep_stale_run_dirs(tmp_root=str(tmp_path))
+
+    assert removed == 1
+    assert not stale.exists()
+    assert fresh.exists() and other.exists() and prefix_inside.exists()
+    assert lookalike_file.read_text(encoding="utf-8") == "keep"
+
+
+def test_sweep_never_follows_a_symlinked_lookalike(tmp_path):
+    target = tmp_path / "precious"
+    target.mkdir()
+    (target / "data.txt").write_text("keep", encoding="utf-8")
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    link = temp_root / "leetcoach_run_link"
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted here")
+    _age(target, 5)
+    removed = sandbox.sweep_stale_run_dirs(tmp_root=str(temp_root))
+    assert removed == 0
+    assert (target / "data.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_sweep_defaults_to_the_system_temp_dir_and_never_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox.tempfile, "gettempdir", lambda: str(tmp_path))
+    stale = tmp_path / "leetcoach_run_old"
+    stale.mkdir()
+    _age(stale, 3)
+    assert sandbox.sweep_stale_run_dirs() == 1
+    assert not stale.exists()
+    assert sandbox.sweep_stale_run_dirs(tmp_root=str(tmp_path / "missing")) == 0
+
+
+def test_app_startup_sweeps_stale_run_dirs(monkeypatch):
+    import app as app_module
+
+    calls = []
+    monkeypatch.setattr(sandbox, "sweep_stale_run_dirs", lambda **k: calls.append(k) or 4)
+    assert app_module._sweep_sandbox_temp() == 4
+    assert calls
+
+    def boom(**k):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(sandbox, "sweep_stale_run_dirs", boom)
+    assert app_module._sweep_sandbox_temp() == 0  # a hiccup never blocks launch
+
+    src = open(app_module.__file__, encoding="utf-8").read()
+    main_block = src[src.index('if __name__ == "__main__":'):]
+    assert "_sweep_sandbox_temp()" in main_block

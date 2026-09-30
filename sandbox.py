@@ -53,6 +53,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -61,12 +62,26 @@ import time
 from dataclasses import dataclass, field
 
 import config
-from proc_util import assign_to_job, close_job, create_job_with_caps, kill_process_tree
+from proc_util import (
+    assign_to_job,
+    close_job,
+    create_job_with_caps,
+    kill_process_tree,
+    terminate_job,
+)
 
 # Cap captured child output so a runaway print loop can't blow up memory / the
 # saved markdown. Enforced *while reading* (see _CappedReader): the child is
 # killed as soon as either stream exceeds it, not merely trimmed afterwards.
 _OUTPUT_LIMIT = 64 * 1024
+
+# Each throwaway run dir is ``<tempdir>/leetcoach_run_<random>``. The startup
+# sweep (B6) only ever touches directories carrying this exact prefix.
+_RUN_DIR_PREFIX = "leetcoach_run_"
+_STALE_RUN_DIR_AGE_S = 24 * 60 * 60
+
+# Indirection so tests can observe/skip the rmtree backoff without sleeping.
+_sleep = time.sleep
 
 # Per-process memory cap for the untrusted child: RLIMIT_AS on POSIX, a Job
 # Object ProcessMemoryLimit on Windows — same number, parity by construction.
@@ -224,7 +239,14 @@ def _posix_limits():
 
 class _CappedReader(threading.Thread):
     """Drain one child pipe on a daemon thread, retaining at most
-    ``_OUTPUT_LIMIT`` characters.
+    ``_OUTPUT_LIMIT`` bytes.
+
+    B6: reads are RAW (``os.read`` on the pipe's fd), returning whatever has
+    arrived instead of waiting for a full buffer. The old buffered
+    ``read(8192)`` blocked until 8 KB or EOF, so when a grandchild held the
+    pipe open after the solution exited, a short answer sat in the reader's
+    private buffer, the bounded join gave up, and the verdict saw empty
+    stdout. Bytes are decoded once, at the end (:meth:`text`).
 
     Draining both pipes on dedicated threads is what makes the design
     deadlock-free: the child can never block on a full stdout/stderr OS buffer
@@ -240,20 +262,23 @@ class _CappedReader(threading.Thread):
         self._chunks: list = []
         self._kept = 0
         self._total = 0
+        self._lock = threading.Lock()
         self.overflowed = threading.Event()
         self.start()
 
     def run(self) -> None:  # noqa: D102 - thread body
         try:
+            fd = self._stream.fileno()
             while True:
-                data = self._stream.read(8192)
+                data = os.read(fd, 65536)
                 if not data:
                     break  # EOF: every write handle to the pipe is closed
-                self._total += len(data)
-                if self._kept < _OUTPUT_LIMIT:
-                    piece = data[: _OUTPUT_LIMIT - self._kept]
-                    self._chunks.append(piece)
-                    self._kept += len(piece)
+                with self._lock:
+                    self._total += len(data)
+                    if self._kept < _OUTPUT_LIMIT:
+                        piece = data[: _OUTPUT_LIMIT - self._kept]
+                        self._chunks.append(piece)
+                        self._kept += len(piece)
                 if self._total > _OUTPUT_LIMIT:
                     self.overflowed.set()
         except (OSError, ValueError):
@@ -268,10 +293,89 @@ class _CappedReader(threading.Thread):
         """The retained output decoded once at the end (a multi-byte character
         split across reads or by the cap can't raise), with a truncation
         marker if any was dropped."""
-        joined = b"".join(self._chunks).decode("utf-8", errors="replace")
-        if self._total > self._kept:
+        with self._lock:  # the thread may still be draining a held pipe
+            raw, total, kept = b"".join(self._chunks), self._total, self._kept
+        joined = raw.decode("utf-8", errors="replace")
+        if total > kept:
             joined += f"\n... [truncated at {_OUTPUT_LIMIT // 1024} KB]"
         return joined
+
+
+def _clear_readonly_and_retry(func, path, exc) -> None:
+    """``shutil.rmtree`` ``onexc`` hook: a solution may have left a read-only
+    file in its run dir, which Windows refuses to delete. Clear the bit and
+    retry once; anything else re-raises into the retry loop."""
+    if isinstance(exc, PermissionError):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+            return
+        except OSError:
+            pass
+    raise exc
+
+
+def _rmtree_with_retry(path: str, *, attempts: int = 6, base_delay: float = 0.05) -> bool:
+    """Delete ``path`` with exponential backoff (B6). Returns True once it is
+    gone, False if it outlived every attempt. Never raises.
+
+    Right after a kill, Windows can keep a handle on a file in the run dir for
+    a moment (the process object is torn down asynchronously), so the old
+    single ``rmtree(ignore_errors=True)`` routinely leaked the dir: 98 stale
+    ``leetcoach_run_*`` dirs were found in %TEMP%. Worst case this waits
+    ~1.5 s in total (0.05 + 0.1 + ... + 0.8).
+    """
+    delay = base_delay
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path, onexc=_clear_readonly_and_retry)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if not os.path.lexists(path):
+                return True
+            if attempt == attempts - 1:
+                break
+            _sleep(delay)
+            delay *= 2
+    return False
+
+
+def sweep_stale_run_dirs(
+    *, tmp_root: str | None = None, max_age_s: float = _STALE_RUN_DIR_AGE_S
+) -> int:
+    """Startup housekeeping (B6): delete ``leetcoach_run_*`` DIRECTORIES in the
+    temp dir whose mtime is older than ``max_age_s`` (default one day), i.e.
+    dirs a crashed or killed app left behind. Returns how many were removed.
+
+    Deliberately narrow: only real directories whose name starts with
+    :data:`_RUN_DIR_PREFIX`; files, symlinks and junctions carrying the prefix
+    are skipped (never followed), and nothing else in the temp dir is ever
+    touched. Never raises.
+    """
+    root = tmp_root or tempfile.gettempdir()
+    cutoff = time.time() - max_age_s
+    removed = 0
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.startswith(_RUN_DIR_PREFIX):
+            continue
+        try:
+            if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                continue
+            if os.path.isjunction(entry.path):
+                continue
+            if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        if _rmtree_with_retry(entry.path, attempts=2):
+            removed += 1
+    return removed
 
 
 def _feed_stdin(stdin_pipe, data: bytes) -> None:
@@ -488,7 +592,7 @@ def verify_python(
     pipe capture) by spawning a grandchild on purpose; production callers
     never pass it.
     """
-    run_dir = tempfile.mkdtemp(prefix="leetcoach_run_")
+    run_dir = tempfile.mkdtemp(prefix=_RUN_DIR_PREFIX)
     job_handle = None
     try:
         script_path = os.path.join(run_dir, "solution.py")
@@ -502,6 +606,10 @@ def verify_python(
         preexec = _posix_limits()
         if preexec:
             popen_kwargs["preexec_fn"] = preexec
+        if os.name != "nt":
+            # Own session => own process group, so a whole-tree kill can
+            # reach grandchildren via killpg (C5 parity with the claude runner).
+            popen_kwargs["start_new_session"] = True
 
         # Windows: create + configure the Job Object BEFORE the spawn. Every
         # slow step (one-time ctypes setup at proc_util import, job creation,
@@ -573,7 +681,7 @@ def verify_python(
             # Timeout or overflow: kill the WHOLE tree — the untrusted code may
             # have spawned grandchildren that a plain terminate() would leak —
             # then reap the direct child (kill() as a last resort).
-            kill_process_tree(proc)
+            kill_process_tree(proc, group=os.name != "nt")
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -582,6 +690,17 @@ def verify_python(
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     pass  # unreapable zombie — readers are daemons, move on
+
+        # B6: the direct child is gone, but a straggler it spawned may still
+        # hold a pipe open, so the readers would never see EOF. Give them a
+        # moment, then kill whatever is left (the whole job on Windows, the
+        # process group on POSIX) so they drain and finish promptly. Raw reads
+        # mean everything the solution printed is already captured anyway.
+        out_reader.join(timeout=0.2)
+        err_reader.join(timeout=0.2)
+        if out_reader.is_alive() or err_reader.is_alive():
+            if not terminate_job(job_handle) and os.name != "nt":
+                kill_process_tree(proc, group=True)
 
         # Bounded join: if a leaked write handle keeps a pipe open the daemon
         # readers may never see EOF, and we must not hang on them.
@@ -656,9 +775,10 @@ def verify_python(
         # KILL_ON_JOB_CLOSE: closing the job handle terminates anything still
         # alive inside the job — the second kill mechanism after
         # kill_process_tree — and runs BEFORE rmtree so no straggler can hold
-        # files in run_dir open.
+        # files in run_dir open. The teardown is asynchronous, so the delete
+        # retries with backoff (B6).
         close_job(job_handle)
-        shutil.rmtree(run_dir, ignore_errors=True)
+        _rmtree_with_retry(run_dir)
 
 
 # --- pull sample I/O out of a pasted problem -----------------------------
