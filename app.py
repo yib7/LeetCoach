@@ -1132,14 +1132,18 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     targets.append(sibling)
         root = config.output_dir().resolve()
         deleted = []
-        for target in targets:
-            try:
-                target.unlink()
-            except OSError:
-                # Vanished between the resolve and the unlink, or a
-                # permission/lock issue — never 500 the caller.
-                continue
-            deleted.append(target.relative_to(root).as_posix())
+        # SP8 fix M5: under the library write lock, so a delete never lands
+        # between a follow-up append's read and its atomic write (which would
+        # resurrect the doc) - the append then sees the doc gone and saves nothing.
+        with storage.WRITE_LOCK:
+            for target in targets:
+                try:
+                    target.unlink()
+                except OSError:
+                    # Vanished between the resolve and the unlink, or a
+                    # permission/lock issue — never 500 the caller.
+                    continue
+                deleted.append(target.relative_to(root).as_posix())
         _invalidate_library_cache()  # next /library reflects the removal
         if not deleted:
             return jsonify({"error": "Not found."}), 404
