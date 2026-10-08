@@ -157,7 +157,10 @@ PROBLEM_SUMMARY_FIELDS = ("id", "number", "title", "difficulty", "pattern",
                           "created", "updated", "review", "runs", "aliases")
 
 # Allowlists — never pass an arbitrary string downstream to prompts/storage.
-MODES = ("answer", "learning", "guided")
+MODES = ("answer", "learning", "guided", "review")
+# Modes without a code-quality tier (Learning teaches; a Code Review critiques
+# the learner's own code).
+UNTIERED_MODES = ("learning", "review")
 LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
 TIERS = prompts.TIERS                  # ("simple", "normal", "complex")
 
@@ -1290,7 +1293,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             data,
             (("problem", "Problem"), ("mode", "Mode"),
              ("language", "Language"), ("tier", "Tier"), ("model", "Model"),
-             ("run_id", "Run id")),
+             ("run_id", "Run id"), ("code", "Code")),
         )
         if type_err:
             return jsonify({"error": type_err}), 400
@@ -1324,13 +1327,24 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"error": f"Unknown mode {mode!r}."}), 400
         if language not in LANGUAGES:
             return jsonify({"error": f"Unknown language {language!r}."}), 400
-        # Learning has no tier; Answer/Guided require a valid one.
-        if mode != "learning" and tier not in TIERS:
+        # Learning / Code Review have no tier; Answer/Guided require a valid one.
+        if mode not in UNTIERED_MODES and tier not in TIERS:
             return jsonify({"error": f"Unknown tier {tier!r}."}), 400
+        if mode in UNTIERED_MODES:
+            tier = ""
+        # SP7 / D5: Code Review reviews the learner's own attempt ("code").
+        attempt_code = ""
+        if mode == "review":
+            attempt_code = (data.get("code") or "").replace("\r\n", "\n")
+            if not attempt_code.strip():
+                return jsonify({"error": "Paste your code to review."}), 400
+            if len(attempt_code) > practice.CODE_CAP:
+                return jsonify({"error": f"Code is too long (max {practice.CODE_CAP} "
+                                "characters)."}), 400
 
         # De-dup identical in-flight runs (P2-12). Register atomically after
         # validation; an exact duplicate that's still streaming gets a 409.
-        run_key = (problem, mode, language, tier, model)
+        run_key = (problem, mode, language, tier, model, attempt_code)
         study_kwargs = {"model": model} if model else {}
         state = _RunState(run_key)
         with _inflight_lock:
@@ -1664,7 +1678,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         out[0],
                     )
                     _record_topics(cls)
-                else:  # mode == "guided" (validation guarantees a valid tier)
+                elif mode == "guided":  # validation guarantees a valid tier
                     # B22: Guided teaches the stack too - skip what is known,
                     # and remember what this run covered.
                     learned = _learned_topics()
@@ -1697,6 +1711,25 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         saved,
                     )
                     _record_topics(cls)
+                elif mode == "review":
+                    # SP7 / D5: critique the learner's attempt (fenced as
+                    # untrusted data like the problem); nothing is verified.
+                    prompt = prompts.build_review(
+                        problem, attempt_code, language=language, meta=paste_meta
+                    )
+                    yield from _stream_and_accumulate(prompt)
+                    # The saved doc keeps the attempt it reviewed.
+                    saved = (
+                        out[0].rstrip("\n") + "\n\n---\n\n## Your attempt\n\n"
+                        + storage.attempt_block(attempt_code, language)
+                    )
+                    yield _sse_event("phase", {"phase": "saving"})
+                    cls = yield from _classification()  # join before the save
+                    state.commit()  # B14 / M1: cancel wins only before this point
+                    paths, save_warning = _save_with_fallback(
+                        lambda: [storage.save_review(problem, cls.problem_type, saved)],
+                        saved,
+                    )
 
                 problem_id = _record_run(paths, verification, cls, out[0])
 
