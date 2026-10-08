@@ -152,6 +152,15 @@ CONTRACT_SEED = [
     ("learning/hash_map_learning/1_two_sum.md", "learning", TWO_SUM_PASTE, None, 1),
 ]
 
+# SP6 fix: a legacy (unlogged) Guided doc whose ## Approach has NO heading after
+# Hint 4 (the fake's FAKE_NOWALK marker) - Hint 4 must reveal only its own
+# paragraph - and whose numbered file name shows as "#20 - Valid Parentheses".
+LEGACY_CONTRACT_SEED = [
+    ("guided/stack/20_valid_parentheses.md", "guided",
+     "20. Valid Parentheses\nEasy\n\nGiven a string s of brackets... FAKE_NOWALK",
+     "✓ Sample tests PASS (1/1 samples)", 2),
+]
+
 # problem_id -> (number, title, difficulty, pattern, statement)
 PROBLEMS = {
     "1-two_sum": (1, "Two Sum", "Easy", "hash_map", TWO_SUM_PASTE),
@@ -182,7 +191,7 @@ LOG = [
       "answers/stack/valid_parentheses__optimal.py"]),
     (1, "1-two_sum", "learning", "python", None, None,
      ["learning/hash_map_learning/1_two_sum.md"]),
-    (0, "1-two_sum", "guided", "python", "normal", "pass", ["guided/hash_map/1_two_sum.md"]),
+    (0, "1-two_sum", "guided", "python", None, "pass", ["guided/hash_map/1_two_sum.md"]),
     (0, "1-two_sum", "answer", "python", "normal", "pass",
      ["answers/hash_map/two_sum__normal.md", "answers/hash_map/two_sum__normal.py"]),
 ]
@@ -237,7 +246,7 @@ def seed(output: Path) -> None:
                                  encoding="utf-8")
     now = time.time()
     contract = [(rel, _contract_doc(mode, paste, verdict), age)
-                for rel, mode, paste, verdict, age in CONTRACT_SEED]
+                for rel, mode, paste, verdict, age in CONTRACT_SEED + LEGACY_CONTRACT_SEED]
     for rel, content, age_days in SEED + contract:
         path = output / rel
         path.parent.mkdir(parents=True, exist_ok=True)

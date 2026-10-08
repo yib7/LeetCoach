@@ -332,18 +332,27 @@ def _hint_ladder() -> str:
     )
 
 
+# SP6 fix I1: the fixed H3 that ends the hint ladder. The app hides each hint
+# section up to the next heading, so without it Hint 4 would swallow the rest
+# of ## Approach.
+AFTER_HINTS_HEADING = {"learning": "Techniques", "guided": "Walkthrough"}
+
+
 def _approach_guide(mode: str) -> str:
+    after = f"`### {AFTER_HINTS_HEADING.get(mode, '')}`"
     if mode == "learning":
         return (
-            _hint_ladder() + " Then explain the techniques the approach needs "
-            "and how they fit together - without assembling them into a "
-            "finished solution."
+            _hint_ladder() + f" Right after Hint {HINT_COUNT}, start a subsection "
+            f"titled exactly {after}; under it explain the techniques the "
+            "approach needs and how they fit together - without assembling "
+            "them into a finished solution."
         )
     if mode == "guided":
         return (
-            _hint_ladder() + " Then go from the brute force approach (what it "
-            "is, its time complexity, and why the constraints rule it out) to "
-            "the optimal approach, one step at a time."
+            _hint_ladder() + f" Right after Hint {HINT_COUNT}, start a subsection "
+            f"titled exactly {after}; under it go from the brute force approach "
+            "(what it is, its time complexity, and why the constraints rule it "
+            "out) to the optimal approach, one step at a time."
         )
     return "Derive the solution step by step, from the first idea to the final algorithm."
 
