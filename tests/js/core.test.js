@@ -46,6 +46,53 @@ test("hasOpenFence tracks fence open/close", function () {
   assert.strictEqual(core.hasOpenFence("```python solution\nx\n``` trailing\n"), true);
 });
 
+test("hasOpenFence handles fences indented inside list items (R3)", function () {
+  assert.strictEqual(core.hasOpenFence("1. step\n\n    ```python\n    x=1"), true);
+  assert.strictEqual(core.hasOpenFence("1. step\n\n    ```python\n    x=1\n    ```\n"), false);
+  assert.strictEqual(core.hasOpenFence("- a\n\n   ```\n   y\n   ```\n\nafter"), false);
+  assert.strictEqual(core.hasOpenFence("1. step\n\n\t```js\n\tx\n\t```\n"), false);
+  // a dedented closer ends the list item, and the block with it
+  assert.strictEqual(core.hasOpenFence("1. s\n\n    ```\n    x\n```\n"), false);
+  // a ``` nested deeper than the opener is code inside the block
+  assert.strictEqual(core.hasOpenFence("```python\ndef f():\n    \"\"\"\n    ```\n"), true);
+  assert.strictEqual(core.hasOpenFence("```python\r\nx\r\n```\r\n"), false);
+});
+
+test("runEventKind maps terminal SSE events to finish kinds (R8)", function () {
+  assert.strictEqual(core.runEventKind("done"), "done");
+  assert.strictEqual(core.runEventKind("error"), "error");
+  assert.strictEqual(core.runEventKind("cancelled"), "stopped");
+  assert.strictEqual(core.runEventKind("phase"), null);
+  assert.strictEqual(core.runEventKind("meta"), null);
+  assert.strictEqual(core.runEventKind(null), null);
+});
+
+test("cancelOutcome reads the /run/cancel answer (R8)", function () {
+  assert.strictEqual(core.cancelOutcome(200, { cancelled: false }), "committed");
+  assert.strictEqual(core.cancelOutcome(200, { cancelled: true }), "cancelled");
+  assert.strictEqual(core.cancelOutcome(404, { cancelled: false }), "cancelled");
+  assert.strictEqual(core.cancelOutcome(200, null), "cancelled");
+  assert.strictEqual(core.cancelOutcome(0, null), "cancelled");
+});
+
+test("runRetryDelay retries a 409 only for the current run (R8)", function () {
+  assert.strictEqual(core.runRetryDelay(200, 0, true), -1);
+  assert.strictEqual(core.runRetryDelay(500, 0, true), -1);
+  assert.strictEqual(core.runRetryDelay(409, 0, true), 400);
+  assert.strictEqual(core.runRetryDelay(409, 3, true), 3200);
+  assert.strictEqual(core.runRetryDelay(409, 4, true), -1);
+  assert.strictEqual(core.runRetryDelay(409, 0, false), -1);
+});
+
+test("needsReplaceConfirm only when a different draft would be lost (R4)", function () {
+  assert.strictEqual(core.needsReplaceConfirm("", "Two Sum"), false);
+  assert.strictEqual(core.needsReplaceConfirm("   \n", "Two Sum"), false);
+  assert.strictEqual(core.needsReplaceConfirm("Two Sum", "Two Sum"), false);
+  assert.strictEqual(core.needsReplaceConfirm("Two Sum  \n", "Two Sum"), false);
+  assert.strictEqual(core.needsReplaceConfirm("3Sum draft", "Two Sum"), true);
+  assert.strictEqual(core.needsReplaceConfirm("3Sum draft", ""), false);
+});
+
 test("throttleDelay waits out the interval", function () {
   assert.strictEqual(core.throttleDelay(0, 1000, 150), 0);
   assert.strictEqual(core.throttleDelay(1000, 1050, 150), 100);

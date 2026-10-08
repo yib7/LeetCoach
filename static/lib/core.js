@@ -147,6 +147,41 @@
     return attempt >= 0 && attempt < RETRY_DELAYS.length ? RETRY_DELAYS[attempt] : -1;
   }
 
+  // SP5 fix R8: the /run response decision - ms to wait before re-POSTing,
+  // or -1 to hand `status` to the caller. Only a 409 is retried, and only
+  // while the run still owns the UI.
+  function runRetryDelay(status, attempt, isCurrent) {
+    if (status !== 409 || !isCurrent) return -1;
+    return retryDelay(attempt);
+  }
+
+  // SP5 fix R8: what a POST /run/cancel answer means for Stop. A 200
+  // {"cancelled": false} is the server saying the run already committed to
+  // saving (SP4 M1) - keep reading for its `done`. Anything else (cancelled,
+  // unknown run, network failure) means the run is over: show it as stopped.
+  function cancelOutcome(status, body) {
+    return status === 200 && !!body && body.cancelled === false ? "committed" : "cancelled";
+  }
+
+  // SP5 fix R8/B2: the finish kind for a terminal SSE event name, or null for
+  // a non-terminal / unknown one. A `cancelled` event is a user Stop the
+  // server honoured - the neutral "stopped" state, never "Run failed".
+  function runEventKind(name) {
+    if (name === "done") return "done";
+    if (name === "error") return "error";
+    if (name === "cancelled") return "stopped";
+    return null;
+  }
+
+  // SP5 fix R4: would replacing the editor's text with a run's captured
+  // problem lose a DIFFERENT, non-empty draft? (Whitespace-only differences
+  // and an empty editor never need asking.)
+  function needsReplaceConfirm(current, incoming) {
+    var cur = String(current || "").trim();
+    var inc = String(incoming || "").trim();
+    return !!cur && !!inc && cur !== inc;
+  }
+
   // D11: human text for an SSE `phase` payload.
   function phaseText(p) {
     p = p || {};
@@ -163,18 +198,26 @@
 
   // B16: is the markdown currently inside an unclosed ``` / ~~~ fence? (The
   // last code block is then partial: not highlighted, marked `.partial`.)
+  //
+  // SP5 fix R3: a fence may be indented (a code block inside a list item,
+  // "1. step\n\n    ```python"), like parsing.py's indentation-aware match.
+  // A closing fence counts when it is indented at most 3 columns past its
+  // opener (or less - a dedent ends the list item, and the block with it);
+  // a ``` indented further is code INSIDE the block (e.g. a docstring example).
   function hasOpenFence(md) {
-    var lines = String(md || "").split("\n");
-    var open = null; // { ch, len }
+    var lines = String(md || "").replace(/\r\n?/g, "\n").split("\n");
+    var open = null; // { ch, len, indent }
     for (var i = 0; i < lines.length; i++) {
-      var m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(lines[i]);
+      var m = /^([ \t]*)(`{3,}|~{3,})(.*)$/.exec(lines[i]);
       if (!m) continue;
-      var ch = m[1].charAt(0);
-      var len = m[1].length;
+      var indent = m[1].replace(/\t/g, "    ").length;
+      var ch = m[2].charAt(0);
+      var len = m[2].length;
       if (!open) {
-        if (ch === "`" && m[2].indexOf("`") !== -1) continue; // not a fence
-        open = { ch: ch, len: len };
-      } else if (ch === open.ch && len >= open.len && !m[2].trim()) {
+        if (ch === "`" && m[3].indexOf("`") !== -1) continue; // not a fence
+        open = { ch: ch, len: len, indent: indent };
+      } else if (ch === open.ch && len >= open.len && !m[3].trim() &&
+                 indent <= open.indent + 3) {
         open = null;
       }
     }
@@ -502,6 +545,10 @@
     parseDayKey: parseDayKey,
     modelLabel: modelLabel,
     retryDelay: retryDelay,
+    runRetryDelay: runRetryDelay,
+    cancelOutcome: cancelOutcome,
+    runEventKind: runEventKind,
+    needsReplaceConfirm: needsReplaceConfirm,
     phaseText: phaseText,
     hasOpenFence: hasOpenFence,
     throttleDelay: throttleDelay,

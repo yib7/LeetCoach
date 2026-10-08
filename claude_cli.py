@@ -78,6 +78,11 @@ class ClaudeUnavailableError(RuntimeError):
     """Raised when the `claude` binary cannot be found / run."""
 
 
+NO_RESULT_MESSAGE = (
+    "Claude stopped before finishing (no final result) - nothing was saved."
+)
+
+
 class ClaudeCancelledError(RuntimeError):
     """Raised by a run's iterator after :meth:`ClaudeRun.cancel` killed it."""
 
@@ -843,10 +848,18 @@ def _real_runner(
         # the nonzero-exit branch below reads back and raises instead of a bare
         # "[Errno 32]". The main thread only reads this flag after joining the
         # feeder (below), so no lock is needed.
+        # SP5 fix B1: write the prompt as UTF-8 BYTES to the pipe's binary
+        # buffer. The text wrapper Popen(text=True) puts on stdin translates
+        # LF to os.linesep, so on Windows the CLI received CRLF line
+        # endings it never asked for (and in-band markers on their own line
+        # stopped matching). Nothing is ever written through the wrapper, so
+        # closing it below just flushes/closes the buffer we wrote to.
+        payload = stdin_text.encode("utf-8")
+
         def _feed_stdin() -> None:
             nonlocal stdin_ok
             try:
-                proc.stdin.write(stdin_text)
+                proc.stdin.buffer.write(payload)
             except (OSError, ValueError):
                 stdin_ok = False
             finally:
@@ -1028,6 +1041,7 @@ def _iter_text_deltas(
       unexpected type (B3): the parser must never crash on an odd shape.
     """
     saw_stream_event_text = False
+    saw_result = False
     assistant_fallback: list[str] = []
     result_fallback = ""
 
@@ -1101,6 +1115,7 @@ def _iter_text_deltas(
             if kind == "result":
                 if _is_error_result(obj):
                     raise ClaudeUnavailableError(result_error_message(obj))
+                saw_result = True
                 text = obj.get("result")
                 if isinstance(text, str):
                     result_fallback = text
@@ -1112,6 +1127,12 @@ def _iter_text_deltas(
         if callable(close):
             close()
 
+    if not saw_result:
+        # SP5 fix B3: the CLI always ends a finished run with a `result`
+        # event. A stream that stops without one (exit 0 mid-answer: a crash
+        # the CLI swallowed, a killed helper) is an INCOMPLETE answer - never
+        # pass it off, or save it, as a success.
+        raise ClaudeUnavailableError(NO_RESULT_MESSAGE)
     if saw_stream_event_text:
         return
     joined = "".join(assistant_fallback) or result_fallback

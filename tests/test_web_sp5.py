@@ -224,11 +224,14 @@ def test_verdict_from_text(line, verdict):
     assert app_module.verdict_from_text(doc) == verdict
 
 
-def test_verdict_from_text_uses_the_last_line_and_none_without_one():
+def test_verdict_from_text_uses_the_last_block_and_none_without_one():
     assert app_module.verdict_from_text("# Learning notes only\n") is None
-    doc = ("**Verification:** ✗ Sample tests FAIL (0/1)\n\n## Follow-up\n\n"
-           "**Verification:** ✓ Sample tests PASS\n")
+    doc = ("# T\n\n---\n\n**Verification:** ✗ Sample tests FAIL (0/1)\n\n"
+           "---\n\n**Verification:** ✓ Sample tests PASS\n")
     assert app_module.verdict_from_text(doc) == "pass"
+    # SP5 fix R2: a later `## Follow-up` section never changes the verdict.
+    followed = doc + "\n## Follow-up\n\n---\n\n**Verification:** ✗ Sample tests FAIL\n"
+    assert app_module.verdict_from_text(followed) == "pass"
 
 
 def test_library_listing_carries_the_verdict(env):

@@ -25,9 +25,14 @@ import proc_util
 
 # --- fakes ---------------------------------------------------------------
 
-def make_recording_runner(lines):
-    """Return (runner, calls) where runner records argv + stdin and yields `lines`."""
+def make_recording_runner(lines, *, terminal_result=True):
+    """Return (runner, calls) where runner records argv + stdin and yields `lines`.
+
+    Like the real CLI, the stream ends with a ``result`` event unless the test
+    already supplies one (or opts out with ``terminal_result=False``)."""
     calls = []
+    if terminal_result and not any('"type": "result"' in ln for ln in lines):
+        lines = [*lines, json.dumps({"type": "result", "subtype": "success", "result": ""})]
 
     def runner(argv, stdin_text, **kwargs):  # kwargs: cwd / handle (A7)
         calls.append({"argv": list(argv), "stdin": stdin_text})

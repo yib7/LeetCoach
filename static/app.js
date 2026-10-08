@@ -20,7 +20,8 @@
  *    handled by ONE delegated click listener per container, added once.
  *  - /run request body is { problem, mode, language, tier, model?, run_id };
  *    Stop POSTs /run/cancel { run_id }. Events: text deltas, `phase`, `meta`
- *    ({model}), terminal `done` / `error`; unknown names are ignored.
+ *    ({model}), terminal `done` / `error` / `cancelled` (a Stop the server
+ *    honoured -> the neutral Stopped state); unknown names are ignored.
  *  - B13: every async callback of a run checks it is still `currentRun`
  *    before touching the UI, so a finishing old run can never clobber a new
  *    run's Stop button, flags or output.
@@ -763,7 +764,25 @@
   }
 
   // D7: re-run the same problem (captured at run start) with a patch.
-  function rerun(meta, patch) {
+  // SP5 fix R4: the editor may hold a DIFFERENT draft by now (the user
+  // started the next problem); replacing it asks first instead of clobbering.
+  function rerun(meta, patch, trigger) {
+    if (isStreaming) return;
+    if (meta.problem && core.needsReplaceConfirm(problemEl.value, meta.problem)) {
+      confirmDialog({
+        title: "Replace the problem in the editor?",
+        lines: ["The editor holds a different problem than this run's.",
+          "Re-running puts “" + (meta.title || core.firstLine(meta.problem)) +
+          "” back in the editor and runs it."],
+        note: "Your current draft will be replaced.",
+        ok: "Replace and run",
+        returnFocus: trigger,
+      }).then(function (ok) { if (ok) applyRerun(meta, patch); });
+      return;
+    }
+    applyRerun(meta, patch);
+  }
+  function applyRerun(meta, patch) {
     if (isStreaming) return;
     if (patch.mode) setSeg("mode", patch.mode);
     if (patch.lang) setSeg("lang", patch.lang);
@@ -854,7 +873,7 @@
         b.setAttribute("data-action", a.id);
         b.addEventListener("click", function () {
           if (a.id === "open") openSavedDoc(a.path);
-          else rerun(meta, a.patch);
+          else rerun(meta, a.patch, b);
         });
         bar.appendChild(b);
       });
@@ -938,8 +957,9 @@
         keepalive: true,
         signal: ctl.signal,
       }).then(function (r) {
-        if (!r.ok) return false;
-        return r.json().then(function (d) { return !!d && d.cancelled === false; });
+        return r.json().catch(function () { return null; }).then(function (d) {
+          return core.cancelOutcome(r.status, d) === "committed";
+        });
       }).catch(function () { return false; }).finally(function () {
         clearTimeout(timer);
       });
@@ -983,10 +1003,8 @@
         body: JSON.stringify(body),
         signal: run.controller.signal,
       });
-      if (resp.status !== 409) return resp;
-      var delay = core.retryDelay(attempt);
+      var delay = core.runRetryDelay(resp.status, attempt, currentRun === run);
       if (delay < 0) return resp;
-      if (currentRun !== run) return resp;
       setRunhead("stream", "Waiting");
       if (streamNote) {
         streamNote.textContent = "the previous identical run is still shutting down — retrying in " +
@@ -1059,10 +1077,15 @@
           setPhase(ev.data || {});
         } else if (ev.name === "meta") {
           if (ev.data && ev.data.model) setRunModel(run.meta, ev.data.model);
-        } else if (ev.name === "done") {
-          finish(run, "done", ev.data || {});
-        } else if (ev.name === "error") {
-          finish(run, "error", typeof ev.data === "string" ? ev.data : "Run failed.");
+        } else {
+          // done / error / cancelled (SP5 fix B2: a server-confirmed Stop is
+          // the neutral "Stopped" state, never "Run failed"); others ignored.
+          var kind = core.runEventKind(ev.name);
+          if (kind === "done") finish(run, "done", ev.data || {});
+          else if (kind === "stopped") { run.stopped = true; finish(run, "stopped"); }
+          else if (kind === "error") {
+            finish(run, "error", typeof ev.data === "string" ? ev.data : "Run failed.");
+          }
         }
       });
 
@@ -1184,6 +1207,9 @@
         problem: problemEl.value.trim(),
         ask_id: q.id,
       }, { signal: q.controller.signal });
+      // SP5 fix R7: the answer has arrived - the 60 s timeout must not
+      // throw it away now (only an explicit Cancel/unload still can).
+      clearTimeout(timer);
       var data = await resp.json().catch(function () { return {}; });
       if (q.reason) throw Object.assign(new Error("aborted"), { name: "AbortError" });
       if (resp.ok) showQaAnswer(String(data.answer || ""));
@@ -1192,9 +1218,8 @@
       if (e && e.name === "AbortError") {
         if (q.reason === "timeout") {
           showQaError("Quick Ask timed out after 60 s and was cancelled. Try again or shorten the question.");
-        } else if (q.reason === "cancel") {
-          showQaError("Quick Ask cancelled.");
         }
+        // reason "cancel": reported in #qa-status below (SP5 fix B4).
       } else {
         showQaError("Network error: " + ((e && e.message) || "the request failed") + ".");
       }
@@ -1202,6 +1227,15 @@
       clearTimeout(timer);
       if (qaInflight === q) qaInflight = null;
       setQaBusy(false);
+      if (q.reason === "cancel") {
+        // SP5 fix B4: say so where the "Asking…" line was; the next ask's
+        // setQaBusy(true) replaces it. The stale answer box goes away.
+        qaAnswer.hidden = true;
+        if (qaStatus) {
+          qaStatus.textContent = "Quick Ask cancelled.";
+          qaStatus.hidden = false;
+        }
+      }
     }
   }
 
@@ -1245,6 +1279,7 @@
   var libByPath = {};
   var currentRuns = [];
   var libLoaded = false; // C10: no Stats empty-state flash before the first load
+  var libListed = false; // R5: a /library listing has succeeded at least once
 
   function openRun(run) {
     var path = run.mdPath || (run.files[0] && run.files[0].path);
@@ -1327,10 +1362,19 @@
       row.setAttribute("data-verdict", run.verdict || "none");
       row.appendChild(el("span", "diff", "—")); // difficulty arrives with SP6 (D1)
       var pc = el("div", "pcell");
-      pc.appendChild(el("div", "pn", run.problem));
-      pc.appendChild(el("div", "pm", run.stemRaw + (run.tier ? "__" + run.tier : "")));
+      // SP5 fix B5: long names/slugs ellipsize in their column (style.css);
+      // the full text stays one hover away.
+      var pn = el("div", "pn", run.problem);
+      pn.title = run.problem;
+      pc.appendChild(pn);
+      var slug = run.stemRaw + (run.tier ? "__" + run.tier : "");
+      var pm = el("div", "pm", slug);
+      pm.title = slug;
+      pc.appendChild(pm);
       row.appendChild(pc);
-      row.appendChild(run.topic ? chipEl(run.topic, "mint") : el("span", "tcell", "—"));
+      var topicCell = run.topic ? chipEl(run.topic, "mint") : el("span", "tcell", "—");
+      if (run.topic) topicCell.title = run.topic;
+      row.appendChild(topicCell);
       row.appendChild(chipEl(run.mode, ""));
       row.appendChild(run.langExt ? typeBadge(run.langExt) : el("span", "tcell", "—"));
       row.appendChild(el("span", "tcell", relTime(run.savedAt)));
@@ -1732,6 +1776,7 @@
       })
       .then(function (data) {
         libLoaded = true;
+        libListed = true;
         libFiles = (data && data.files) || [];
         libByPath = {};
         libFiles.forEach(function (f) { libByPath[f.path] = f; });
@@ -1744,6 +1789,14 @@
       })
       .catch(function (e) {
         libLoaded = true;
+        var why = (e && e.message) || "network error";
+        // SP5 fix R5: a refresh that fails keeps the library the page already
+        // shows (a blip must not blank recents / table / tree) and says so.
+        if (libListed) {
+          notify("Could not refresh the library (" + why + "). Showing the last loaded list.", "error");
+          return;
+        }
+        notify("Could not load the library (" + why + ").", "error");
         libFiles = [];
         libByPath = {};
         currentRuns = [];
@@ -1753,7 +1806,7 @@
         refreshStats();
         if (libTree) {
           libTree.textContent = "";
-          libTree.appendChild(el("div", "grp-h", "Could not load the library (" + (e && e.message) + ")."));
+          libTree.appendChild(el("div", "grp-h", "Could not load the library (" + why + ")."));
         }
       });
   }
@@ -1873,6 +1926,13 @@
   var confirmResolve = null;
   function confirmDialog(opts) {
     if (!confirmModal) return Promise.resolve(window.confirm(opts.title));
+    // SP5 fix R7: a second dialog while one is open answers the first
+    // "cancelled" (the safe choice) instead of leaving its promise hanging.
+    if (confirmResolve) {
+      var pending = confirmResolve;
+      confirmResolve = null;
+      pending(false);
+    }
     closeSearch();
     closeShortcuts();
     $("confirm-title").textContent = opts.title;
@@ -1885,7 +1945,11 @@
     }
     if (opts.note) body.appendChild(el("p", "confirm-note", opts.note));
     $("confirm-ok").textContent = opts.ok || "OK";
-    overlayReturnFocus = opts.returnFocus || document.activeElement;
+    // Replacing an open dialog keeps the focus target of the first one (the
+    // active element is now the dialog's own Cancel button).
+    if (opts.returnFocus || confirmModal.hidden) {
+      overlayReturnFocus = opts.returnFocus || document.activeElement;
+    }
     confirmModal.hidden = false;
     $("confirm-cancel").focus(); // the safe choice has focus
     return new Promise(function (resolve) { confirmResolve = resolve; });

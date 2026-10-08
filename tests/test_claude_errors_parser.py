@@ -266,7 +266,8 @@ ODD_LINES = [
 
 @pytest.mark.parametrize("line", ODD_LINES)
 def test_odd_event_shapes_are_skipped_not_fatal(line):
-    lines = [line, _text_line("ok")]
+    # A real stream always ends with its `result` event (SP5 fix B3).
+    lines = [line, _text_line("ok"), json.dumps({"type": "result", "result": "ok"})]
     run = claude_cli.ClaudeRun()
     out = list(claude_cli._iter_text_deltas(lines, run))
     assert out == ["ok"] or out == []  # a result line ends the stream early

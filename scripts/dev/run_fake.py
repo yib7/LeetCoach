@@ -15,14 +15,19 @@ NEVER CALLS REAL CLAUDE and never touches your real data:
   scratch files too;
 * no browser is opened (``LEETCOACH_NO_BROWSER=1``); fixed port 5057 (the
   ``leetcoach-fake`` entry in ``.claude/launch.json``).
+
+If a LeetCoach already answers ``/healthz`` on 5057 the script just prints its
+URL and exits: it never re-seeds (wipes) the library of a running instance.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -128,7 +133,25 @@ def configure(scratch: Path, *, keep: bool = False) -> Path:
     return output
 
 
-def main(argv: list[str]) -> int:
+def running_instance(port: int = PORT, *, timeout: float = 1.0, opener=None) -> str | None:
+    """The URL of a LeetCoach already answering ``/healthz`` on ``port``, or
+    ``None`` (nothing listening, or some other app)."""
+    url = f"http://127.0.0.1:{port}/"
+    opener = opener or urllib.request.urlopen
+    try:
+        with opener(url + "healthz", timeout=timeout) as resp:
+            data = json.loads(resp.read(4096).decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return url if isinstance(data, dict) and data.get("app") == "leetcoach" else None
+
+
+def main(argv: list[str], *, probe=running_instance) -> int:
+    existing = probe(PORT)
+    if existing:
+        # SP5 fix R6: re-seeding would wipe the library under a live server.
+        print(f"LeetCoach is already running at {existing} - not re-seeding; use that one.")
+        return 0
     scratch = Path(tempfile.gettempdir()) / "leetcoach-fake"
     output = configure(scratch, keep="--keep" in argv)
     sys.path.insert(0, str(ROOT))

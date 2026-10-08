@@ -46,3 +46,20 @@ test("text tokens keep their hierarchy (tx > tx2 > tx3 > tx4)", function () {
   assert.ok(lum(vars.tx2) > lum(vars.tx3));
   assert.ok(lum(vars.tx3) > lum(vars.tx4));
 });
+
+// SP5 fix B5: a long slug in the recent-runs Problem column must not spill
+// into the Topic column.
+function rule(selector) {
+  var esc = selector.replace(/[.*+?^${}()|[\]\>]/g, function (c) { return "\\" + c; });
+  var m = new RegExp("(?:^|\})\s*" + esc + "\s*\{([^}]*)\}", "m").exec(css);
+  return m ? m[1] : "";
+}
+
+test("recent-runs table cells truncate instead of overflowing (B5)", function () {
+  var pm = rule(".pcell .pm");
+  assert.ok(/white-space:\s*nowrap/.test(pm) && /overflow:\s*hidden/.test(pm) &&
+    /text-overflow:\s*ellipsis/.test(pm), ".pcell .pm must ellipsize: " + pm);
+  assert.ok(/minmax\(0,\s*1fr\)/.test(rule(".trow")), ".trow problem column must be minmax(0,1fr)");
+  assert.ok(/minmax\(0,\s*1fr\)/.test(rule(".thead")), ".thead must match .trow columns");
+  assert.ok(/min-width:\s*0/.test(rule(".trow>*")), "grid items must be allowed to shrink");
+});
