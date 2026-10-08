@@ -128,14 +128,15 @@ pipe-holding grandchild finishes within timeout+slack; parser fuzz cases pass; s
 **Checkpoint:** a 700 MB allocation is killed by the cap in ≥20/20 runs under 2 busy parent threads (scratch
 stress script, recorded in DECISIONS); grandchild-held pipe no longer loses stdout; temp dirs cleaned; suite green.
 
-- [ ] A5 — bootstrap: spawn `sys._base_executable -I` running a trusted bootstrap that waits for a "go" byte;
+- [x] A5 — bootstrap: spawn `sys._base_executable -I` running a trusted bootstrap that waits for a "go" byte;
   parent assigns the job object, then releases; bootstrap `runpy.run_path`s the solution.
-- [ ] C6 — bootstrap installs `sys.addaudithook` blocking `open` outside the run dir (write) and of known secret
+- [x] C6 — bootstrap installs `sys.addaudithook` blocking `open` outside the run dir (write) and of known secret
   paths, `socket.connect`, `subprocess`/`os.system`/`os.exec*` (defence-in-depth, documented in SECURITY.md as
   not a boundary).
-- [ ] B6 — raw byte reads (`os.read`/`read1`) with caps, decode at end; `rmtree` retry/backoff after kill; sweep
+- [x] B6 — raw byte reads (`os.read`/`read1`) with caps, decode at end; `rmtree` retry/backoff after kill; sweep
   stale `leetcoach_run_*` older than 1 day at startup.
-- [ ] Tests: bootstrap ordering, audit-hook blocks, output capture with grandchild, cleanup; suite + ruff green.
+- [x] Tests: bootstrap ordering, audit-hook blocks, output capture with grandchild, cleanup; suite + ruff green.
+- Verified: 2026-10-08 orchestrator re-run at 3b6bb9b: 768 passed/1 skipped, ruff clean, 700 MB stress contained 20/20 with 2 busy parent threads, 0 leftover run dirs; review approved after 3 fix rounds (fail-closed caps, READY/go handshake, sqlite+all sockets blocked; asyncio unsupported in sandbox).
 
 ## SP4 — Web, storage & security
 
