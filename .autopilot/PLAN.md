@@ -164,7 +164,7 @@ keyboard nav, focus trap, narrow-width sidebar access; zero console errors; suit
 
 - [ ] B13 run-id guard; B14 client (Stop calls cancel; 409 → retry w/ backoff + message); B17 truthful
   "stream ended unexpectedly"; B20 Quick Ask cancel + 60 s client timeout; B12 client `resp.ok` + revert +
-  model chip on runs.
+  model chip on runs, showing the concrete model from the stream-json `system/init` event (e.g. "Opus 5.5") because the picker passes aliases.
 - [ ] B15/D7 — localStorage (try/catch) for draft/mode/lang/tier/QA-collapsed; `beforeunload` guard while
   streaming; summary actions: Open in Library, Re-run as Optimal, Re-run in other language, Learn this topic.
 - [ ] B16 — render throttle (~150 ms), highlight on final render / closed blocks only, untagged → plaintext.
