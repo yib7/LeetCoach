@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+from pathlib import Path
 
 import pytest
 from werkzeug.serving import make_server
@@ -37,6 +38,14 @@ def test_healthz_identifies_leetcoach():
     data = resp.get_json()
     assert data == {"app": "leetcoach", "version": app_module.VERSION}
     assert data["version"]
+
+
+def test_version_matches_the_latest_changelog_release():
+    # The Cycle 11 release; the CHANGELOG's newest entry must name the same version.
+    assert app_module.VERSION == "1.5.0"
+    changelog = (Path(app_module.__file__).parent / "CHANGELOG.md").read_text(encoding="utf-8")
+    first = next(line for line in changelog.splitlines() if line.startswith("## ["))
+    assert first.startswith(f"## [{app_module.VERSION}]")
 
 
 def test_healthz_is_host_checked():

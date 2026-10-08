@@ -1,5 +1,7 @@
-"""Flask web layer for LeetCoach: a single page, an SSE `/run` endpoint, the
-read-only `/library` pair, and the plain-JSON Quick Ask `/ask` endpoint.
+"""Flask web layer for LeetCoach: a single page, the SSE `/run` and `/followup`
+endpoints, the library browser (`/library`, `/library/file` GET + DELETE), the
+problem store and review queue (`/problems`, `/review`), the re-attempt sandbox
+(`/attempt/test`), flashcards, `/stats`, and the plain-JSON Quick Ask `/ask`.
 
 Design mirrors the Xeno RAG pattern, in Flask flavour:
 
@@ -12,7 +14,7 @@ Design mirrors the Xeno RAG pattern, in Flask flavour:
   for each delta and a terminal ``event: done`` (or ``error`` / ``cancelled``) so the
   stream always closes cleanly — a last-resort ``except`` guarantees it.
 
-All three modes (Answer / Learning / Guided) are wired here. They share one
+All four modes (Answer / Learning / Guided / Code Review) are wired here. They share one
 shape — classify -> build a mode-specific prompt -> stream + accumulate the
 deltas -> save the result -> emit a terminal ``done`` — so the streaming and the
 ``done``/``error`` plumbing live in one place (``event_stream`` +
@@ -37,6 +39,12 @@ SSE event protocol (shared by every mode):
     : ping\n\n                                # heartbeat comment (C3)
 
 Clients must ignore event names they do not know (phase/meta are additive).
+
+``POST /followup`` (SP8 D6) uses the same framing: text deltas, ``meta``,
+``phase`` ({"phase": "streaming", "source": "resume"|"fallback"[, "reason"]}
+then {"phase": "saving"}), a terminal ``done`` {"path", "source", "resumed",
+"heading"[, "reason", "model"]} / ``error`` / ``cancelled`` (via
+``POST /followup/cancel``), and the ``: ping`` heartbeat.
 """
 from __future__ import annotations
 
@@ -113,7 +121,7 @@ PORT = 5000
 
 # Reported by GET /healthz (D16) so a second launch can recognise a running
 # LeetCoach. Matches the CHANGELOG's current release line.
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 # Host-header allowlist (DNS-rebinding defense). Hostnames only, ANY port: a
 # rebinding attacker controls what IP their hostname resolves to, never the
@@ -147,7 +155,8 @@ RUN_SIBLING_EXTENSIONS = (".md", ".py", ".cpp", ".java", ".txt")
 
 # Quick Ask bounds: the question stays small (it's a syntax lookup, not an
 # essay), and the optional problem CONTEXT is capped server-side so a pasted
-# novel can't balloon the Haiku prompt.
+# novel can't balloon the Quick Ask prompt (LEETCOACH_QUICK_ASK_MODEL, Haiku
+# by default).
 QUICK_ASK_MAX_QUESTION = 500
 QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
 
@@ -173,7 +182,7 @@ MODES = ("answer", "learning", "guided", "review")
 # the learner's own code).
 UNTIERED_MODES = ("learning", "review")
 LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
-TIERS = prompts.TIERS                  # ("simple", "normal", "complex")
+TIERS = prompts.TIERS                  # ("basic", "normal", "optimal")
 
 
 def _json_object() -> tuple[dict, Response | None]:
@@ -281,8 +290,9 @@ def _same_origin(origin: str, host_header: str, scheme: str) -> bool:
 def _cross_site_rejection(method: str, path: str, headers, host_header: str, scheme: str):
     """C2: the reason to refuse a request as cross-site, or ``None``.
 
-    Unsafe methods (every state-changing route: /run, /ask, /config/model,
-    DELETE /library/file, /run/cancel) must come from this page: a browser
+    Unsafe methods (every state-changing route: /run, /followup, /ask,
+    /attempt/test, the /problems grade + notes routes, /config/model,
+    DELETE /library/file and the cancel routes) must come from this page: a browser
     sends ``Origin`` on them, and it must be this exact origin;
     ``Sec-Fetch-Site: cross-site`` is refused outright. A request with neither
     header (curl, scripts, the test client) is allowed - the threat is a
@@ -943,7 +953,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             if _runs.get(run_id) is state:
                 del _runs[run_id]
 
-    # Library-listing cache (P2-6): the read-only /library walk (rglob + a stat
+    # Library-listing cache (P2-6): the /library listing walk (rglob + a stat
     # per file) reran on every tab-open and post-run refresh. Cache the result
     # behind a cheap freshness signature — an app-owned version counter (bumped
     # whenever the app itself saves or deletes a library file) combined with the
