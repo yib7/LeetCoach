@@ -16,8 +16,10 @@
  *  - Streaming chrome (state pill / chips / live timer / Stop / caret / phase
  *    note) lives on SIBLING nodes around #output and is written with direct
  *    textContent/class writes — render() never touches it.
- *  - Code-block chrome + hljs are post-render passes over #output. Copy is
- *    handled by ONE delegated click listener per container, added once.
+ *  - Code-block chrome + hljs are post-render passes over #output, then the
+ *    SP6 click-to-reveal pass (core.applyReveals: hint sections and a Guided
+ *    run's Solution move into <details>; nodes are moved, never re-parsed).
+ *    Copy is handled by ONE delegated click listener per container, added once.
  *  - /run request body is { problem, mode, language, tier, model?, run_id };
  *    Stop POSTs /run/cancel { run_id }. Events: text deltas, `phase`, `meta`
  *    ({model}), terminal `done` / `error` / `cancelled` (a Stop the server
@@ -449,12 +451,25 @@
     });
   }
 
+  // SP6 / D2: click-to-reveal for the doc in #output - every "### Hint N"
+  // section, plus the ## Solution section of a Guided run. Which ones the
+  // learner opened survives the throttled re-renders of the same run.
+  var outputReveal = { solution: false, open: {} };
+  function revealOpts(state) {
+    return {
+      revealSolution: state.solution,
+      open: state.open,
+      onToggle: function (key, isOpen) { state.open[key] = isOpen; },
+    };
+  }
+
   function render(md, final) {
     if (window.marked) {
       outputEl.innerHTML = marked.parse(md); // ONLY assignment site for #output
       var openLast = !final && core.hasOpenFence(md);
       highlightCode(outputEl, openLast);
       decorateCode(outputEl, openLast);
+      core.applyReveals(outputEl, document, revealOpts(outputReveal));
     } else {
       outputEl.textContent = md;
     }
@@ -687,6 +702,7 @@
     setRunBtn(true);
     setStop(true);
     cancelScheduledRender();
+    outputReveal = { solution: meta.mode === "guided", open: {} };
     render("", false); // clears #output through the single assignment site
     startTimer();
     announce("Run started: " + cap(meta.mode) + ", " + langLabel(meta.language) + ".");
@@ -1288,7 +1304,8 @@
     openFile(path);
   }
   function runAriaLabel(run) {
-    return "Open " + run.problem + " — " + run.mode +
+    var diff = core.diffInfo(run.difficulty);
+    return "Open " + run.problem + (diff ? " (" + diff.label + ")" : "") + " — " + run.mode +
       (run.language !== "—" ? ", " + run.language : "") +
       (run.tier ? ", " + cap(run.tier) : "") + ", " +
       core.verdictInfo(run.verdict).label + ", saved " + relTime(run.savedAt);
@@ -1328,6 +1345,18 @@
     if (recentCount) recentCount.textContent = n + " saved · output/";
   }
 
+  // SP6 / D1: the difficulty parsed from the paste (or the doc header).
+  function diffCell(difficulty) {
+    var info = core.diffInfo(difficulty);
+    if (!info) return el("span", "diff", "—");
+    var cell = el("span", "diff " + info.cls);
+    var dot = el("span", "d");
+    dot.setAttribute("aria-hidden", "true");
+    cell.appendChild(dot);
+    cell.appendChild(document.createTextNode(info.label));
+    return cell;
+  }
+
   function statusCell(verdict) {
     var info = core.verdictInfo(verdict);
     var st = el("span", "tstatus v-" + info.cls);
@@ -1360,14 +1389,15 @@
       row.setAttribute("aria-label", runAriaLabel(run));
       row.setAttribute("data-mode", run.mode.toLowerCase());
       row.setAttribute("data-verdict", run.verdict || "none");
-      row.appendChild(el("span", "diff", "—")); // difficulty arrives with SP6 (D1)
+      row.setAttribute("data-difficulty", (core.diffInfo(run.difficulty) || { cls: "none" }).cls);
+      row.appendChild(diffCell(run.difficulty));
       var pc = el("div", "pcell");
       // SP5 fix B5: long names/slugs ellipsize in their column (style.css);
       // the full text stays one hover away.
       var pn = el("div", "pn", run.problem);
       pn.title = run.problem;
       pc.appendChild(pn);
-      var slug = run.stemRaw + (run.tier ? "__" + run.tier : "");
+      var slug = run.stemRaw + (run.tier ? "__" + run.tier : "") + (run.slot ? "__" + run.slot : "");
       var pm = el("div", "pm", slug);
       pm.title = slug;
       pc.appendChild(pm);
@@ -1570,9 +1600,24 @@
     });
   }
 
+  // SP6 / A8: Stats come from the server (GET /stats: the run log, plus
+  // legacy files with no log entry counted per saved run). If that request
+  // fails, the page falls back to computing them from the /library listing.
+  var serverStats = null;
+  function loadStats() {
+    return fetch("/stats")
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (data) { serverStats = data && data.heatmap ? data : null; })
+      .catch(function () { serverStats = null; })
+      .then(refreshStats);
+  }
+
   function refreshStats() {
     if (!libLoaded) return; // C10: no empty-state flash before /library answers
-    var stats = core.computeStats(currentRuns);
+    var stats = serverStats || core.computeStats(currentRuns);
     renderStreakBadge(stats);
     var empty = $("stats-empty");
     var body = $("stats-body");
@@ -1617,9 +1662,9 @@
     var dot = fname.lastIndexOf(".");
     var ext = dot === -1 ? "" : fname.slice(dot + 1).toLowerCase();
     var base = dot === -1 ? fname : fname.slice(0, dot);
-    var us = base.indexOf("__");
-    var stem = us === -1 ? base : base.slice(0, us);
-    var tier = us === -1 ? "" : base.slice(us + 2);
+    var nm = core.splitRunName(base); // A8: a trailing __N is a slot, not a tier
+    var stem = nm.stem;
+    var tier = nm.tier;
     var modeFolder = parts.length >= 3 ? parts[0] : "";
     var topicRaw = parts.length >= 3 ? parts[1].replace(/_learning$/, "") : "";
     var f = libByPath[path];
@@ -1631,6 +1676,7 @@
       mode: modeFolder ? modeLabel(modeFolder) : "",
       mtime: f && f.mtime,
       verdict: (f && f.verdict) || "",
+      difficulty: (f && f.difficulty) || "",
     };
   }
 
@@ -1639,6 +1685,8 @@
     if (vwTitle) vwTitle.textContent = meta.title;
     if (vwSub) {
       vwSub.textContent = "";
+      var diff = core.diffInfo(meta.difficulty);
+      if (diff) vwSub.appendChild(chipEl(diff.label, "diff-" + diff.cls));
       if (meta.topic) vwSub.appendChild(chipEl(meta.topic, "mint"));
       if (meta.mode) vwSub.appendChild(chipEl(meta.mode, ""));
       if (meta.ext === "md") {
@@ -1669,6 +1717,11 @@
     }
     highlightCode(libViewerBody, false);
     decorateCode(libViewerBody, false);
+    if (meta.ext === "md") {
+      // SP6 / D2: hints (and a Guided doc's solution) start hidden here too.
+      core.applyReveals(libViewerBody, document,
+        revealOpts({ solution: core.isGuidedPath(relPath), open: {} }));
+    }
     libViewer.hidden = false;
     libViewer.scrollTop = 0; // C10: a newly opened file starts at its top
   }
@@ -1785,7 +1838,7 @@
         renderRecentTable(currentRuns);
         renderTopics(currentRuns);
         renderTree(libFiles);
-        refreshStats();
+        return loadStats();
       })
       .catch(function (e) {
         libLoaded = true;

@@ -281,7 +281,25 @@
   // ---- library-derived runs (Cycle 10; moved here for tests) ------------------
   var CODE_EXT = { py: 1, cpp: 1, cc: 1, cxx: 1, c: 1, java: 1, cs: 1, js: 1, ts: 1, go: 1, rs: 1, rb: 1, kt: 1, swift: 1 };
 
-  // Group files into runs by (mode-folder, topic, stem-before "__").
+  // "<stem>[__<tier>][__<n>]" -> parts. A trailing "__<digits>" is the
+  // storage SLOT (a re-run that did not overwrite), never a tier (A8).
+  var SLOT_RE = /__(\d+)$/;
+  function splitRunName(base) {
+    var rest = String(base || "");
+    var slot = 0;
+    var m = SLOT_RE.exec(rest);
+    if (m) { slot = +m[1]; rest = rest.slice(0, m.index); }
+    var us = rest.indexOf("__");
+    return {
+      stem: us === -1 ? rest : rest.slice(0, us),
+      tier: us === -1 ? "" : rest.slice(us + 2),
+      slot: slot,
+    };
+  }
+
+  // Group files into runs by (mode-folder, topic, base name). SP6/A8: one
+  // run per saved run - each tier and each "__N" slot is its own run; only an
+  // Answer's .md + code file (same base name) share one.
   function deriveRuns(files) {
     var map = {};
     var order = [];
@@ -294,17 +312,18 @@
       var dot = fname.lastIndexOf(".");
       var ext = dot === -1 ? "" : fname.slice(dot + 1).toLowerCase();
       var base = dot === -1 ? fname : fname.slice(0, dot);
-      var us = base.indexOf("__");
-      var stem = us === -1 ? base : base.slice(0, us);
-      var tier = us === -1 ? "" : base.slice(us + 2);
+      var nm = splitRunName(base);
+      var stem = nm.stem;
+      var tier = nm.tier;
       // learning writes into "<type>_learning" — drop the mode artifact.
       var topicRaw = topicSeg.replace(/_learning$/, "");
-      var key = modeFolder + "|" + topicRaw + "|" + stem;
+      var key = modeFolder + "|" + parts.slice(1, -1).join("/") + "|" + base;
       var run = map[key];
       if (!run) {
         run = {
-          modeFolder: modeFolder, topicRaw: topicRaw, stemRaw: stem,
-          tier: "", langExt: "", savedAt: 0, mdPath: "", mdAt: 0, verdict: "", files: [],
+          modeFolder: modeFolder, topicRaw: topicRaw, stemRaw: stem, slot: nm.slot,
+          tier: "", langExt: "", savedAt: 0, mdPath: "", mdAt: 0, verdict: "",
+          difficulty: "", files: [],
         };
         map[key] = run;
         order.push(run);
@@ -321,6 +340,7 @@
         }
       } else if (CODE_EXT[ext] && !run.langExt) run.langExt = ext;
       if (tier && !run.tier) run.tier = tier;
+      if (f.difficulty && !run.difficulty) run.difficulty = String(f.difficulty);
     });
     return order.map(function (run) {
       return {
@@ -331,6 +351,8 @@
         stemRaw: run.stemRaw,
         problem: humanize(run.stemRaw),
         tier: run.tier,
+        slot: run.slot,
+        difficulty: run.difficulty,
         language: langLabel(run.langExt),
         langExt: run.langExt,
         savedAt: run.savedAt,
@@ -440,6 +462,89 @@
     if (c === 2) return 2;
     if (c <= 4) return 3;
     return 4;
+  }
+
+  // ---- difficulty (SP6 / D1: the Diff column) ------------------------------------
+  var DIFF = { easy: { cls: "easy", label: "Easy" }, medium: { cls: "med", label: "Medium" },
+               hard: { cls: "hard", label: "Hard" } };
+  function diffInfo(d) {
+    var hit = DIFF[String(d || "").trim().toLowerCase()];
+    return hit ? { cls: hit.cls, label: hit.label } : null;
+  }
+
+  // ---- click-to-reveal (SP6 / D2) ---------------------------------------------------
+  // The doc contract puts a "### Hint 1..4" ladder under ## Approach (Guided and
+  // Learning) and the one solution block under ## Solution. After a render, each
+  // hint section - and, in Guided docs, the Solution section - is wrapped in a
+  // closed <details> so the learner reveals it on purpose. The wrap only MOVES
+  // nodes the hardened markdown renderer already built; model text never goes
+  // through innerHTML here.
+  var HINT_RE = /^hint\s*(\d+)\b/i;
+  var SOLUTION_RE = /^solution(?:\s*(?:[(:\-–—].*)?)?$/i;
+  function revealKind(tag, text, opts) {
+    var t = String(tag || "").toUpperCase();
+    var s = String(text || "").trim();
+    if (t === "H3") {
+      var m = HINT_RE.exec(s);
+      if (m) return { key: "hint-" + (+m[1]), kind: "hint", level: 3 };
+    }
+    if (t === "H2" && opts && opts.revealSolution && SOLUTION_RE.test(s)) {
+      return { key: "solution", kind: "solution", level: 2 };
+    }
+    return null;
+  }
+  function headingLevel(node) {
+    if (!node || node.nodeType !== 1) return 0;
+    var m = /^H([1-6])$/.exec(String(node.tagName || "").toUpperCase());
+    return m ? +m[1] : 0;
+  }
+  function applyReveals(container, doc, opts) {
+    if (!container || !doc) return 0;
+    opts = opts || {};
+    var open = opts.open || {};
+    var targets = [];
+    Array.prototype.slice.call(container.childNodes).forEach(function (n) {
+      if (n.nodeType !== 1) return;
+      var info = revealKind(n.tagName, n.textContent, opts);
+      if (info) targets.push({ node: n, info: info });
+    });
+    targets.forEach(function (t) {
+      var h = t.node;
+      if (h.parentNode !== container) return;
+      var extent = [];
+      for (var n = h.nextSibling; n; n = n.nextSibling) {
+        var lv = headingLevel(n);
+        if ((lv && lv <= t.info.level) ||
+            (n.nodeType === 1 && String(n.tagName).toUpperCase() === "HR")) break;
+        extent.push(n);
+      }
+      var details = doc.createElement("details");
+      details.className = "reveal reveal-" + t.info.kind;
+      details.setAttribute("data-reveal", t.info.key);
+      var summary = doc.createElement("summary");
+      summary.className = "reveal-sum";
+      var body = doc.createElement("div");
+      body.className = "reveal-body";
+      container.insertBefore(details, h);
+      summary.appendChild(h);
+      var cue = doc.createElement("span");
+      cue.className = "reveal-cue";
+      cue.textContent = t.info.kind === "hint" ? "Show hint" : "Show solution";
+      summary.appendChild(cue);
+      details.appendChild(summary);
+      extent.forEach(function (x) { body.appendChild(x); });
+      details.appendChild(body);
+      if (open[t.info.key]) details.open = true;
+      if (typeof opts.onToggle === "function") {
+        details.addEventListener("toggle", function () {
+          opts.onToggle(t.info.key, !!details.open);
+        });
+      }
+    });
+    return targets.length;
+  }
+  function isGuidedPath(p) {
+    return /^guided\//.test(String(p || ""));
   }
 
   // ---- summary actions (D7) -----------------------------------------------------
@@ -558,10 +663,15 @@
     verdictFromLine: verdictFromLine,
     verdictInfo: verdictInfo,
     CODE_EXT: CODE_EXT,
+    splitRunName: splitRunName,
     deriveRuns: deriveRuns,
     runSiblings: runSiblings,
     computeStats: computeStats,
     heatBucket: heatBucket,
+    diffInfo: diffInfo,
+    revealKind: revealKind,
+    applyReveals: applyReveals,
+    isGuidedPath: isGuidedPath,
     summaryActions: summaryActions,
     modKey: modKey,
     nextFocusIndex: nextFocusIndex,

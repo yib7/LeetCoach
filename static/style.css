@@ -219,6 +219,24 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .md strong{color:var(--tx);font-weight:650}.md em{color:var(--tx2)}
 .md code{font:12.5px var(--mono);color:var(--mint);background:var(--mint-weak);border:1px solid var(--mint-line);padding:1px 6px;border-radius:6px}
 .md blockquote{margin:0 0 14px;padding:2px 0 2px 15px;border-left:2px solid var(--grn-line);color:var(--tx3)}
+/* SP6 / D2: click-to-reveal hints and the Guided solution (core.applyReveals) */
+.md .reveal{margin:10px 0;border:1px solid var(--border);border-radius:var(--r2);background:var(--s2)}
+.md .reveal-solution{margin-top:24px;border-color:var(--grn-line)}
+.md .reveal>summary{display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:pointer;list-style:none;border-radius:var(--r2)}
+.md .reveal>summary::-webkit-details-marker{display:none}
+.md .reveal>summary::before{content:"";width:7px;height:7px;border-right:2px solid var(--tx3);border-bottom:2px solid var(--tx3);transform:rotate(-45deg);transition:transform var(--d1) var(--ease);flex:none}
+.md .reveal[open]>summary::before{transform:rotate(45deg)}
+.md .reveal>summary:hover{background:var(--s3)}
+.md .reveal>summary:focus-visible{outline:none;box-shadow:var(--ring)}
+.md .reveal>summary>h2,.md .reveal>summary>h3{margin:0;padding:0;border:0}
+.md .reveal>summary>h2::before{display:none}
+.md .reveal-cue{margin-left:auto;font:600 11.5px var(--sans);color:var(--tx3)}
+.md .reveal[open] .reveal-cue{display:none}
+.md .reveal-body{padding:2px 16px 4px;border-top:1px solid var(--border-soft)}
+.md .reveal-body>*:first-child{margin-top:12px}
+.chip.diff-easy{color:var(--easy);border-color:var(--easy)}
+.chip.diff-med{color:var(--med);border-color:var(--med)}
+.chip.diff-hard{color:var(--hard);border-color:var(--hard)}
 
 .code{border:1px solid var(--border);border-radius:var(--r2);overflow:hidden;margin:15px 0;background:var(--inset)}
 .code.partial{border-bottom-style:dashed}
