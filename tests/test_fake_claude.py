@@ -392,3 +392,53 @@ def test_seed_has_a_no_walkthrough_guided_doc_and_no_guided_tier(tmp_path):
             assert e["tier"] is None
     learning = (out / "learning" / "hash_map_learning" / "1_two_sum.md").read_text("utf-8")
     assert "return [" not in learning and "### Techniques" in learning
+
+
+# ---- SP7: Code Review docs + the seeded review queue ------------------------
+
+REVIEW_ATTEMPT = (
+    "def two_sum(nums, target):\n"
+    "    for i in range(len(nums)):\n"
+    "        for j in range(len(nums)):\n"
+    "            if nums[i] + nums[j] == target:\n"
+    "                return [i, j]\n"
+)
+
+
+@pytest.mark.parametrize("crlf", [False, True])
+def test_fake_code_review_follows_the_review_contract(flags, crlf):
+    import flashcards
+
+    prompt = prompts.build_review(TWO_SUM, REVIEW_ATTEMPT, language="python")
+    if crlf:
+        prompt = prompt.replace("\n", "\r\n")
+    text = "".join(claude_cli.run(prompt, runner=_runner(), flags=flags, model="opus"))
+    assert _h2(text) == list(prompts.REVIEW_SECTIONS)
+    assert "solution" not in text and "```" not in text  # critique only, no code block
+    assert "for j in range(len(nums)):" in text  # quotes one line of the attempt
+    assert len(flashcards.parse_flashcards(text)) == 2
+
+
+def test_seed_has_a_review_doc_and_a_review_queue(tmp_path):
+    import flashcards
+    import problem_store
+
+    run_fake = _load_run_fake()
+    out = tmp_path / "output"
+    run_fake.seed(out)
+    review = (out / "reviews" / "hash_map" / "1_two_sum__review.md").read_text("utf-8")
+    assert "## Verdict" in review and review.rstrip().endswith("```")
+    assert "\n---\n\n## Your attempt\n\n```python\n" in review
+    assert len(flashcards.parse_flashcards(review)) == 2  # the attempt is not cards
+    entries = [e for e in problem_store.read_runs(root=out) if e["mode"] == "review"]
+    assert entries and entries[0]["files"] == ["reviews/hash_map/1_two_sum__review.md"]
+    summary = problem_store.review_summary(root=out)
+    due = {d["id"]: d for d in summary["due"]}
+    assert due["1-two_sum"]["overdue_days"] == 0 and due["1-two_sum"]["box"] == 2
+    assert "215-kth_largest_element_in_an_array" not in due
+    assert any(d["overdue_days"] > 0 for d in due.values())
+    rec = problem_store.load_problem("215-kth_largest_element_in_an_array", root=out)
+    assert rec["notes"] and rec["review"]["box"] == 3
+    # Two Sum keeps a statement with a sample, so "Test my code" has a case
+    two_sum = problem_store.load_problem("1-two_sum", root=out)
+    assert sandbox.parse_samples(two_sum["statement"])

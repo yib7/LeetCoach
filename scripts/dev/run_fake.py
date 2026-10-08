@@ -13,7 +13,10 @@ NEVER CALLS REAL CLAUDE and never touches your real data:
   (``.leetcoach/runs.jsonl`` + problem records with Easy / Medium / Hard, and
   D2-contract Guided / Learning docs with hints), the rest are legacy files
   with no log entry (Stats' per-file fallback, the doc-parsed verdict), incl.
-  extra tiers and ``__2`` slots of one problem;
+  extra tiers and ``__2`` slots of one problem. SP7: a Code Review doc
+  (``reviews/``), a review queue with problems due today / overdue and one
+  not due (``REVIEW_STATE``), a seeded note, ``## Flashcards`` in every
+  contract doc, and Two Sum's statement keeps its sample for "Test my code";
 * the real ``.env`` is never loaded (``LEETCOACH_NO_DOTENV=1``) and model-picker
   writes go to a scratch ``.env``; the topic index and the claude cwd are
   scratch files too;
@@ -125,9 +128,36 @@ def _fake_claude():
     return mod
 
 
+# SP7 / D5: the attempt the seeded Code Review critiques (the classic
+# "inner loop starts at 0" Two Sum bug).
+REVIEW_ATTEMPT = (
+    "import json, sys\n\n"
+    "def two_sum(nums, target):\n"
+    "    for i in range(len(nums)):\n"
+    "        for j in range(len(nums)):\n"
+    "            if nums[i] + nums[j] == target:\n"
+    "                return [i, j]\n"
+    "    return []\n"
+)
+
+
+def _review_prompt(problem: str, attempt: str) -> str:
+    """A Code Review prompt as prompts.build_review writes one (its review
+    sections included, so the fake doc follows the review contract)."""
+    sys.path.insert(0, str(ROOT))
+    import prompts  # imports nothing that reads .env
+
+    return prompts.build_review(problem, attempt, language="python")
+
+
 def _contract_doc(mode: str, problem: str, verification: str | None) -> str:
     """A D2-contract study doc exactly as the fake CLI writes one (hints in
-    Guided / Learning, a hidden-by-default Solution in Guided)."""
+    Guided / Learning, a hidden-by-default Solution in Guided). A ``review``
+    doc ends with the learner's attempt, as the app saves it."""
+    if mode == "review":
+        text = _fake_claude().study_doc(_review_prompt(problem, REVIEW_ATTEMPT))
+        return (text.rstrip("\n") + "\n\n---\n\n## Your attempt\n\n```python\n" +
+                REVIEW_ATTEMPT.rstrip() + "\n```\n")
     prompt = (
         f"Mode: {mode.capitalize()}\nlanguage key: python\n"
         f"--- BEGIN PROBLEM 0f0f0f0f0f0f ---\n{problem}\n--- END PROBLEM 0f0f0f0f0f0f ---\n"
@@ -150,6 +180,7 @@ CONTRACT_SEED = [
     ("guided/hash_map/1_two_sum.md", "guided", TWO_SUM_PASTE,
      "✓ Sample tests PASS (1/1 samples)", 0),
     ("learning/hash_map_learning/1_two_sum.md", "learning", TWO_SUM_PASTE, None, 1),
+    ("reviews/hash_map/1_two_sum__review.md", "review", TWO_SUM_PASTE, None, 0),
 ]
 
 # SP6 fix: a legacy (unlogged) Guided doc whose ## Approach has NO heading after
@@ -192,13 +223,48 @@ LOG = [
     (1, "1-two_sum", "learning", "python", None, None,
      ["learning/hash_map_learning/1_two_sum.md"]),
     (0, "1-two_sum", "guided", "python", None, "pass", ["guided/hash_map/1_two_sum.md"]),
+    (0, "1-two_sum", "review", "python", None, None, ["reviews/hash_map/1_two_sum__review.md"]),
     (0, "1-two_sum", "answer", "python", "normal", "pass",
      ["answers/hash_map/two_sum__normal.md", "answers/hash_map/two_sum__normal.py"]),
 ]
 
 
+# SP7 / D4: review state per problem, relative to today: (box, due in N days
+# (negative = overdue), [(graded N days ago, grade, from box, to box)], notes).
+# 1-two_sum is due today (graded "solo" 3 days ago: box 1 -> 2, +3 days);
+# 215 is NOT due (graded "hints" 2 days ago in box 3: due in 5 days). The
+# rest keep the first-run default (due the day after their first run), so
+# 42 and 206 show as overdue.
+REVIEW_STATE = {
+    "1-two_sum": (2, 0, [(3, "solo", 1, 2)], ""),
+    "215-kth_largest_element_in_an_array": (
+        3, 5, [(9, "solo", 1, 2), (2, "hints", 3, 3)],
+        "heapq is a MIN-heap: keep the k largest, the root is the answer."),
+}
+
+
 def _iso(stamp: float) -> str:
     return datetime.fromtimestamp(stamp).astimezone().isoformat(timespec="seconds")
+
+
+def _review_state(pid: str, now: float) -> tuple[dict, str] | None:
+    """The seeded ``review`` block + notes for ``pid`` (None: the default)."""
+    if pid not in REVIEW_STATE:
+        return None
+    box, due_in, grades, notes = REVIEW_STATE[pid]
+    today = datetime.fromtimestamp(now).date()
+    intervals = (1, 3, 7, 14, 30)
+    history = []
+    for ago, grade, from_box, to_box in grades:
+        day = today - timedelta(days=ago)
+        history.append({
+            "ts": _iso(now - ago * DAY), "day": day.isoformat(), "grade": grade,
+            "from_box": from_box, "box": to_box,
+            "due": (day + timedelta(days=intervals[to_box - 1])).isoformat(),
+        })
+    review = {"box": box, "due": (today + timedelta(days=due_in)).isoformat(),
+              "history": history, "last_reviewed": history[-1]["ts"] if history else None}
+    return review, notes
 
 
 def _seed_metadata(output: Path, now: float) -> None:
@@ -230,6 +296,9 @@ def _seed_metadata(output: Path, now: float) -> None:
         rec["runs"] += [f for f in files if f not in rec["runs"]]
     (meta / "runs.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     for pid, rec in records.items():
+        state = _review_state(pid, now)
+        if state is not None:
+            rec["review"], rec["notes"] = state
         (meta / "problems" / f"{pid}.json").write_text(
             json.dumps(rec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
 
