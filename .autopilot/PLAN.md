@@ -188,13 +188,14 @@ keyboard nav, focus trap, narrow-width sidebar access; zero console errors; suit
 (legacy fallback) with the A8 4-day scenario giving streak 4; prompt tests assert the contract; hint/solution
 reveal browser-verified; suite green.
 
-- [ ] D1 — problem store + run log (design above); parse number/title/difficulty from the paste; Diff column real;
+- [x] D1 — problem store + run log (design above); parse number/title/difficulty from the paste; Diff column real;
   `/problems` + `/problems/<id>` JSON endpoints; problem statement saved.
-- [ ] A8 — Stats from `runs.jsonl` (+ per-file legacy) — server-computed `/stats` endpoint or client from log.
-- [ ] D2 — shared doc-contract fragment across modes, Learning no-solution rule, Guided brute→optimal + Hints,
+- [x] A8 — Stats from `runs.jsonl` (+ per-file legacy) — server-computed `/stats` endpoint or client from log.
+- [x] D2 — shared doc-contract fragment across modes, Learning no-solution rule, Guided brute→optimal + Hints,
   single `<lang> solution` block, JSON-style printing guidance; client click-to-reveal for Hint sections and
   Guided Solution (DOM-built).
-- [ ] Tests: store/log unit tests, stats scenarios, prompt contract tests, render helper tests; suite + ruff green.
+- [x] Tests: store/log unit tests, stats scenarios, prompt contract tests, render helper tests; suite + ruff green.
+- Verified: 2026-10-08 orchestrator at aef811b: 1085 passed/1 skipped, ruff clean, node 52/52; browser-verified on the fake harness: Diff column, #N title badges + '#20 · Valid Parentheses' viewer title, /problems runs/run_count/file_count, Stats from log+legacy, Guided reveals (insight, hint-1..4, solution) closed with sr-only headings and no heading inside summary, hint-4 holds only its first block when no heading follows (seeded doc + live FAKE_NOWALK run), Walkthrough visible, Learning has Techniques and no solution code, live Guided run logs tier null with no tier chip or Re-run-as-Optimal, paste difficulty Medium (source paste); only console error was the orchestrator's own 404 probe. Review: Important I1 + minors fixed.
 
 ## SP7 — Practice loop: re-attempt, test my code, review queue, code review, notes, flashcards
 
