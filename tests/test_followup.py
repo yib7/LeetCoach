@@ -612,3 +612,26 @@ def test_auth_or_limit_detector():
     assert claude_cli.is_auth_or_limit_error("Failed to authenticate: OAuth expired")
     assert claude_cli.is_auth_or_limit_error("You hit your usage limit")
     assert not claude_cli.is_auth_or_limit_error("No conversation found with session ID: x")
+
+
+# --- page: the follow-up box + the Quick Ask model tag (C13) ---------------------------
+
+def test_page_has_the_followup_box_with_the_server_cap(root):
+    html = _client(Recorder()).get("/").get_data(as_text=True)
+    assert 'id="library-viewer-followup"' in html
+    assert f'maxlength="{app_module.FOLLOWUP_MAX_QUESTION}"' in html
+    assert "__FOLLOWUP_MAX_QUESTION__" not in html
+
+
+@pytest.mark.parametrize("env, shown", [
+    (None, ">haiku</span>"),
+    ("sonnet", ">sonnet</span>"),
+    ("claude-<b>x</b>", ">claude-&lt;b&gt;x&lt;/b&gt;</span>"),
+])
+def test_quick_ask_tag_names_the_configured_model(root, monkeypatch, env, shown):
+    if env is not None:
+        monkeypatch.setenv("LEETCOACH_QUICK_ASK_MODEL", env)
+    html = _client(Recorder()).get("/").get_data(as_text=True)
+    assert "__QUICK_ASK_MODEL__" not in html
+    tag = html.split('for="qa-input">Quick Ask', 1)[1].split("</label>", 1)[0]
+    assert shown in tag

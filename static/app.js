@@ -1897,6 +1897,7 @@
 
   function closeViewer() {
     resetViewerExtras();
+    closeFollowupBox(); // SP8 / D6: stops a follow-up in flight
     libViewer.hidden = true;
     libViewerBody.textContent = "";
     currentViewPath = null;
@@ -2487,6 +2488,7 @@
         .catch(function () { /* the button just stays hidden */ });
     }
     if (pid) loadViewerNotes(pid, token);
+    syncFollowupBox(relPath, meta); // SP8 / D6
   }
   function loadViewerNotes(pid, token) {
     if (!lvNotes) return;
@@ -2544,6 +2546,259 @@
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") flushNotes();
   });
+
+  // ---- SP8 / D6: follow-up questions on the open doc ------------------------
+  // POST /followup streams an answer (the study run's session resumed, or a
+  // fresh call with the doc as context); the server appends it to the doc,
+  // then the doc is re-rendered here. One follow-up at a time; it runs in its
+  // own slot, so a study run may stream meanwhile. Opening another file or
+  // closing the viewer stops it. Model text reaches the DOM only through the
+  // hardened marked renderer; everything else is textContent.
+  var fuBox = $("library-viewer-followup");
+  var fuInput = $("followup-input");
+  var fuAsk = $("followup-ask");
+  var fuStop = $("followup-stop");
+  var fuStatus = $("followup-status");
+  var fuSource = $("followup-source");
+  var fuAnswer = $("followup-answer");
+  var FOLLOWUP_MAX = fuInput ? (parseInt(fuInput.getAttribute("maxlength"), 10) || 2000) : 2000;
+  var followup = null;    // the follow-up in flight
+  var fuShownPath = null; // the doc the box currently belongs to
+  var fuRenderTimer = null;
+
+  if (fuAnswer) fuAnswer.addEventListener("click", handleCopyCode);
+
+  function fuSetBusy(busy) {
+    if (!fuBox) return;
+    fuAsk.disabled = busy;
+    fuStop.hidden = !busy;
+    fuStop.disabled = !busy;
+    fuBox.setAttribute("aria-busy", busy ? "true" : "false");
+  }
+  function fuSetStatus(text, kind) {
+    fuStatus.textContent = text || "";
+    fuStatus.className = "fu-status" + (kind ? " " + kind : "");
+  }
+  function fuShowSource(src) {
+    if (!src) { fuSource.hidden = true; return; }
+    fuSource.textContent = src.label;
+    fuSource.title = src.note || "";
+    fuSource.className = "chip mono fu-source " + src.kind;
+    fuSource.hidden = false;
+  }
+  function fuClearAnswer() {
+    clearTimeout(fuRenderTimer);
+    fuRenderTimer = null;
+    fuAnswer.hidden = true;
+    fuAnswer.textContent = "";
+  }
+  function fuRender(fu, final) {
+    fuRenderTimer = null;
+    if (fu.path !== fuShownPath || !fu.acc) return;
+    fuAnswer.hidden = false;
+    if (window.marked) {
+      fuAnswer.innerHTML = marked.parse(fu.acc); // hardened renderer (marked.use above)
+      var openLast = !final && core.hasOpenFence(fu.acc);
+      highlightCode(fuAnswer, openLast);
+      decorateCode(fuAnswer, openLast);
+    } else {
+      fuAnswer.textContent = fu.acc;
+    }
+  }
+  function fuScheduleRender(fu) {
+    if (fuRenderTimer) return;
+    fuRenderTimer = setTimeout(function () { fuRender(fu, false); }, RENDER_INTERVAL_MS);
+  }
+
+  // Called for every file the viewer shows: the box is for Markdown docs, and
+  // a different doc gets a clean box (a follow-up on the old one is stopped).
+  function syncFollowupBox(relPath, meta) {
+    if (!fuBox) return;
+    if (followup && followup.path !== relPath) stopFollowup("switch");
+    fuBox.hidden = meta.ext !== "md";
+    if (fuShownPath === relPath) return; // a re-render of the same doc keeps its state
+    fuShownPath = relPath;
+    fuInput.value = "";
+    fuSetStatus("");
+    fuShowSource(null);
+    fuClearAnswer();
+  }
+  function closeFollowupBox() {
+    if (!fuBox) return;
+    if (followup) stopFollowup("switch");
+    fuShownPath = null;
+    fuBox.hidden = true;
+  }
+
+  function fuFinish(fu, kind, data) {
+    if (fu.finished) return;
+    fu.finished = true;
+    if (followup === fu) followup = null;
+    fuSetBusy(false);
+    var here = fu.path === fuShownPath;
+    if (kind === "done") {
+      var msg = core.followupDoneText(data);
+      announce("Follow-up answered. " + msg);
+      if (!here) { notify("Follow-up added to " + fu.path.split("/").pop() + ".", ""); return; }
+      fuInput.value = "";
+      fuClearAnswer();
+      fuSetStatus(msg, "ok");
+      // Re-render the doc so the appended section shows, and bring it into view.
+      openFile(fu.path).then(function () {
+        if (currentViewPath !== fu.path) return;
+        var hs = libViewerBody.querySelectorAll("h2");
+        var last = hs[hs.length - 1];
+        if (last && last.scrollIntoView) last.scrollIntoView({ block: "start" });
+      });
+      return;
+    }
+    if (here) fuRender(fu, true);
+    if (kind === "stopped") {
+      if (fu.reason === "switch") return; // the learner moved on; nothing to say
+      fuSetStatus("Stopped — nothing was added to the doc.", "");
+      announce("Follow-up stopped. Nothing was added to the doc.");
+      return;
+    }
+    var text = typeof data === "string" && data ? data : "The follow-up failed.";
+    if (here) fuSetStatus(text + " Nothing was added to the doc.", "err");
+    else notify(text, "error");
+    announce("Follow-up failed. " + text);
+  }
+
+  // Stop / Esc: cancel on the server first; once it is appending to the doc
+  // (too late) keep reading for `done`, otherwise abort at once.
+  function stopFollowup(reason) {
+    var fu = followup;
+    if (!fu || fu.stopping) return;
+    fu.stopping = true;
+    fu.reason = reason || "stop";
+    fuStop.disabled = true;
+    if (fu.path === fuShownPath && reason !== "switch") fuSetStatus("Stopping…", "");
+    var ctl = new AbortController();
+    var timer = setTimeout(function () { ctl.abort(); }, CANCEL_TIMEOUT_MS);
+    fetch("/followup/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ followup_id: fu.id }),
+      keepalive: true,
+      signal: ctl.signal,
+    }).then(function (r) {
+      return r.json().catch(function () { return null; }).then(function (d) {
+        return core.cancelOutcome(r.status, d) === "committed";
+      });
+    }).catch(function () { return false; }).then(function (committed) {
+      clearTimeout(timer);
+      if (fu.finished) return;
+      if (committed) {
+        fu.stopping = false;
+        if (fu.path === fuShownPath) fuSetStatus("Too late to stop — adding it to the doc…", "");
+        return;
+      }
+      fu.stopped = true;
+      fu.controller.abort();
+      fuFinish(fu, "stopped");
+    });
+  }
+
+  async function askFollowup() {
+    if (!fuBox || followup || !currentViewPath) return;
+    var check = core.followupCheck(fuInput.value, FOLLOWUP_MAX);
+    if (!check.ok) { fuSetStatus(check.message, "err"); fuInput.focus(); return; }
+    var fu = { id: newRunId(), path: currentViewPath, controller: new AbortController(),
+      acc: "", stopping: false, stopped: false, finished: false, reason: "" };
+    followup = fu;
+    fuSetBusy(true);
+    fuShowSource(null);
+    fuClearAnswer();
+    fuSetStatus("Asking…", "");
+    announce("Asking a follow-up about this doc.");
+    var body = { path: fu.path, question: check.question, followup_id: fu.id };
+    var model = activeVal("model");
+    if (model) body.model = model;
+    try {
+      var resp = await postJson("/followup", body, { signal: fu.controller.signal });
+      if (fu.finished) return;
+      if (!resp.ok) {
+        var err = await resp.json().catch(function () { return {}; });
+        var msg = err.error || "Request rejected (" + resp.status + ").";
+        if (resp.status === 409) msg = "Another follow-up is still running. Stop it or wait for it first.";
+        fuFinish(fu, "error", msg);
+        return;
+      }
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var feed = makeSseParser(function (ev) {
+        if (fu.finished) return;
+        if (ev.type === "text") {
+          fu.acc += typeof ev.data === "string" ? ev.data : String(ev.data);
+          if (fu.path === fuShownPath) fuScheduleRender(fu);
+          return;
+        }
+        if (ev.name === "phase") {
+          var p = ev.data || {};
+          var src = core.followupSource(p);
+          if (src && fu.path === fuShownPath) {
+            fuShowSource(src);
+            fuSetStatus(src.kind === "resume" ? "Answering…" : "Answering — " + src.note + "…", "");
+          } else if (p.phase === "saving" && fu.path === fuShownPath && !fu.stopping) {
+            fuSetStatus("Adding the answer to the doc…", "");
+          }
+          return;
+        }
+        if (ev.name === "meta") return;
+        var kind = core.runEventKind(ev.name);
+        if (kind === "done") fuFinish(fu, "done", ev.data || {});
+        else if (kind === "stopped") { fu.stopped = true; fuFinish(fu, "stopped"); }
+        else if (kind === "error") {
+          fuFinish(fu, "error", typeof ev.data === "string" ? ev.data : "The follow-up failed.");
+        }
+      });
+      while (true) {
+        var r = await reader.read();
+        if (r.done) break;
+        if (fu.finished) { try { reader.cancel(); } catch (e) { /* noop */ } break; }
+        feed(decoder.decode(r.value, { stream: true }));
+      }
+      if (!fu.finished) {
+        if (fu.stopped) fuFinish(fu, "stopped");
+        else fuFinish(fu, "error", "The stream ended before the answer was saved.");
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        if (!fu.finished) fuFinish(fu, "stopped");
+        return;
+      }
+      fuFinish(fu, "error", "Network error: " + ((e && e.message) || "the request failed") + ".");
+    }
+  }
+
+  if (fuBox) {
+    fuAsk.addEventListener("click", function () { askFollowup(); });
+    fuStop.addEventListener("click", function () { stopFollowup("stop"); });
+    fuInput.addEventListener("keydown", function (e) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "Enter" || e.keyCode === 13)) {
+        // Ctrl+Enter asks here (not the global Run shortcut).
+        e.preventDefault();
+        e.stopPropagation();
+        if (core.isComposingEnter(e)) return;
+        askFollowup();
+      }
+    });
+    fuBox.addEventListener("keydown", function (e) {
+      if ((e.key === "Escape" || e.keyCode === 27) && followup && followup.path === fuShownPath) {
+        e.preventDefault();
+        e.stopPropagation();
+        stopFollowup("stop");
+      }
+    });
+    window.addEventListener("pagehide", function () {
+      if (followup) {
+        postJson("/followup/cancel", { followup_id: followup.id }, { keepalive: true })
+          .catch(function () {});
+        followup.controller.abort();
+      }
+    });
+  }
 
   // ---- D4: the review queue (Console "Due today" + Stats) ------------------
   var duePanel = $("due-panel");
