@@ -346,8 +346,10 @@
     });
     if (changed && contentEl) contentEl.scrollTop = viewScroll[view] || 0;
     closeDrawer(false);
-    if (view === "library") loadLibrary(); // re-fetch on open: fresh after runs
+    if (changed && view !== "practice") retirePracticeNotes(); // SP7 fix: one live notes editor
+    if (view === "library") { loadLibrary(); restoreViewerNotes(); } // re-fetch on open: fresh after runs
     if (view === "stats") { refreshStats(); loadReview(); } // recompute + the review queue
+    else if (changed) refreshReviewIfNewDay(); // SP7 fix: a stale "today" after midnight
   }
   document.querySelectorAll("[data-view]").forEach(function (a) {
     a.addEventListener("click", function () { switchView(a.getAttribute("data-view")); });
@@ -2276,9 +2278,12 @@
   var NOTES_DEBOUNCE_MS = 800;
   var reviewCodeEl = $("review-code");
   var lastReview = null; // the last GET /review answer
+  var lastReviewDay = ""; // the local day that answer was fetched on
 
+  // SP7 fix: the server's "today" only while it is still that day here - a
+  // tab left open past midnight counts from the local date (and re-fetches).
   function todayKey() {
-    return (lastReview && lastReview.today) || core.dayKey(new Date());
+    return core.reviewToday(lastReview, lastReviewDay, new Date());
   }
   function problemLabelOf(rec) {
     rec = rec || {};
@@ -2327,7 +2332,43 @@
   // ---- D9: the notes editor (library viewer + re-attempt view) -------------
   // Debounced PUT /problems/<id>/notes with a visible Saving / Saved / Not
   // saved state; a failed save keeps the text and offers Retry.
-  function makeNotesEditor(host, pid, initial, label) {
+  // SP7 fix: every save of a problem's notes goes through that problem's one
+  // queue (core.makeSaveQueue), so saves never race, and text typed while a
+  // save is in flight is still sent after the editor closes. Only one editor
+  // is live at a time: opening the re-attempt view retires the library
+  // viewer's editor, and leaving it retires its own; the viewer's editor is
+  // rebuilt from the server (or the queue's newer text) when the Library
+  // shows again - so two editors never overwrite each other's text.
+  var notesQueues = {}; // pid -> core.makeSaveQueue
+  function notesQueue(pid) {
+    if (!notesQueues[pid]) {
+      notesQueues[pid] = core.makeSaveQueue(function (text, keepalive, done) {
+        fetch("/problems/" + encodeURIComponent(pid) + "/notes", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ notes: text }),
+          keepalive: !!keepalive,
+        }).then(function (resp) {
+          if (resp.ok) return done(null);
+          return errorOf(resp).then(function (why) { done(new Error(why)); });
+        }).catch(function (e) {
+          done(new Error((e && e.message) || "network error"));
+        });
+      });
+    }
+    return notesQueues[pid];
+  }
+  function notesBusy(pid) {
+    return !!(notesQueues[pid] && notesQueues[pid].pending());
+  }
+  // The notes to show for `pid`: a save that was still landing when the
+  // record was fetched (`busyAtFetch`) or is now beats the server's copy.
+  function knownNotes(pid, serverText, busyAtFetch) {
+    var q = notesQueues[pid];
+    if (q && q.latest() !== null && (busyAtFetch || q.pending())) return q.latest();
+    return serverText || "";
+  }
+  function makeNotesEditor(host, pid, initial, label, busyAtFetch) {
     host.textContent = "";
     var taId = host.id + "-input";
     var head = el("div", "notes-head");
@@ -2349,7 +2390,7 @@
     ta.rows = 5;
     ta.spellcheck = true;
     ta.placeholder = "What tripped you up? The trick to remember next time…";
-    ta.value = initial || "";
+    ta.value = knownNotes(pid, initial, busyAtFetch);
     ta.setAttribute("aria-describedby", taId + "-count");
     host.appendChild(ta);
     var count = el("div", "notes-count");
@@ -2357,9 +2398,10 @@
     host.appendChild(count);
     host.hidden = false;
 
+    var queue = notesQueue(pid);
     var timer = null;
-    var saved = ta.value;
-    var inflight = false;
+    var saved = ta.value;  // what the server holds, as far as this editor knows
+    var queued = ta.value; // the newest text handed to the queue
     var dead = false;
     function setState(state, info) {
       status.textContent = core.notesStatus(state, info);
@@ -2371,29 +2413,25 @@
       count.classList.toggle("near", ta.value.length > NOTES_CAP * 0.9);
     }
     function save(keepalive) {
+      var wasDirty = !!timer;
       clearTimeout(timer);
       timer = null;
-      if (dead || inflight) return;
+      if (dead) return;
       var text = ta.value;
-      if (text === saved) { setState("saved"); return; }
-      inflight = true;
+      if (text === queued) { if (wasDirty && text === saved) setState("saved"); return; }
+      queued = text;
       setState("saving");
-      fetch("/problems/" + encodeURIComponent(pid) + "/notes", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notes: text }),
-        keepalive: !!keepalive,
-      }).then(function (resp) {
-        if (!resp.ok) return errorOf(resp).then(function (why) { throw new Error(why); });
-        saved = text;
-        inflight = false;
-        if (dead) return;
-        if (ta.value !== saved) { setState("dirty"); timer = setTimeout(save, NOTES_DEBOUNCE_MS); }
-        else setState("saved");
-      }).catch(function (e) {
-        inflight = false;
-        if (dead) return;
-        setState("error", { reason: (e && e.message) || "network error" });
+      queue.push(text, keepalive, function (err, sentText) {
+        if (err) {
+          if (queued === text) queued = null; // Retry (or the next save) re-sends it
+          if (dead) return;
+          setState("error", { reason: err.message || "network error" });
+          return;
+        }
+        saved = sentText;
+        if (dead || timer) return; // newer typing waits for its own debounce
+        if (ta.value === saved) setState("saved");
+        else if (ta.value !== queued) save();
       });
     }
     ta.addEventListener("input", function () {
@@ -2407,9 +2445,12 @@
     setCount();
     setState(saved ? "saved" : "idle");
     return {
-      flush: function (keepalive) { if (timer) save(keepalive); },
+      // keepalive: the request outlives a closing tab (pagehide).
+      flush: function (keepalive) { if (!dead) save(keepalive); },
+      // Hands any unsent text to the queue (it is sent even after this),
+      // then stops touching the DOM.
       destroy: function () {
-        if (timer) save(true);
+        if (!dead) save(true);
         dead = true;
       },
       pid: pid,
@@ -2445,19 +2486,38 @@
         })
         .catch(function () { /* the button just stays hidden */ });
     }
-    if (pid && lvNotes) {
-      fetch("/problems/" + encodeURIComponent(pid))
-        .then(function (resp) {
-          if (!resp.ok) throw new Error("HTTP " + resp.status);
-          return resp.json();
-        })
-        .then(function (rec) {
-          if (token !== viewerToken) return;
-          viewerNotes = makeNotesEditor(lvNotes, rec.id || pid, rec.notes || "",
-            "Notes on " + problemLabelOf(rec));
-        })
-        .catch(function () { /* no record: no notes editor */ });
-    }
+    if (pid) loadViewerNotes(pid, token);
+  }
+  function loadViewerNotes(pid, token) {
+    if (!lvNotes) return;
+    var busy = notesBusy(pid);
+    fetch("/problems/" + encodeURIComponent(pid))
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (rec) {
+        if (token !== viewerToken) return;
+        if (viewerNotes) viewerNotes.destroy();
+        viewerNotes = makeNotesEditor(lvNotes, rec.id || pid, rec.notes || "",
+          "Notes on " + problemLabelOf(rec), busy || notesBusy(rec.id || pid));
+      })
+      .catch(function () { /* no record: no notes editor */ });
+  }
+  // SP7 fix: the re-attempt view takes over this problem's notes - retire
+  // the viewer's editor (its unsent text goes to the save queue) ...
+  function retireViewerNotes() {
+    if (!viewerNotes) return;
+    viewerNotes.destroy();
+    viewerNotes = null;
+    viewerToken++; // a notes fetch still in flight must not rebuild it
+    if (lvNotes) { lvNotes.hidden = true; lvNotes.textContent = ""; }
+  }
+  // ... and rebuild it from fresh notes when the Library shows again.
+  function restoreViewerNotes() {
+    if (viewerNotes || !currentViewPath) return;
+    var f = libByPath[currentViewPath] || {};
+    if (f.problem_id) loadViewerNotes(f.problem_id, viewerToken);
   }
   if (lvReattempt) {
     lvReattempt.addEventListener("click", function () {
@@ -2472,9 +2532,17 @@
       openFlashcards({ path: currentViewPath }, "From " + t, lvCards);
     });
   }
-  window.addEventListener("pagehide", function () {
+  function flushNotes() {
     if (viewerNotes) viewerNotes.flush(true);
     if (practiceNotes) practiceNotes.flush(true);
+  }
+  window.addEventListener("pagehide", function () {
+    flushNotes();
+    // The page is going away: a save waiting on an in-flight one goes now.
+    Object.keys(notesQueues).forEach(function (pid) { notesQueues[pid].flushNow(); });
+  });
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") flushNotes();
   });
 
   // ---- D4: the review queue (Console "Due today" + Stats) ------------------
@@ -2490,11 +2558,22 @@
       })
       .then(function (data) {
         lastReview = data || null;
+        lastReviewDay = core.dayKey(new Date());
         renderDuePanel(lastReview);
         renderReviewStats(lastReview);
+        renderPracticeDue(); // the open re-attempt view's "due …" label too
       })
       .catch(function () { /* the panel stays as it was */ });
   }
+  // A tab that comes back on a later day (overnight, after sleep) refreshes
+  // the queue: yesterday's "due tomorrow" is today's "due today".
+  function refreshReviewIfNewDay() {
+    if (lastReviewDay && lastReviewDay !== core.dayKey(new Date())) loadReview();
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") refreshReviewIfNewDay();
+  });
+  window.addEventListener("focus", refreshReviewIfNewDay);
   function renderDuePanel(data) {
     if (!duePanel || !dueList) return;
     var counts = (data && data.counts) || {};
@@ -2605,14 +2684,30 @@
   var MAX_CASES = 10;
   var GRADE_LABELS = { solo: "Solved it solo", hints: "Needed hints", peeked: "Peeked at the solution" };
 
+  function retirePracticeNotes() {
+    if (practiceNotes) { practiceNotes.destroy(); practiceNotes = null; }
+  }
   function draftKey(pid) { return "attempt." + pid; }
   function saveAttemptDraft() {
     if (!practice || !prCode) return;
     prefs.set(draftKey(practice.id), prCode.value);
     prefs.set(draftKey(practice.id) + ".lang", prLang ? prLang.value : "");
   }
+  // SP7 fix: a test result belongs to the code + language it ran - once
+  // either changes, the shown results and the summary a grade would carry
+  // are stale, so both go (a run still in flight shows its result but is
+  // not kept for the grade; see practiceTest).
+  function invalidatePracticeTest() {
+    if (!practice) return;
+    practice.lastTest = null;
+    if (!practice.testing && prResults && prResults.firstChild) {
+      prResults.textContent = "";
+      prResults.className = "pr-results";
+    }
+  }
   var attemptDraftTimer = null;
   attachCodeEditor(prCode, function () {
+    invalidatePracticeTest();
     clearTimeout(attemptDraftTimer);
     attemptDraftTimer = setTimeout(saveAttemptDraft, 400);
   });
@@ -2631,6 +2726,12 @@
       b.setAttribute("aria-label", GRADE_LABELS[g] + ": " + text.replace("→ ", "moves to "));
       b.classList.toggle("suggest", g === "peeked" && !!(practice && practice.peeked));
     });
+  }
+  // Grade buttons: enabled once per re-attempt session (SP7 fix: grading
+  // twice would move the Leitner box twice); a new session re-enables them.
+  function setGradeButtons(on) {
+    if (!prGrade) return;
+    prGrade.querySelectorAll("[data-grade]").forEach(function (x) { x.disabled = !on; });
   }
   function renderPracticeDue() {
     if (!prDue) return;
@@ -2712,6 +2813,7 @@
       }
       var put = function () {
         prCode.value = starter;
+        invalidatePracticeTest();
         saveAttemptDraft();
         prCode.focus();
       };
@@ -2726,10 +2828,19 @@
       } else put();
     });
   }
-  if (prLang) prLang.addEventListener("change", saveAttemptDraft);
+  if (prLang) {
+    prLang.addEventListener("change", function () {
+      invalidatePracticeTest();
+      saveAttemptDraft();
+    });
+  }
 
   function openPractice(pid, opts) {
     opts = opts || {};
+    // SP7 fix: retire the viewer's notes editor BEFORE the fetch, so its
+    // unsent text is queued and the snapshot below knows a save is landing.
+    retireViewerNotes();
+    var notesWereBusy = notesBusy(pid);
     return fetch("/problems/" + encodeURIComponent(pid))
       .then(function (resp) {
         if (!resp.ok) throw new Error(resp.status === 404 ? "not found" : "HTTP " + resp.status);
@@ -2737,10 +2848,11 @@
       })
       .then(function (rec) {
         if (practice && practice.testing) cancelPracticeTest();
-        if (practiceNotes) { practiceNotes.destroy(); practiceNotes = null; }
+        retirePracticeNotes();
         var id = rec.id || pid;
         var from = opts.from || (currentView === "practice" && practice ? practice.from : currentView);
-        practice = { id: id, rec: rec, from: from, testing: null, lastTest: null, peeked: false };
+        practice = { id: id, rec: rec, from: from, testing: null, lastTest: null, peeked: false,
+          graded: false };
         var label = problemLabelOf(rec);
         if (prTitle) prTitle.textContent = "Re-attempt: " + label;
         if (prSub) {
@@ -2766,14 +2878,19 @@
         if (prSolution) prSolution.hidden = true;
         if (prSolutionBody) prSolutionBody.textContent = "";
         setPracticeTesting(false);
+        setGradeButtons(true); // a new session may be graded (once)
         renderGradeDescs();
-        if (prNotesHost) practiceNotes = makeNotesEditor(prNotesHost, id, rec.notes || "", "Notes");
+        if (prNotesHost) {
+          practiceNotes = makeNotesEditor(prNotesHost, id, rec.notes || "", "Notes",
+            notesWereBusy || notesBusy(id));
+        }
         switchView("practice");
         if (contentEl) contentEl.scrollTop = 0;
         if (prCode) prCode.focus();
         announce("Re-attempt " + label + ". " + (prDue ? prDue.textContent : ""));
       })
       .catch(function (e) {
+        if (currentView === "library") restoreViewerNotes(); // still on the Library
         notify("Could not open that problem (" + ((e && e.message) || "error") + ").", "error");
       });
   }
@@ -2863,7 +2980,8 @@
         return;
       }
       renderPracticeResults(data);
-      if (data.total > 0 && !data.cancelled) {
+      var unchanged = prCode.value === code && (!prLang || prLang.value === language);
+      if (data.total > 0 && !data.cancelled && unchanged) {
         p.lastTest = { language: language, passed: data.passed, total: data.total };
       }
       announce("Tests finished: " + (data.summary || core.caseInfo(data.status).label) + ".");
@@ -2935,13 +3053,12 @@
   if (prGrade) {
     prGrade.addEventListener("click", function (e) {
       var b = e.target.closest("[data-grade]");
-      if (!b || !practice || b.disabled) return;
+      if (!b || !practice || b.disabled || practice.graded) return;
       var p = practice;
       var grade = b.getAttribute("data-grade");
       var body = { grade: grade };
       if (p.lastTest) body.attempt = p.lastTest;
-      var btns = prGrade.querySelectorAll("[data-grade]");
-      btns.forEach(function (x) { x.disabled = true; });
+      setGradeButtons(false);
       prGradeStatus.textContent = "Saving your grade…";
       postJson("/problems/" + encodeURIComponent(p.id) + "/grade", body)
         .then(function (resp) {
@@ -2950,6 +3067,7 @@
         })
         .then(function (res) {
           if (practice !== p) return;
+          p.graded = true; // SP7 fix: a second click would move the box again
           p.rec.review = res.review;
           var when = core.dueLabel(res.review.due, todayKey());
           var msg = "Graded “" + GRADE_LABELS[grade] + "” — box " + res.review.box + ", next review " +
@@ -2963,10 +3081,10 @@
         })
         .catch(function (err) {
           var why = (err && err.message) || "network error";
-          prGradeStatus.textContent = "Could not save the grade (" + why + "). Try again.";
+          if (practice === p) prGradeStatus.textContent = "Could not save the grade (" + why + "). Try again.";
           notify("Could not save the grade (" + why + ").", "error");
         })
-        .then(function () { btns.forEach(function (x) { x.disabled = false; }); });
+        .then(function () { if (practice === p && !p.graded) setGradeButtons(true); });
     });
   }
   var prBack = $("practice-back");
