@@ -4,6 +4,133 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-10-08
+
+The study-loop release. Every audit finding is fixed (A1-A8, B1-B25, C1-C14), and the app
+grows from "generate a doc" into a practice loop: problem records, a run log, hints,
+re-attempts with "Test my code", a review queue, Code Review mode, notes, flashcards, and
+follow-up questions on a saved doc.
+
+### Added
+- **Problem records and a run log (D1).** Each saved run records its problem under
+  `output/.leetcoach/problems/` (number, title and difficulty parsed from the paste,
+  pattern, statement) and appends one line to `output/.leetcoach/runs.jsonl`. The library
+  table's Diff column now shows real data, and `GET /problems` / `/problems/<id>` expose
+  the records. The library, search and delete all hide the metadata folder.
+- **A study-doc contract and a hint ladder (D2).** Every mode follows one structure:
+  problem in brief, target complexity, how to recognise the pattern, key insight,
+  approach, solution, complexity, edge cases, common mistakes, related problems,
+  flashcards. Each doc tags exactly one ```` ```<lang> solution```` block. Guided and
+  Learning add `### Hint 1..4`, shown click-to-reveal, and Learning never contains a full
+  solution. Problems are filed under a fixed list of about 18 patterns.
+- **Re-attempt and "Test my code" (D3).** Re-open a saved problem with the answer hidden,
+  write your own Python, and run it in the sandbox against the problem's samples and your
+  own cases (`POST /attempt/test`, cancellable). Give up to reveal the latest doc. C++ and
+  Java say clearly that they are not supported yet.
+- **A spaced-repetition review queue (D4).** Grade each attempt as solo, with hints, or
+  peeked. A Leitner schedule (1, 3, 7, 14, 30 days) moves the due date. The Console shows
+  "Due today (N)" and Stats shows review counts.
+- **Code Review mode (D5).** Paste your own attempt and Claude critiques its bugs,
+  complexity and edge cases without rewriting it. Reviews are saved under
+  `output/reviews/`.
+- **Follow-up questions on a saved doc (D6).** Ask a question in the library viewer. The
+  answer streams in and is then appended to the doc under `## Follow-up — <question>`.
+  When it can, LeetCoach resumes the run's own Claude session (`claude --resume`);
+  otherwise it makes a fresh, isolated call with the doc as context. Stop or `Esc`
+  cancels, and nothing is added unless the answer completes. Follow-ups never change the
+  doc's verdict and do not count as runs in Stats.
+- **Workspace persistence and summary actions (D7).** The draft problem, mode, language
+  and Code Quality level survive a reload, and leaving mid-run asks first. A finished run
+  offers Open in Library, Re-run as Optimal, Re-run in another language, and Learn this
+  topic.
+- **Notes per problem (D9).** Edit them in the library viewer; they are saved in the
+  problem record.
+- **Flashcards (D10).** Cards are parsed from each doc's `## Flashcards` section, with an
+  in-app flip review and an Anki export (`GET /flashcards.tsv`).
+- **Stream UX (D11).** The view follows the stream and shows a "Jump to latest" pill when
+  you scroll away. It also shows the progress phase (streaming, verifying i/n, saving)
+  and the concrete model that answered.
+- **Single instance (D16).** `GET /healthz` identifies LeetCoach. A second launch opens the
+  browser on the running app instead of starting another server on another port.
+- **`LEETCOACH_CLAUDE_CWD`**, the neutral folder every `claude` call runs in.
+
+### Changed
+- **Isolated Claude calls (A7).** `claude -p` no longer runs as a full agent in the repo.
+  - Every call gets `--safe-mode`, `--tools ""`, `--strict-mcp-config` and a
+    `--system-prompt` persona, each only when the installed CLI lists it.
+  - Every call runs in the neutral `LEETCOACH_CLAUDE_CWD`.
+  - `--bare` is never passed, because it drops the subscription login.
+  - Study runs keep their session so follow-ups can resume it. The classifier, Quick Ask,
+    the follow-up fallback and the sign-in probe use `--no-session-persistence`.
+- **Stats come from the run log (A8).** Libraries saved before the log still count, one
+  activity per saved run at its own date, so streaks, the heatmap and the totals no longer
+  undercount. The server now computes Stats (`GET /stats`).
+- **Safer prompts (B21, B22).** Pasted problem text is fenced with random delimiters
+  generated for each prompt. Topics are sanitised and capped, and the topic index is
+  keyed by language.
+- **Quick Ask model tag (C13).** The page now shows the configured
+  `LEETCOACH_QUICK_ASK_MODEL` instead of a hard-coded "haiku".
+
+### Fixed
+- **Launch and sign-in (A1, B9).** `ensure-claude-auth.ps1` is now ASCII-only, so it
+  parses under Windows PowerShell 5.1. The desktop shortcut's automatic sign-in now
+  actually runs, in its own visible window. `setup.ps1` checks every step's exit code,
+  and the launcher pauses on failure.
+- **Verification correctness (A2-A4, B4, B5, B24).**
+  - The verifier picks the tagged solution block, not the first teaching snippet.
+  - Output is compared structurally: `[0, 1]` equals `[0,1]`, and `True` equals `true`.
+  - Markdown is stripped from sample labels.
+  - The reason for each failed or errored sample is kept.
+  - Timeouts can be fractional.
+  - An answer with no code block no longer writes an empty code file.
+- **Process control (A5, A6, B1, B3, B6, C4, C5).**
+  - The memory and process caps apply before any generated code runs.
+  - A run no longer hangs when `claude` exits while a grandchild still holds its pipe.
+  - The sign-in probe can time out, decodes UTF-8, and is cached.
+  - Odd stream events no longer crash the parser.
+  - Output is captured with byte caps, and stale sandbox folders are cleaned up.
+- **Error messages (B2).** A failed run's headline comes from the CLI's real error.
+  "Signed out" appears only when the CLI reports it.
+- **Storage (B7, B10, B12, B19, B25).**
+  - Writes are atomic and retry while another process holds the file.
+  - A UTF-16 or duplicate-key `.env` no longer breaks the model picker.
+  - Non-ASCII titles get distinct file names.
+  - A failed save keeps the answer under `output/_unsorted/`.
+  - Delete removes a whole run.
+  - The library notices nested changes, and the topic index is hidden from it.
+- **Front end (B13-B18, B20).**
+  - Run state is guarded by a run id, so Run works immediately after Stop.
+  - Rendering is throttled so large docs do not jank.
+  - A cut stream is reported as an error, never as "Saved".
+  - Status columns and verdict chips show FAIL.
+  - Quick Ask can be cancelled.
+- **Request handling and config (B23, B8, C7).** A non-object JSON body returns 400
+  instead of 500. The test suite never reads your real `.env` or writes your real topic
+  index. `.env.example` lists every setting.
+- **Accessibility, narrow screens and polish (C9-C12).** Live regions, keyboard-reachable
+  rows, focus traps, better contrast, a sidebar drawer below 900 px, and dead CSS removed.
+
+### Security
+- **Sandbox start-up (A5).** The sandbox child is the real interpreter running a trusted
+  bootstrap. The bootstrap waits for a go byte that is sent only after the Job Object is
+  assigned, and the sandbox fails closed.
+- **Audit hook (C6).** It blocks writes outside the run folder, reads of known secret
+  paths, all sockets, SQLite, process creation, `ctypes` and heap walking. It is defence
+  in depth, not a boundary; see SECURITY.md.
+- **Web hardening (C1-C3).**
+  - `frame-ancestors 'none'` and `X-Frame-Options: DENY` stop clickjacking.
+  - State-changing requests from another origin are refused.
+  - SSE streams send a heartbeat, and runs can be cancelled on the server.
+- **Anki export.** Cells that a spreadsheet would treat as formulas are neutralised.
+
+### Notes
+- **CI and tests (C14).** CI parses every `.ps1` under Windows PowerShell 5.1. The
+  JavaScript helpers have zero-dependency node tests, which pytest runs.
+- **Docs (C13).** README, ARCHITECTURE, SECURITY and this changelog are up to date.
+- **Existing libraries.** Existing `output/` libraries keep working with no migration:
+  legacy files count in Stats and open in the viewer. Follow-ups on them use the fallback
+  path.
+
 ## [1.4.0] - Unreleased
 
 ### Changed
@@ -36,7 +163,9 @@ All notable changes to this project are documented here. The format follows
   keep their own Haiku defaults.
 - **The desktop shortcut signs you in when needed.** Before starting the app, the launcher
   checks the `claude` CLI's sign-in state and, if you are signed out, runs
-  `claude auth login` for you — so a run never fails on an expired session.
+  `claude auth login` for you — so a run never fails on an expired session. *(In 1.4.0
+  the sign-in script did not parse under Windows PowerShell 5.1, so this step silently
+  did nothing. Fixed in 1.5.0; see A1.)*
 
 ### Changed
 - Renamed the **Tier** control to **Code Quality**, with clearer levels **Basic / Normal /
