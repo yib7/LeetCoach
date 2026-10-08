@@ -31,11 +31,15 @@ from __future__ import annotations
 import io
 import json
 import os
+import queue
+import re
 import socket
 import threading
 import time
+import uuid
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -173,6 +177,199 @@ def _hostname(host: str) -> str:
     if host.startswith("["):
         return host.partition("]")[0] + "]"
     return host.rsplit(":", 1)[0]
+
+
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _split_host_port(hostport: str, scheme: str) -> tuple[str, int | None]:
+    """``("host", port)`` from a ``host[:port]`` string (bracketed IPv6 ok),
+    the scheme's default port filled in; port ``None`` if unparseable."""
+    hostport = hostport.strip().lower()
+    host = _hostname(hostport)
+    rest = hostport[len(host):]
+    if not rest:
+        return host, _DEFAULT_PORTS.get(scheme)
+    if not rest.startswith(":") or not rest[1:].isdigit():
+        return host, None
+    return host, int(rest[1:])
+
+
+def _same_origin(origin: str, host_header: str, scheme: str) -> bool:
+    """C2: True iff the ``Origin`` header names exactly this server - same
+    scheme, same loopback host, same port as the request's ``Host``. ``null``
+    (sandboxed iframes, file://) and anything unparseable are rejected."""
+    parsed = urlsplit(origin.strip())
+    if parsed.scheme not in _DEFAULT_PORTS or not parsed.netloc:
+        return False
+    if parsed.scheme != scheme or parsed.path not in ("", "/"):
+        return False
+    origin_host = _split_host_port(parsed.netloc, parsed.scheme)
+    return origin_host[1] is not None and origin_host == _split_host_port(host_header, scheme)
+
+
+def _cross_site_rejection(method: str, path: str, headers, host_header: str, scheme: str):
+    """C2: the reason to refuse a request as cross-site, or ``None``.
+
+    Unsafe methods (every state-changing route: /run, /ask, /config/model,
+    DELETE /library/file, /run/cancel) must come from this page: a browser
+    sends ``Origin`` on them, and it must be this exact origin;
+    ``Sec-Fetch-Site: cross-site`` is refused outright. A request with neither
+    header (curl, scripts, the test client) is allowed - the threat is a
+    hostile web page, which cannot strip them.
+
+    ``GET /`` runs the CLI sign-in probe, so a cross-site page must not be able
+    to trigger it with an ``<img>``/``<iframe>``/``fetch``; only a top-level
+    navigation (the user following a link) is allowed cross-site.
+    """
+    site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if method in _UNSAFE_METHODS:
+        if site == "cross-site":
+            return "Cross-site request refused."
+        origin = headers.get("Origin")
+        if origin is not None and not _same_origin(origin, host_header, scheme):
+            return "Cross-origin request refused."
+        return None
+    if path == "/" and site == "cross-site":
+        mode = (headers.get("Sec-Fetch-Mode") or "").strip().lower()
+        dest = (headers.get("Sec-Fetch-Dest") or "").strip().lower()
+        if not (mode == "navigate" and dest == "document"):
+            return "Cross-site request refused."
+    return None
+
+
+# C3: an SSE comment frame sent while the stream is otherwise silent (Claude
+# thinking, the sandbox verifying, the classifier join). It keeps proxies and
+# the browser from timing the stream out, and - the B14 point - a write to a
+# client that has gone away fails, so the server notices the disconnect and
+# frees the run instead of waiting for Claude to finish. Ignored by EventSource
+# and by app.js's parser. The interval is read at call time (tests shorten it).
+SSE_PING = ": ping\n\n"
+SSE_PING_INTERVAL = 15.0
+
+_HEARTBEAT = object()
+_ITEM, _DONE, _ERROR = "item", "done", "error"
+
+
+def _iter_with_heartbeat(iterable):
+    """Yield the items of ``iterable`` - pulled on a helper thread - and
+    ``_HEARTBEAT`` whenever ``SSE_PING_INTERVAL`` passes with no new item.
+    Exceptions from the iterable re-raise here. If the consumer stops early
+    (client disconnect, cancel), ``iterable.cancel()`` is called when it has
+    one (``claude_cli.ClaudeRun`` kills its process tree) and the helper
+    thread closes the iterator as soon as it regains control."""
+    q: queue.Queue = queue.Queue()
+    stop = threading.Event()
+
+    def pump():
+        it = iter(iterable)
+        try:
+            for item in it:
+                q.put((_ITEM, item))
+                if stop.is_set():
+                    break
+        except BaseException as exc:  # noqa: BLE001 - handed to the consumer
+            q.put((_ERROR, exc))
+            return
+        finally:
+            if stop.is_set():
+                close = getattr(it, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001 - best-effort teardown
+                        pass
+        q.put((_DONE, None))
+
+    threading.Thread(target=pump, name="leetcoach-stream-pump", daemon=True).start()
+    finished = False
+    try:
+        while True:
+            try:
+                kind, value = q.get(timeout=SSE_PING_INTERVAL)
+            except queue.Empty:
+                yield _HEARTBEAT
+                continue
+            if kind is _DONE:
+                finished = True
+                return
+            if kind is _ERROR:
+                finished = True
+                raise value
+            yield value
+    finally:
+        if not finished:
+            stop.set()
+            cancel = getattr(iterable, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:  # noqa: BLE001 - best-effort teardown
+                    pass
+
+
+def _call_with_heartbeat(fn):
+    """Run the blocking ``fn()`` on a helper thread, yielding ``SSE_PING``
+    every ``SSE_PING_INTERVAL`` while it works; ``return`` its result (use
+    with ``yield from`` inside an SSE generator) or re-raise its exception."""
+    box: dict = {}
+    done = threading.Event()
+
+    def work():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - handed to the caller
+            box["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=work, name="leetcoach-blocking-call", daemon=True).start()
+    while not done.wait(SSE_PING_INTERVAL):
+        yield SSE_PING
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+class _RunCancelled(Exception):
+    """Raised inside a /run stream once ``POST /run/cancel`` named it."""
+
+
+class _RunState:
+    """One in-flight /run (B14): its dedup key and the cancel hooks of every
+    Claude call it started, so ``POST /run/cancel`` can kill them all."""
+
+    def __init__(self, key) -> None:
+        self.key = key
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._hooks: list = []
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def add_cancel_hook(self, hook) -> None:
+        with self._lock:
+            self._hooks.append(hook)
+            fire = self._cancelled
+        if fire:
+            hook()
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            hooks = list(self._hooks)
+        for hook in hooks:
+            hook()
+
+    def check(self) -> None:
+        if self._cancelled:
+            raise _RunCancelled()
+
+
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 def _sweep_sandbox_temp() -> int:
@@ -434,12 +631,23 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     )
 
     # In-flight /run de-duplication (P2-12): a single-user local tool should not
-    # fan the same (problem, mode, language, tier) into N concurrent Claude runs
-    # (double-click, impatient re-submit). Keyed set guarded by a lock; the key
-    # is registered after validation and released when the stream ends — on
-    # normal completion, client disconnect (GeneratorExit), or error.
-    _inflight_runs: set = set()
+    # fan the same (problem, mode, language, tier, model) into N concurrent
+    # Claude runs (double-click, impatient re-submit). ``_inflight_runs`` maps
+    # each key to the run_id that owns it, ``_runs`` maps run_id -> _RunState;
+    # both guarded by one lock. The key is registered after validation and
+    # released when the stream ends — on normal completion, client disconnect
+    # (GeneratorExit), or error — or right away by POST /run/cancel (B14), and
+    # only ever by its owner, so a finishing old run can't free a new one's key.
+    _inflight_runs: dict = {}
+    _runs: dict = {}
     _inflight_lock = threading.Lock()
+
+    def _release_run(run_id: str, state: _RunState) -> None:
+        with _inflight_lock:
+            if _inflight_runs.get(state.key) == run_id:
+                del _inflight_runs[state.key]
+            if _runs.get(run_id) is state:
+                del _runs[run_id]
 
     # Library-listing cache (P2-6): the read-only /library walk (rglob + a stat
     # per file) reran on every tab-open and post-run refresh. Cache the result
@@ -481,6 +689,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # blocks the attack for every route.
         if _hostname(request.host) not in ALLOWED_HOSTNAMES:
             return jsonify({"error": "Forbidden host."}), 403
+        # C2: a hostile page on another origin can still POST to loopback
+        # (the Host check can't see that) - refuse it by Origin/Sec-Fetch-Site.
+        reason = _cross_site_rejection(
+            request.method, request.path, request.headers, request.host, request.scheme
+        )
+        if reason:
+            return jsonify({"error": reason}), 403
 
     @app.after_request
     def _response_headers(resp):
@@ -497,8 +712,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         resp.headers["Content-Security-Policy"] = (
             "default-src 'none'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
-            "base-uri 'none'; form-action 'none'"
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
         )
+        # C1: no other page may frame LeetCoach (clickjacking of Run, Delete
+        # and the model picker). X-Frame-Options covers older browsers.
+        resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["X-Content-Type-Options"] = "nosniff"
         return resp
 
@@ -624,7 +842,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         type_err = _non_string_field_error(
             data,
             (("problem", "Problem"), ("mode", "Mode"),
-             ("language", "Language"), ("tier", "Tier"), ("model", "Model")),
+             ("language", "Language"), ("tier", "Tier"), ("model", "Model"),
+             ("run_id", "Run id")),
         )
         if type_err:
             return jsonify({"error": type_err}), 400
@@ -639,6 +858,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         model = (data.get("model") or "").strip().lower()
         if model and model not in config.ALLOWED_MODEL_ALIASES:
             return jsonify({"error": f"Unknown model {model!r}."}), 400
+        # B14: the client names its run so Stop can POST /run/cancel; a
+        # client that doesn't gets a server-made id (echoed in X-Run-Id).
+        run_id = data.get("run_id")
+        if run_id is None:
+            run_id = uuid.uuid4().hex
+        elif not _RUN_ID_RE.fullmatch(run_id):
+            return jsonify({"error": "Invalid run id."}), 400
 
         # --- validation (reject unknown values up front, before any Claude call)
         if not problem:
@@ -655,12 +881,14 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # validation; an exact duplicate that's still streaming gets a 409.
         run_key = (problem, mode, language, tier, model)
         study_kwargs = {"model": model} if model else {}
+        state = _RunState(run_key)
         with _inflight_lock:
-            if run_key in _inflight_runs:
+            if run_key in _inflight_runs or run_id in _runs:
                 return jsonify(
                     {"error": "An identical run is already in progress."}
                 ), 409
-            _inflight_runs.add(run_key)
+            _inflight_runs[run_key] = run_id
+            _runs[run_id] = state
 
         def _stream_and_accumulate(prompt):
             """Stream ``run_fn(prompt)`` deltas to the client (yielding SSE text
@@ -681,15 +909,25 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             # A7: study runs carry the tutor persona and KEEP their session
             # (in the neutral cwd's project bucket) for a later --resume.
             try:
-                for delta in run_fn(
+                state.check()  # cancelled before the stream even started
+                call = run_fn(
                     prompt,
                     system_prompt=prompts.TUTOR_SYSTEM_PROMPT,
                     persist_session=True,
                     **study_kwargs,
-                ):
+                )
+                # B14: POST /run/cancel kills this call's process tree.
+                state.add_cancel_hook(lambda: _cancel_call(call))
+                # C3: pings keep flowing while Claude thinks in silence.
+                for delta in _iter_with_heartbeat(call):
+                    if delta is _HEARTBEAT:
+                        yield SSE_PING
+                        continue
+                    state.check()
                     if delta:
                         full.append(delta)
                         yield _sse_text(delta)
+                state.check()
                 # A stream that ends without producing any text is a failure,
                 # not an empty success (audit P2-1): raising here — one place
                 # covering all three modes — aborts before any save, and the
@@ -780,6 +1018,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         def event_stream():
             save_warning = None
             try:
+                state.check()  # B14: cancelled before the stream even started
+                state.add_cancel_hook(_cancel_classifier)
                 # 1) classify on a background thread (audit6 P2-4). The short
                 #    classification round-trip used to complete BEFORE the first
                 #    answer delta streamed, delaying every run by a full Claude
@@ -818,7 +1058,14 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     returns) must not hold the save hostage for the full run
                     watchdog. Its call is cancelled and the run saves under
                     the fallback type."""
-                    cls_thread.join(CLASSIFIER_JOIN_TIMEOUT)
+                    deadline = time.monotonic() + CLASSIFIER_JOIN_TIMEOUT
+                    while cls_thread.is_alive():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        cls_thread.join(min(SSE_PING_INTERVAL, remaining))
+                        if cls_thread.is_alive() and time.monotonic() < deadline:
+                            yield SSE_PING  # C3: keep the stream alive meanwhile
                     if cls_thread.is_alive():
                         app.logger.warning(
                             "classifier still running after %ss; saving as %s",
@@ -845,7 +1092,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     # SP5: best-effort sample-I/O verification. Stream a short
                     # verdict line; the saved reasoning .md gets the verdict
                     # PLUS the per-sample failure detail (audit6 P2-9).
-                    result, verdict = _verify_code(code, problem, language)
+                    result, verdict = yield from _call_with_heartbeat(
+                        lambda: _verify_code(code, problem, language)
+                    )
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")
                     reasoning = (
@@ -853,7 +1102,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         + _verification_detail(result)
                     )
 
-                    cls = _classification()  # join before the save needs its result
+                    cls = yield from _classification()  # join before the save
+                    state.check()  # B14: a cancelled run saves nothing
 
                     def _save_answer():
                         code_path, reasoning_path = storage.save_answer(
@@ -884,7 +1134,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         already_learned_topics=learned or None,
                     )
                     yield from _stream_and_accumulate(prompt)
-                    cls = _classification()  # join before the save needs its result
+                    cls = yield from _classification()  # join before the save
+                    state.check()  # B14: a cancelled run saves nothing
                     paths, save_warning = _save_with_fallback(
                         lambda: [storage.save_learning(problem, cls.problem_type, out[0])],
                         out[0],
@@ -907,14 +1158,17 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     # extract the code from the full piped doc exactly once
                     # (P2-13), and save verdict + failure detail (P2-9).
                     code = parsing.extract_code(body, language)
-                    result, verdict = _verify_code(code, problem, language)
+                    result, verdict = yield from _call_with_heartbeat(
+                        lambda: _verify_code(code, problem, language)
+                    )
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")
                     saved = (
                         body + "\n\n---\n\n**Verification:** " + verdict + "\n"
                         + _verification_detail(result)
                     )
-                    cls = _classification()  # join before the save needs its result
+                    cls = yield from _classification()  # join before the save
+                    state.check()  # B14: a cancelled run saves nothing
                     paths, save_warning = _save_with_fallback(
                         lambda: [storage.save_guided(problem, cls.problem_type, saved)],
                         saved,
@@ -939,10 +1193,15 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     done_payload["save_warning"] = save_warning
                 yield _sse_event("done", done_payload)
             except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
-                # Keep the full traceback in the server log (audit P2-8); the
-                # client still gets only the short message below.
-                app.logger.exception("run failed (mode=%s)", mode)
-                yield _sse_event("error", f"Run failed: {exc}")
+                if state.cancelled:
+                    # B14: Stop -> POST /run/cancel. Whatever the killed call
+                    # raised (ClaudeCancelledError, _RunCancelled), say so.
+                    yield _sse_event("error", "Run cancelled.")
+                else:
+                    # Keep the full traceback in the server log (audit P2-8);
+                    # the client still gets only the short message below.
+                    app.logger.exception("run failed (mode=%s)", mode)
+                    yield _sse_event("error", f"Run failed: {exc}")
             finally:
                 # A6: a classifier call still running is no longer needed -
                 # the client left (GeneratorExit), the answer failed, or the
@@ -953,8 +1212,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 # normal completion, error, or a client disconnect (which raises
                 # GeneratorExit here, bypassing the except above). Frees an
                 # identical run to start again.
-                with _inflight_lock:
-                    _inflight_runs.discard(run_key)
+                _release_run(run_id, state)
 
         return Response(
             stream_with_context(event_stream()),
@@ -962,8 +1220,28 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",  # disable proxy buffering if present
+                "X-Run-Id": run_id,
             },
         )
+
+    @app.post("/run/cancel")
+    def cancel_run():
+        # B14: Stop in the UI. Kills the named run's Claude call(s) and frees
+        # its in-flight slot at once, so re-running the same settings is not
+        # a 409 until the server happens to notice the dropped connection.
+        data, err = _json_object()
+        if err:
+            return err
+        run_id = data.get("run_id")
+        if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
+            return jsonify({"error": "A valid run_id is required."}), 400
+        with _inflight_lock:
+            state = _runs.get(run_id)
+        if state is None:
+            return jsonify({"cancelled": False}), 404
+        state.cancel()
+        _release_run(run_id, state)
+        return jsonify({"cancelled": True})
 
     @app.post("/ask")
     def ask():

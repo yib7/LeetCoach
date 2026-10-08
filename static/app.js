@@ -16,7 +16,8 @@
  *    writes — render() never touches it.
  *  - Code-block chrome + hljs are per-frame post-render passes over #output.
  *    Copy is handled by ONE delegated click listener added once at init.
- *  - /run request body is { problem, mode, language, tier, model? }.
+ *  - /run request body is { problem, mode, language, tier, model?, run_id? };
+ *    Stop also POSTs /run/cancel { run_id }.
  */
 (function () {
   "use strict";
@@ -720,6 +721,27 @@
   }
 
   // ---- the run ------------------------------------------------------------
+  function newRunId() {
+    try {
+      if (window.crypto && window.crypto.randomUUID) {
+        return window.crypto.randomUUID().replace(/-/g, "");
+      }
+    } catch (e) { /* fall through */ }
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+  }
+  // Best-effort server-side cancel (B14). keepalive lets it outlive a page
+  // unload; a failure is harmless (the server also notices the dropped stream).
+  function cancelRun(runId) {
+    try {
+      fetch("/run/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: runId }),
+        keepalive: true,
+      }).catch(function () {});
+    } catch (e) { /* ignore */ }
+  }
+
   async function runNow() {
     if (isStreaming) return; // guard double-run
 
@@ -740,6 +762,10 @@
     var body = { problem: problem, mode: mode, language: language, tier: tier };
     var model = activeVal("model");
     if (model) body.model = model;
+    // B14: name the run so Stop can cancel it server-side (frees the slot and
+    // kills the claude process at once, instead of a 409 on an immediate re-run).
+    var runId = newRunId();
+    body.run_id = runId;
     var meta = { mode: mode, language: language, tier: tier };
 
     acc = "";
@@ -753,7 +779,11 @@
     window.addEventListener("beforeunload", abortOnUnload);
 
     var stoppedByUser = false;
-    activeStop = function () { stoppedByUser = true; controller.abort(); };
+    activeStop = function () {
+      stoppedByUser = true;
+      cancelRun(runId);
+      controller.abort();
+    };
 
     var terminal = false; // a terminal SSE event (done/error) already set state
 
