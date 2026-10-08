@@ -71,7 +71,8 @@
   var runStatus = $("run-status");
   var toastEl = $("toast");
 
-  var views = { console: $("view-console"), library: $("view-library"), stats: $("view-stats") };
+  var views = { console: $("view-console"), library: $("view-library"), stats: $("view-stats"),
+    practice: $("view-practice") };
 
   // session lifecycle containers (all live inside #session as siblings)
   var sessionState = document.querySelector("[data-session-state]");
@@ -273,13 +274,17 @@
     });
   }
   function syncTier() {
-    var learning = activeVal("mode") === "learning";
+    var mode = activeVal("mode");
+    var untiered = core.untiered(mode); // Learning / Code Review have no tier
     var tg = document.querySelector('.tgroup[data-seg="tier"]');
     if (tg) {
-      tg.classList.toggle("disabled", learning);
-      tg.setAttribute("aria-disabled", learning ? "true" : "false");
+      tg.classList.toggle("disabled", untiered);
+      tg.setAttribute("aria-disabled", untiered ? "true" : "false");
     }
-    segButtons("tier").forEach(function (b) { b.disabled = learning; });
+    segButtons("tier").forEach(function (b) { b.disabled = untiered; });
+    // SP7 / D5: Code Review takes the learner's attempt next to the problem.
+    var rc = $("review-code-wrap");
+    if (rc) rc.hidden = mode !== "review";
   }
 
   // B12: persist the picker as the default. On failure the picker reverts to
@@ -327,7 +332,7 @@
 
   // ---- views (per-view scroll, C10) ---------------------------------------
   var currentView = "console";
-  var viewScroll = { console: 0, library: 0, stats: 0 };
+  var viewScroll = { console: 0, library: 0, stats: 0, practice: 0 };
   function switchView(view) {
     if (!views[view]) return;
     if (view !== currentView && contentEl) viewScroll[currentView] = contentEl.scrollTop;
@@ -342,7 +347,7 @@
     if (changed && contentEl) contentEl.scrollTop = viewScroll[view] || 0;
     closeDrawer(false);
     if (view === "library") loadLibrary(); // re-fetch on open: fresh after runs
-    if (view === "stats") refreshStats();  // recompute from the already-loaded runs
+    if (view === "stats") { refreshStats(); loadReview(); } // recompute + the review queue
   }
   document.querySelectorAll("[data-view]").forEach(function (a) {
     a.addEventListener("click", function () { switchView(a.getAttribute("data-view")); });
@@ -642,7 +647,7 @@
   }
   function buildRunChips(meta) {
     rhChips.textContent = "";
-    rhChips.appendChild(chipEl(cap(meta.mode), "grn"));
+    rhChips.appendChild(chipEl(core.modeName(meta.mode), "grn"));
     rhChips.appendChild(chipEl(langLabel(meta.language), "mono"));
     if (meta.tier && core.tierApplies(meta.mode)) rhChips.appendChild(chipEl(cap(meta.tier), ""));
     var mc = chipEl(modelChipText(meta), "model" + (meta.modelId ? "" : " pending"));
@@ -708,7 +713,7 @@
     outputReveal = { mode: meta.mode, open: {} };
     render("", false); // clears #output through the single assignment site
     startTimer();
-    announce("Run started: " + cap(meta.mode) + ", " + langLabel(meta.language) + ".");
+    announce("Run started: " + core.modeName(meta.mode) + ", " + langLabel(meta.language) + ".");
   }
 
   function enterDone(payload, meta) {
@@ -724,6 +729,7 @@
     announce("Run finished. Saved " + n + (n === 1 ? " file" : " files") + "." +
       (v ? " " + core.verdictInfo(v).label + "." : ""));
     loadLibrary(); // refresh recents / table / topics / tree with the new files
+    loadReview();  // SP7: a first run of a problem schedules its review
   }
 
   function enterError(msg) {
@@ -837,7 +843,7 @@
       : "Saved to your study library"));
     var subParts = [];
     if (meta.title) subParts.push(meta.title); // C10: captured at run start
-    subParts.push(cap(meta.mode));
+    subParts.push(core.modeName(meta.mode));
     subParts.push(langLabel(meta.language));
     if (meta.tier && core.tierApplies(meta.mode)) subParts.push(cap(meta.tier)); // O2
     var sub = subParts.join(" · ");
@@ -1048,13 +1054,24 @@
 
     var mode = activeVal("mode");
     var language = activeVal("lang");
-    var tier = mode === "learning" ? "" : activeVal("tier");
+    var tier = core.untiered(mode) ? "" : activeVal("tier");
     var model = activeVal("model");
+    var attemptCode = "";
+    if (mode === "review") {
+      // SP7 / D5: Code Review needs the learner's code next to the problem.
+      attemptCode = reviewCodeEl ? reviewCodeEl.value : "";
+      if (!attemptCode.trim()) {
+        notify("Paste your code to review first.", "");
+        if (reviewCodeEl) reviewCodeEl.focus();
+        return;
+      }
+    }
     // Wire contract: { problem, mode, language, tier, model?, run_id }. The
     // picker's model is sent per run (B12); the server maps the alias that
     // matches a pinned .env id back to that id (config.resolve_run_model).
     var body = { problem: problem, mode: mode, language: language, tier: tier };
     if (model) body.model = model;
+    if (mode === "review") body.code = attemptCode;
     var run = {
       id: newRunId(),
       controller: new AbortController(),
@@ -1156,6 +1173,7 @@
       if (core.isComposingEnter(e)) return;
       if (document.querySelector(".overlay:not([hidden])")) return;
       e.preventDefault();
+      if (currentView === "practice") { practiceTest(); return; } // SP7 / D3
       if (!isStreaming) runNow();
     }
   });
@@ -1691,6 +1709,7 @@
   }
 
   function showFile(relPath, text) {
+    if (viewerNotes) viewerNotes.flush(); // SP7 / D9: never drop a pending note
     var meta = fileMeta(relPath);
     if (vwTitle) vwTitle.textContent = meta.title;
     if (vwSub) {
@@ -1733,6 +1752,7 @@
     }
     libViewer.hidden = false;
     libViewer.scrollTop = 0; // C10: a newly opened file starts at its top
+    decorateViewer(relPath, meta); // SP7: Re-attempt / Flashcards / notes
   }
 
   function markTreeActive(relPath) {
@@ -1874,6 +1894,7 @@
   }
 
   function closeViewer() {
+    resetViewerExtras();
     libViewer.hidden = true;
     libViewerBody.textContent = "";
     currentViewPath = null;
@@ -2007,6 +2028,8 @@
     }
     if (opts.note) body.appendChild(el("p", "confirm-note", opts.note));
     $("confirm-ok").textContent = opts.ok || "OK";
+    // SP7: a non-destructive confirm (Show the solution) is not styled red.
+    $("confirm-ok").className = "btn " + (opts.tone === "primary" ? "green" : "danger");
     // Replacing an open dialog keeps the focus target of the first one (the
     // active element is now the dialog's own Cancel button).
     if (opts.returnFocus || confirmModal.hidden) {
@@ -2243,10 +2266,829 @@
     else if (narrowMq.addListener) narrowMq.addListener(onMq);
   }
 
+  // =========================================================================
+  // SP7 — the practice loop: code boxes (Tab indent), Code Review's attempt
+  // box, the review queue (Due today + Stats), the re-attempt view, per-problem
+  // notes and flashcards. Everything user- or model-derived is set via
+  // el()/textContent; only saved Markdown docs go through the hardened marked.
+  // =========================================================================
+  var NOTES_CAP = 20000;
+  var NOTES_DEBOUNCE_MS = 800;
+  var reviewCodeEl = $("review-code");
+  var lastReview = null; // the last GET /review answer
+
+  function todayKey() {
+    return (lastReview && lastReview.today) || core.dayKey(new Date());
+  }
+  function problemLabelOf(rec) {
+    rec = rec || {};
+    return core.problemTitle({ title: rec.title, number: rec.number, stem: rec.id || "" }).label ||
+      rec.id || "this problem";
+  }
+  function errorOf(resp) {
+    return resp.json().catch(function () { return {}; }).then(function (d) {
+      return (d && d.error) || "HTTP " + resp.status;
+    });
+  }
+
+  // ---- code textareas: Tab / Shift+Tab indent; Esc then Tab leaves --------
+  function attachCodeEditor(ta, onChange) {
+    if (!ta) return;
+    var escaped = false;
+    ta.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { escaped = true; return; }
+      if (e.key !== "Tab" || e.ctrlKey || e.metaKey || e.altKey) { escaped = false; return; }
+      if (escaped) { escaped = false; return; } // keyboard users can leave the box
+      e.preventDefault();
+      var r = core.indentText(ta.value, ta.selectionStart, ta.selectionEnd, e.shiftKey);
+      if (r.value === ta.value) return;
+      ta.value = r.value;
+      ta.setSelectionRange(r.start, r.end);
+      if (onChange) onChange();
+    });
+    ta.addEventListener("blur", function () { escaped = false; });
+    if (onChange) ta.addEventListener("input", onChange);
+  }
+
+  // Code Review's attempt box keeps its draft like the problem box does.
+  if (reviewCodeEl) {
+    var reviewDraftTimer = null;
+    var saveReviewDraft = function () {
+      clearTimeout(reviewDraftTimer);
+      reviewDraftTimer = setTimeout(function () { prefs.set("reviewDraft", reviewCodeEl.value); }, 400);
+    };
+    attachCodeEditor(reviewCodeEl, saveReviewDraft);
+    var rd = prefs.get("reviewDraft", "");
+    if (rd && !reviewCodeEl.value) reviewCodeEl.value = rd;
+    window.addEventListener("pagehide", function () { prefs.set("reviewDraft", reviewCodeEl.value); });
+  }
+  syncTier(); // reveal the attempt box when Code Review was the saved mode
+
+  // ---- D9: the notes editor (library viewer + re-attempt view) -------------
+  // Debounced PUT /problems/<id>/notes with a visible Saving / Saved / Not
+  // saved state; a failed save keeps the text and offers Retry.
+  function makeNotesEditor(host, pid, initial, label) {
+    host.textContent = "";
+    var taId = host.id + "-input";
+    var head = el("div", "notes-head");
+    var lab = el("label", "notes-label", label || "Your notes");
+    lab.setAttribute("for", taId);
+    head.appendChild(lab);
+    var status = el("span", "notes-status");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    head.appendChild(status);
+    var retry = el("button", "mini", "Retry");
+    retry.type = "button";
+    retry.hidden = true;
+    head.appendChild(retry);
+    host.appendChild(head);
+    var ta = el("textarea", "notes-input");
+    ta.id = taId;
+    ta.maxLength = NOTES_CAP;
+    ta.rows = 5;
+    ta.spellcheck = true;
+    ta.placeholder = "What tripped you up? The trick to remember next time…";
+    ta.value = initial || "";
+    ta.setAttribute("aria-describedby", taId + "-count");
+    host.appendChild(ta);
+    var count = el("div", "notes-count");
+    count.id = taId + "-count";
+    host.appendChild(count);
+    host.hidden = false;
+
+    var timer = null;
+    var saved = ta.value;
+    var inflight = false;
+    var dead = false;
+    function setState(state, info) {
+      status.textContent = core.notesStatus(state, info);
+      status.className = "notes-status s-" + state;
+      retry.hidden = state !== "error";
+    }
+    function setCount() {
+      count.textContent = ta.value.length + " / " + NOTES_CAP;
+      count.classList.toggle("near", ta.value.length > NOTES_CAP * 0.9);
+    }
+    function save(keepalive) {
+      clearTimeout(timer);
+      timer = null;
+      if (dead || inflight) return;
+      var text = ta.value;
+      if (text === saved) { setState("saved"); return; }
+      inflight = true;
+      setState("saving");
+      fetch("/problems/" + encodeURIComponent(pid) + "/notes", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: text }),
+        keepalive: !!keepalive,
+      }).then(function (resp) {
+        if (!resp.ok) return errorOf(resp).then(function (why) { throw new Error(why); });
+        saved = text;
+        inflight = false;
+        if (dead) return;
+        if (ta.value !== saved) { setState("dirty"); timer = setTimeout(save, NOTES_DEBOUNCE_MS); }
+        else setState("saved");
+      }).catch(function (e) {
+        inflight = false;
+        if (dead) return;
+        setState("error", { reason: (e && e.message) || "network error" });
+      });
+    }
+    ta.addEventListener("input", function () {
+      setCount();
+      setState("dirty");
+      clearTimeout(timer);
+      timer = setTimeout(save, NOTES_DEBOUNCE_MS);
+    });
+    ta.addEventListener("blur", function () { if (timer) save(); });
+    retry.addEventListener("click", function () { save(); });
+    setCount();
+    setState(saved ? "saved" : "idle");
+    return {
+      flush: function (keepalive) { if (timer) save(keepalive); },
+      destroy: function () {
+        if (timer) save(true);
+        dead = true;
+      },
+      pid: pid,
+    };
+  }
+
+  // ---- library viewer extras: Re-attempt, Flashcards (n), notes -----------
+  var lvReattempt = $("library-viewer-reattempt");
+  var lvCards = $("library-viewer-cards");
+  var lvNotes = $("library-viewer-notes");
+  var viewerNotes = null;
+  var viewerToken = 0;
+  function resetViewerExtras() {
+    viewerToken++;
+    if (viewerNotes) { viewerNotes.destroy(); viewerNotes = null; }
+    if (lvNotes) { lvNotes.hidden = true; lvNotes.textContent = ""; }
+    if (lvReattempt) lvReattempt.hidden = true;
+    if (lvCards) lvCards.hidden = true;
+  }
+  function decorateViewer(relPath, meta) {
+    resetViewerExtras();
+    var token = viewerToken;
+    var f = libByPath[relPath] || {};
+    var pid = f.problem_id || "";
+    if (pid && lvReattempt) lvReattempt.hidden = false;
+    if (meta.ext === "md" && lvCards) {
+      fetch("/flashcards?path=" + encodeURIComponent(relPath))
+        .then(function (resp) { return resp.ok ? resp.json() : null; })
+        .then(function (d) {
+          if (token !== viewerToken || !d || !d.count) return;
+          lvCards.textContent = "Flashcards (" + d.count + ")";
+          lvCards.hidden = false;
+        })
+        .catch(function () { /* the button just stays hidden */ });
+    }
+    if (pid && lvNotes) {
+      fetch("/problems/" + encodeURIComponent(pid))
+        .then(function (resp) {
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          return resp.json();
+        })
+        .then(function (rec) {
+          if (token !== viewerToken) return;
+          viewerNotes = makeNotesEditor(lvNotes, rec.id || pid, rec.notes || "",
+            "Notes on " + problemLabelOf(rec));
+        })
+        .catch(function () { /* no record: no notes editor */ });
+    }
+  }
+  if (lvReattempt) {
+    lvReattempt.addEventListener("click", function () {
+      var f = currentViewPath && libByPath[currentViewPath];
+      if (f && f.problem_id) openPractice(f.problem_id, { from: "library" });
+    });
+  }
+  if (lvCards) {
+    lvCards.addEventListener("click", function () {
+      if (!currentViewPath) return;
+      var t = fileMeta(currentViewPath).title;
+      openFlashcards({ path: currentViewPath }, "From " + t, lvCards);
+    });
+  }
+  window.addEventListener("pagehide", function () {
+    if (viewerNotes) viewerNotes.flush(true);
+    if (practiceNotes) practiceNotes.flush(true);
+  });
+
+  // ---- D4: the review queue (Console "Due today" + Stats) ------------------
+  var duePanel = $("due-panel");
+  var dueList = $("due-list");
+  var dueEmpty = $("due-empty");
+  var dueCount = $("due-count");
+  function loadReview() {
+    return fetch("/review")
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (data) {
+        lastReview = data || null;
+        renderDuePanel(lastReview);
+        renderReviewStats(lastReview);
+      })
+      .catch(function () { /* the panel stays as it was */ });
+  }
+  function renderDuePanel(data) {
+    if (!duePanel || !dueList) return;
+    var counts = (data && data.counts) || {};
+    var due = (data && data.due) || [];
+    duePanel.hidden = !counts.scheduled && !due.length;
+    if (dueCount) dueCount.textContent = String(due.length);
+    $("due-title").setAttribute("aria-label", "Due today, " + core.plural(due.length, "problem"));
+    dueList.textContent = "";
+    dueEmpty.hidden = !!due.length;
+    if (!due.length) {
+      dueEmpty.textContent = "Nothing due — " + (data && data.next_due
+        ? "the next review is " + core.dueLabel(data.next_due, data.today).replace(/^due /, "") + "."
+        : "run a problem to schedule its first review.");
+    }
+    var MAX_SHOWN = 12;
+    due.slice(0, MAX_SHOWN).forEach(function (item) {
+      var li = el("div", "due-item");
+      li.setAttribute("role", "listitem");
+      var row = el("button", "due-row");
+      row.type = "button";
+      li.appendChild(row);
+      var label = problemLabelOf(item);
+      var when = core.dueLabel(item.due, data.today);
+      row.setAttribute("aria-label", "Re-attempt " + label + " — " + when + ", box " + item.box);
+      var diff = core.diffInfo(item.difficulty);
+      var d = el("span", "diff " + (diff ? diff.cls : ""));
+      var dot = el("span", "d");
+      dot.setAttribute("aria-hidden", "true");
+      d.appendChild(dot);
+      d.appendChild(document.createTextNode(diff ? diff.label : "—"));
+      row.appendChild(d);
+      var name = el("span", "due-name");
+      if (item.number != null) name.appendChild(el("span", "pnum", "#" + item.number));
+      name.appendChild(document.createTextNode(item.title || item.id));
+      row.appendChild(name);
+      if (item.pattern) row.appendChild(chipEl(humanize(item.pattern), "mint"));
+      row.appendChild(el("span", "due-when" + (item.overdue_days > 0 ? " overdue" : ""), when));
+      row.appendChild(chipEl("box " + item.box, "mono"));
+      row.addEventListener("click", function () { openPractice(item.id, { from: "console" }); });
+      dueList.appendChild(li);
+    });
+    if (due.length > MAX_SHOWN) {
+      dueList.appendChild(el("div", "due-more", "+ " + (due.length - MAX_SHOWN) + " more due"));
+    }
+  }
+  function renderReviewStats(data) {
+    if (!data) return;
+    var counts = data.counts || {};
+    setStatText("rv-due", counts.due || 0);
+    setStatText("rv-today", counts.reviewed_today || 0);
+    setStatText("rv-scheduled", counts.scheduled || 0);
+    setStatText("rv-next", data.next_due ? core.dueLabel(data.next_due, data.today).replace(/^due /, "") : "—");
+    var host = $("bd-box");
+    if (!host) return;
+    host.textContent = "";
+    var byBox = counts.by_box || {};
+    var max = 1;
+    core.LEITNER_DAYS.forEach(function (_, i) { max = Math.max(max, byBox[String(i + 1)] || 0); });
+    core.LEITNER_DAYS.forEach(function (days, i) {
+      var n = byBox[String(i + 1)] || 0;
+      var r = el("div", "bd-row");
+      r.setAttribute("aria-label", "Box " + (i + 1) + " (every " + core.plural(days, "day") + "): " +
+        core.plural(n, "problem"));
+      r.appendChild(el("span", "bd-key", "Box " + (i + 1) + " · " + days + "d"));
+      var track = el("span", "bd-track");
+      track.setAttribute("aria-hidden", "true");
+      var fill = el("span", "bd-fill");
+      fill.style.width = (n ? Math.max(6, Math.round((n / max) * 100)) : 0) + "%";
+      track.appendChild(fill);
+      r.appendChild(track);
+      r.appendChild(el("span", "bd-num", String(n)));
+      host.appendChild(r);
+    });
+  }
+  var dueCardsBtn = $("due-flashcards");
+  if (dueCardsBtn) {
+    dueCardsBtn.addEventListener("click", function () { openFlashcards({}, "Whole library", dueCardsBtn); });
+  }
+  var statsCardsBtn = $("stats-flashcards");
+  if (statsCardsBtn) {
+    statsCardsBtn.addEventListener("click", function () { openFlashcards({}, "Whole library", statsCardsBtn); });
+  }
+
+  // ---- D3: the re-attempt view ---------------------------------------------
+  var prTitle = $("practice-title");
+  var prSub = $("practice-sub");
+  var prStatement = $("practice-statement");
+  var prDue = $("practice-due");
+  var prLang = $("practice-lang");
+  var prCode = $("practice-code");
+  var prStarter = $("practice-starter");
+  var prSamples = $("practice-samples");
+  var prCases = $("practice-cases");
+  var prAddCase = $("practice-add-case");
+  var prTest = $("practice-test");
+  var prCancel = $("practice-cancel");
+  var prResults = $("practice-results");
+  var prGiveup = $("practice-giveup");
+  var prGrade = $("practice-grade");
+  var prGradeStatus = $("practice-grade-status");
+  var prBox = $("practice-box");
+  var prSolution = $("practice-solution");
+  var prSolutionBody = $("practice-solution-body");
+  var prSolutionPath = $("practice-solution-path");
+  var prNotesHost = $("practice-notes");
+  var practice = null; // { id, rec, from, testing, lastTest, peeked }
+  var practiceNotes = null;
+  var MAX_CASES = 10;
+  var GRADE_LABELS = { solo: "Solved it solo", hints: "Needed hints", peeked: "Peeked at the solution" };
+
+  function draftKey(pid) { return "attempt." + pid; }
+  function saveAttemptDraft() {
+    if (!practice || !prCode) return;
+    prefs.set(draftKey(practice.id), prCode.value);
+    prefs.set(draftKey(practice.id) + ".lang", prLang ? prLang.value : "");
+  }
+  var attemptDraftTimer = null;
+  attachCodeEditor(prCode, function () {
+    clearTimeout(attemptDraftTimer);
+    attemptDraftTimer = setTimeout(saveAttemptDraft, 400);
+  });
+  window.addEventListener("pagehide", saveAttemptDraft);
+
+  function renderGradeDescs() {
+    var box = practice && practice.rec && practice.rec.review ? practice.rec.review.box : 1;
+    if (prBox) prBox.textContent = "Box " + core.leitnerPreview(box, "hints").box + " of " + core.LEITNER_DAYS.length;
+    if (!prGrade) return;
+    prGrade.querySelectorAll("[data-grade]").forEach(function (b) {
+      var g = b.getAttribute("data-grade");
+      var p = core.leitnerPreview(box, g);
+      var desc = b.querySelector("[data-grade-desc]");
+      var text = p ? "→ box " + p.box + ", again in " + core.plural(p.days, "day") : "";
+      if (desc) desc.textContent = text;
+      b.setAttribute("aria-label", GRADE_LABELS[g] + ": " + text.replace("→ ", "moves to "));
+      b.classList.toggle("suggest", g === "peeked" && !!(practice && practice.peeked));
+    });
+  }
+  function renderPracticeDue() {
+    if (!prDue) return;
+    var rv = practice && practice.rec && practice.rec.review;
+    prDue.textContent = rv ? core.dueLabel(rv.due, todayKey()) : "";
+  }
+
+  function addCaseRow(input, expected) {
+    if (!prCases) return;
+    if (prCases.children.length >= MAX_CASES) {
+      notify("Up to " + MAX_CASES + " custom cases.", "");
+      return;
+    }
+    var n = prCases.children.length + 1;
+    var row = el("div", "pr-case");
+    function field(lbl, cls, value, ph) {
+      var wrap = el("label", "pr-case-f");
+      wrap.appendChild(el("span", "pr-case-l", lbl));
+      var ta = el("textarea", "pr-case-in " + cls);
+      ta.rows = 2;
+      ta.spellcheck = false;
+      ta.maxLength = 10000;
+      ta.placeholder = ph;
+      ta.value = value || "";
+      wrap.appendChild(ta);
+      return wrap;
+    }
+    row.appendChild(field("Input (stdin)", "ci", input, "nums = [3,3], target = 6"));
+    row.appendChild(field("Expected output (optional)", "ce", expected, "[0,1]"));
+    var rm = el("button", "mini", "Remove");
+    rm.type = "button";
+    rm.setAttribute("aria-label", "Remove case " + n);
+    rm.addEventListener("click", function () {
+      var next = row.nextElementSibling || row.previousElementSibling;
+      row.remove();
+      renumberCases();
+      var f = next ? next.querySelector("textarea") : prAddCase;
+      if (f) f.focus();
+    });
+    row.appendChild(rm);
+    prCases.appendChild(row);
+    renumberCases();
+    return row;
+  }
+  function renumberCases() {
+    if (!prCases) return;
+    Array.prototype.forEach.call(prCases.children, function (row, i) {
+      row.setAttribute("aria-label", "Custom case " + (i + 1));
+      var rm = row.querySelector("button");
+      if (rm) rm.setAttribute("aria-label", "Remove case " + (i + 1));
+    });
+  }
+  function collectCases() {
+    if (!prCases) return [];
+    var out = [];
+    Array.prototype.forEach.call(prCases.children, function (row) {
+      var ci = row.querySelector(".ci");
+      var ce = row.querySelector(".ce");
+      if (!ci || !ci.value.trim()) return; // an empty row is ignored
+      var c = { input: ci.value };
+      if (ce && ce.value.trim()) c.expected = ce.value;
+      out.push(c);
+    });
+    return out;
+  }
+  if (prAddCase) {
+    prAddCase.addEventListener("click", function () {
+      var row = addCaseRow("", "");
+      if (row) row.querySelector("textarea").focus();
+    });
+  }
+  if (prStarter) {
+    prStarter.addEventListener("click", function () {
+      var lang = prLang ? prLang.value : "python";
+      var starter = core.starterCode(lang);
+      if (!starter) {
+        notify("No starter for " + langLabel(lang) + " — only Python attempts can be tested here.", "");
+        return;
+      }
+      var put = function () {
+        prCode.value = starter;
+        saveAttemptDraft();
+        prCode.focus();
+      };
+      if (prCode.value.trim()) {
+        confirmDialog({
+          title: "Replace your code with the starter?",
+          lines: ["The starter reads one example's Input line and prints the answer."],
+          note: "Your current code will be replaced.",
+          ok: "Replace",
+          returnFocus: prStarter,
+        }).then(function (yes) { if (yes) put(); });
+      } else put();
+    });
+  }
+  if (prLang) prLang.addEventListener("change", saveAttemptDraft);
+
+  function openPractice(pid, opts) {
+    opts = opts || {};
+    return fetch("/problems/" + encodeURIComponent(pid))
+      .then(function (resp) {
+        if (!resp.ok) throw new Error(resp.status === 404 ? "not found" : "HTTP " + resp.status);
+        return resp.json();
+      })
+      .then(function (rec) {
+        if (practice && practice.testing) cancelPracticeTest();
+        if (practiceNotes) { practiceNotes.destroy(); practiceNotes = null; }
+        var id = rec.id || pid;
+        var from = opts.from || (currentView === "practice" && practice ? practice.from : currentView);
+        practice = { id: id, rec: rec, from: from, testing: null, lastTest: null, peeked: false };
+        var label = problemLabelOf(rec);
+        if (prTitle) prTitle.textContent = "Re-attempt: " + label;
+        if (prSub) {
+          var bits = [];
+          var diff = core.diffInfo(rec.difficulty);
+          if (diff) bits.push(diff.label);
+          if (rec.pattern) bits.push(humanize(rec.pattern));
+          bits.push("solve it from memory, test it, then grade yourself");
+          prSub.textContent = bits.join(" · ");
+        }
+        if (prStatement) {
+          prStatement.textContent = rec.statement ||
+            "No statement was saved for this problem. Open its doc in the Library to read it.";
+        }
+        renderPracticeDue();
+        var lang = prefs.get(draftKey(id) + ".lang", "") || activeVal("lang") || "python";
+        if (prLang) prLang.value = /^(python|cpp|java)$/.test(lang) ? lang : "python";
+        if (prCode) prCode.value = prefs.get(draftKey(id), "");
+        if (prCases) prCases.textContent = "";
+        if (prSamples) prSamples.checked = true;
+        if (prResults) { prResults.textContent = ""; prResults.className = "pr-results"; }
+        if (prGradeStatus) prGradeStatus.textContent = "";
+        if (prSolution) prSolution.hidden = true;
+        if (prSolutionBody) prSolutionBody.textContent = "";
+        setPracticeTesting(false);
+        renderGradeDescs();
+        if (prNotesHost) practiceNotes = makeNotesEditor(prNotesHost, id, rec.notes || "", "Notes");
+        switchView("practice");
+        if (contentEl) contentEl.scrollTop = 0;
+        if (prCode) prCode.focus();
+        announce("Re-attempt " + label + ". " + (prDue ? prDue.textContent : ""));
+      })
+      .catch(function (e) {
+        notify("Could not open that problem (" + ((e && e.message) || "error") + ").", "error");
+      });
+  }
+
+  function setPracticeTesting(on) {
+    if (prTest) {
+      prTest.disabled = !!on;
+      prTest.textContent = on ? "Testing…" : "Test my code";
+    }
+    if (prCancel) { prCancel.hidden = !on; prCancel.disabled = false; }
+    if (prResults) prResults.setAttribute("aria-busy", on ? "true" : "false");
+  }
+  function showPracticeMessage(text, kind) {
+    if (!prResults) return;
+    prResults.textContent = "";
+    prResults.className = "pr-results" + (kind ? " " + kind : "");
+    prResults.appendChild(el("div", "pr-msg", text));
+  }
+  function pre(label, text, cls) {
+    var wrap = el("div", "pr-io" + (cls ? " " + cls : ""));
+    wrap.appendChild(el("span", "pr-io-l", label));
+    var p = el("pre", "pr-io-v");
+    p.textContent = text === "" ? "(empty)" : text;
+    wrap.appendChild(p);
+    return wrap;
+  }
+  function renderPracticeResults(data) {
+    if (!prResults) return;
+    prResults.textContent = "";
+    var overall = core.caseInfo(data.status);
+    prResults.className = "pr-results r-" + overall.cls;
+    var head = el("div", "pr-sum");
+    head.appendChild(el("span", "pr-glyph", overall.glyph));
+    head.appendChild(el("span", "pr-sum-t", (data.status === "pass" ? "All passed" : overall.label) +
+      " — " + (data.summary || "")));
+    if (data.cancelled) head.appendChild(chipEl("cancelled", "amber"));
+    prResults.appendChild(head);
+    var counters = { sample: 0, custom: 0 };
+    (data.cases || []).forEach(function (c) {
+      var info = core.caseInfo(c.status);
+      var name = c.source === "sample" ? "Example " + (++counters.sample) : "Case " + (++counters.custom);
+      var d = el("details", "pr-case-r c-" + info.cls);
+      if (c.status !== "pass") d.open = true;
+      var s = el("summary", "pr-case-s");
+      s.appendChild(el("span", "pr-glyph", info.glyph));
+      s.appendChild(el("span", "pr-case-n", name));
+      s.appendChild(el("span", "pr-case-st", info.label));
+      d.appendChild(s);
+      d.appendChild(pre("Input", c.input || ""));
+      if (c.expected != null) d.appendChild(pre("Expected", c.expected));
+      d.appendChild(pre("Your output", c.got || "", c.status === "fail" ? "bad" : ""));
+      if (c.stderr) d.appendChild(pre("stderr", c.stderr, "err"));
+      if (c.note && c.status !== "pass") d.appendChild(el("div", "pr-note", c.note));
+      prResults.appendChild(d);
+    });
+  }
+  function practiceTest() {
+    if (!practice || practice.testing || !prCode) return;
+    var code = prCode.value;
+    var language = prLang ? prLang.value : "python";
+    if (language === "python" && !code.trim()) {
+      notify("Write some code first.", "");
+      prCode.focus();
+      return;
+    }
+    var testId = newRunId();
+    var p = practice;
+    p.testing = testId;
+    setPracticeTesting(true);
+    showPracticeMessage("Running your code in the sandbox…", "busy");
+    postJson("/attempt/test", {
+      problem_id: p.id, code: code, language: language, cases: collectCases(),
+      include_samples: prSamples ? prSamples.checked : true, test_id: testId,
+    }).then(function (resp) {
+      if (!resp.ok) {
+        return errorOf(resp).then(function (why) {
+          if (resp.status === 409) why = "A test run is already in progress — wait for it to finish.";
+          throw new Error(why);
+        });
+      }
+      return resp.json();
+    }).then(function (data) {
+      if (practice !== p) return;
+      if (!data.supported) {
+        showPracticeMessage(data.message || "Running this language is not supported yet.", "r-warn");
+        announce(data.message || "Not supported yet.");
+        return;
+      }
+      renderPracticeResults(data);
+      if (data.total > 0 && !data.cancelled) {
+        p.lastTest = { language: language, passed: data.passed, total: data.total };
+      }
+      announce("Tests finished: " + (data.summary || core.caseInfo(data.status).label) + ".");
+    }).catch(function (e) {
+      if (practice !== p) return;
+      var msg = (e && e.message) || "the request failed";
+      showPracticeMessage("Could not test the code: " + msg, "r-fail");
+      announce("Could not test the code: " + msg);
+    }).then(function () {
+      if (practice !== p) return;
+      p.testing = null;
+      setPracticeTesting(false);
+    });
+  }
+  function cancelPracticeTest() {
+    if (!practice || !practice.testing) return;
+    if (prCancel) prCancel.disabled = true;
+    postJson("/attempt/cancel", { test_id: practice.testing }).catch(function () { /* best effort */ });
+  }
+  if (prTest) prTest.addEventListener("click", practiceTest);
+  if (prCancel) prCancel.addEventListener("click", cancelPracticeTest);
+
+  if (prGiveup) {
+    prGiveup.addEventListener("click", function () {
+      if (!practice) return;
+      var p = practice;
+      confirmDialog({
+        title: "Show the solution?",
+        lines: ["Opens the latest saved doc for " + problemLabelOf(p.rec) + " below your code."],
+        note: "Then grade it honestly: “Peeked at the solution” sends it back to box 1.",
+        ok: "Show the solution",
+        tone: "primary",
+        returnFocus: prGiveup,
+      }).then(function (yes) {
+        if (!yes || practice !== p) return;
+        var path = core.latestDocFor(p.rec);
+        if (!path) { notify("No saved doc for this problem yet.", "error"); return; }
+        fetch("/library/file?path=" + encodeURIComponent(path))
+          .then(function (resp) {
+            if (!resp.ok) throw new Error("HTTP " + resp.status);
+            return resp.text();
+          })
+          .then(function (text) {
+            if (practice !== p) return;
+            p.peeked = true;
+            renderGradeDescs();
+            if (prSolutionPath) prSolutionPath.textContent = path;
+            prSolutionBody.textContent = "";
+            prSolutionBody.innerHTML = window.marked ? marked.parse(text) : ""; // hardened renderer
+            if (!window.marked) {
+              var pr = el("pre");
+              pr.textContent = text;
+              prSolutionBody.appendChild(pr);
+            }
+            highlightCode(prSolutionBody, false);
+            decorateCode(prSolutionBody, false);
+            prSolution.hidden = false;
+            var h = $("practice-solution-h");
+            if (h) { h.tabIndex = -1; h.focus(); }
+            announce("Solution shown.");
+          })
+          .catch(function (e) {
+            notify("Could not open the solution (" + ((e && e.message) || "error") + ").", "error");
+          });
+      });
+    });
+  }
+
+  if (prGrade) {
+    prGrade.addEventListener("click", function (e) {
+      var b = e.target.closest("[data-grade]");
+      if (!b || !practice || b.disabled) return;
+      var p = practice;
+      var grade = b.getAttribute("data-grade");
+      var body = { grade: grade };
+      if (p.lastTest) body.attempt = p.lastTest;
+      var btns = prGrade.querySelectorAll("[data-grade]");
+      btns.forEach(function (x) { x.disabled = true; });
+      prGradeStatus.textContent = "Saving your grade…";
+      postJson("/problems/" + encodeURIComponent(p.id) + "/grade", body)
+        .then(function (resp) {
+          if (!resp.ok) return errorOf(resp).then(function (why) { throw new Error(why); });
+          return resp.json();
+        })
+        .then(function (res) {
+          if (practice !== p) return;
+          p.rec.review = res.review;
+          var when = core.dueLabel(res.review.due, todayKey());
+          var msg = "Graded “" + GRADE_LABELS[grade] + "” — box " + res.review.box + ", next review " +
+            when.replace(/^due /, "") + " (" + res.review.due + ").";
+          prGradeStatus.textContent = msg;
+          renderPracticeDue();
+          renderGradeDescs();
+          notify("Review scheduled: " + when + ".", "");
+          loadReview();
+          loadStats();
+        })
+        .catch(function (err) {
+          var why = (err && err.message) || "network error";
+          prGradeStatus.textContent = "Could not save the grade (" + why + "). Try again.";
+          notify("Could not save the grade (" + why + ").", "error");
+        })
+        .then(function () { btns.forEach(function (x) { x.disabled = false; }); });
+    });
+  }
+  var prBack = $("practice-back");
+  if (prBack) {
+    prBack.addEventListener("click", function () {
+      var to = practice && practice.from && practice.from !== "practice" ? practice.from : "console";
+      switchView(to);
+    });
+  }
+
+  // ---- D10: the flashcards modal (flip review) -----------------------------
+  var fcModal = $("flashcards-modal");
+  var fcDeck = { cards: [], i: 0, flipped: false };
+  function fcQuery(scope) {
+    var q = [];
+    if (scope.problem_id) q.push("problem_id=" + encodeURIComponent(scope.problem_id));
+    if (scope.path) q.push("path=" + encodeURIComponent(scope.path));
+    return q.length ? "?" + q.join("&") : "";
+  }
+  function renderCard() {
+    var n = fcDeck.cards.length;
+    var empty = $("fc-empty");
+    var card = $("fc-card");
+    var flip = $("fc-flip");
+    ["fc-prev", "fc-next", "fc-flip"].forEach(function (id) { $(id).disabled = n === 0; });
+    $("fc-prev").disabled = n < 2;
+    $("fc-next").disabled = n < 2;
+    if (!n) {
+      empty.hidden = false;
+      empty.textContent = "No flashcards yet — every study doc's “Flashcards” section shows up here.";
+      card.hidden = true;
+      $("fc-count").textContent = "";
+      return;
+    }
+    empty.hidden = true;
+    card.hidden = false;
+    var c = fcDeck.cards[fcDeck.i];
+    $("fc-q").textContent = c.q;
+    $("fc-a").textContent = c.a;
+    $("fc-answer").hidden = !fcDeck.flipped;
+    flip.textContent = fcDeck.flipped ? "Hide answer" : "Show answer";
+    flip.setAttribute("aria-expanded", fcDeck.flipped ? "true" : "false");
+    var src = $("fc-src");
+    src.textContent = "";
+    var label = core.problemTitle({ title: c.title, number: c.number, stem: "" }).label;
+    src.appendChild(document.createTextNode("From " + (label || c.path)));
+    if (c.pattern) src.appendChild(chipEl(humanize(c.pattern), "mint"));
+    src.title = c.path;
+    $("fc-count").textContent = (fcDeck.i + 1) + " / " + n;
+  }
+  function fcLive(msg) {
+    var live = $("fc-live");
+    if (!live) return;
+    live.textContent = "";
+    setTimeout(function () { live.textContent = msg; }, 30);
+  }
+  function fcMove(step) {
+    var n = fcDeck.cards.length;
+    if (n < 2) return;
+    fcDeck.i = core.wrapIndex(fcDeck.i, n, step);
+    fcDeck.flipped = false;
+    renderCard();
+    fcLive("Card " + (fcDeck.i + 1) + " of " + n + ". " + fcDeck.cards[fcDeck.i].q);
+  }
+  function fcFlip() {
+    if (!fcDeck.cards.length) return;
+    fcDeck.flipped = !fcDeck.flipped;
+    renderCard();
+    if (fcDeck.flipped) fcLive("Answer: " + fcDeck.cards[fcDeck.i].a);
+  }
+  function openFlashcards(scope, label, trigger) {
+    if (!fcModal) return;
+    closeSearch();
+    closeShortcuts();
+    fetch("/flashcards" + fcQuery(scope || {}))
+      .then(function (resp) {
+        if (!resp.ok) return errorOf(resp).then(function (why) { throw new Error(why); });
+        return resp.json();
+      })
+      .then(function (data) {
+        fcDeck = { cards: (data && data.cards) || [], i: 0, flipped: false };
+        $("fc-scope").textContent = label ? label + " · " + core.plural(fcDeck.cards.length, "card") : "";
+        $("fc-download").setAttribute("href", "/flashcards.tsv" + fcQuery(scope || {}));
+        $("fc-download").hidden = !fcDeck.cards.length;
+        renderCard();
+        if (fcModal.hidden) overlayReturnFocus = trigger || document.activeElement;
+        fcModal.hidden = false;
+        var flip = $("fc-flip");
+        if (flip && !flip.disabled) flip.focus(); else $("fc-close").focus();
+        fcLive(fcDeck.cards.length
+          ? "Flashcards: " + core.plural(fcDeck.cards.length, "card") + ". Card 1: " + fcDeck.cards[0].q
+          : "No flashcards yet.");
+      })
+      .catch(function (e) {
+        notify("Could not load the flashcards (" + ((e && e.message) || "error") + ").", "error");
+      });
+  }
+  function closeFlashcards() {
+    if (!fcModal || fcModal.hidden) return;
+    fcModal.hidden = true;
+    restoreOverlayFocus();
+  }
+  if (fcModal) {
+    $("fc-close").addEventListener("click", closeFlashcards);
+    $("fc-flip").addEventListener("click", fcFlip);
+    $("fc-prev").addEventListener("click", function () { fcMove(-1); });
+    $("fc-next").addEventListener("click", function () { fcMove(1); });
+    fcModal.addEventListener("click", function (e) { if (e.target === fcModal) closeFlashcards(); });
+    fcModal.addEventListener("keydown", function (e) {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      var onControl = e.target && /^(BUTTON|A)$/.test(e.target.tagName || "");
+      if (e.key === "ArrowLeft") { e.preventDefault(); fcMove(-1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); fcMove(1); }
+      else if ((e.key === " " || e.key === "Enter") && !onControl) { e.preventDefault(); fcFlip(); }
+    });
+  }
+
   // ---- global overlay keys: Esc, focus trap, ⌘/Ctrl+K, "?" ------------------
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" || e.keyCode === 27) {
       if (confirmModal && !confirmModal.hidden) { e.preventDefault(); closeConfirm(false); return; }
+      if (fcModal && !fcModal.hidden) { e.preventDefault(); closeFlashcards(); return; }
       if (searchPalette && !searchPalette.hidden) { e.preventDefault(); closeSearch(); return; }
       if (shortcutsModal && !shortcutsModal.hidden) { e.preventDefault(); closeShortcuts(); return; }
       if (drawerOpen()) { e.preventDefault(); closeDrawer(); return; }
@@ -2260,6 +3102,7 @@
     }
     if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k" || e.key === "K")) {
       if (confirmModal && !confirmModal.hidden) return;
+      if (fcModal && !fcModal.hidden) return;
       e.preventDefault();
       openSearch();
       return;
@@ -2267,6 +3110,7 @@
     if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) {
       if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
       if (confirmModal && !confirmModal.hidden) return;
+      if (fcModal && !fcModal.hidden) return;
       e.preventDefault();
       openShortcuts();
     }
@@ -2275,4 +3119,5 @@
   // ---- boot ---------------------------------------------------------------
   enterIdle();
   loadLibrary(); // stats / streak render once it answers (no empty flash)
+  loadReview();  // SP7 / D4: the Console "Due today" panel
 })();

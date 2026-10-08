@@ -71,7 +71,8 @@
     return { a: str.slice(0, str.length - tail), b: str.slice(str.length - tail) };
   }
   function modeLabel(folder) {
-    var m = { answers: "Answer", answer: "Answer", learning: "Learning", guided: "Guided" };
+    var m = { answers: "Answer", answer: "Answer", learning: "Learning", guided: "Guided",
+      reviews: "Code Review", review: "Code Review" };
     return m[folder] || humanize(folder);
   }
   // Accepts a file extension (py/cpp/java) or a wire language (python/cpp/java).
@@ -628,7 +629,8 @@
     if (tierApplies(meta.mode) && meta.tier !== "optimal") {
       acts.push({ id: "optimal", label: "Re-run as Optimal", patch: { tier: "optimal" } });
     }
-    otherLanguages(meta.language).forEach(function (l) {
+    // a Code Review is of one attempt in one language: no language re-runs
+    if (meta.mode !== "review") otherLanguages(meta.language).forEach(function (l) {
       acts.push({ id: "lang-" + l, label: "Re-run in " + langLabel(l), patch: { lang: l } });
     });
     if (meta.mode && meta.mode !== "learning") {
@@ -677,6 +679,170 @@
         } catch (e) { return false; }
       },
     };
+  }
+
+  // ---- SP7: practice loop (re-attempt, review queue, flashcards) -----------------
+  // Display names of the run modes (the wire value "review" is Code Review).
+  var MODE_NAMES = { answer: "Answer", learning: "Learning", guided: "Guided", review: "Code Review" };
+  function modeName(mode) {
+    var m = String(mode || "").toLowerCase();
+    return MODE_NAMES[m] || cap(m);
+  }
+  // Modes with no code-quality tier (mirrors app.UNTIERED_MODES).
+  function untiered(mode) {
+    var m = String(mode || "").toLowerCase();
+    return m === "learning" || m === "review";
+  }
+
+  // D4 Leitner rule, mirrored from problem_store.next_review for the grade
+  // buttons' preview: solo -> next box (capped), hints -> same, peeked -> 1.
+  var LEITNER_DAYS = [1, 3, 7, 14, 30];
+  function leitnerPreview(box, grade) {
+    var b = typeof box === "number" && box % 1 === 0 ? box : 1;
+    b = Math.min(Math.max(b, 1), LEITNER_DAYS.length);
+    var nb = grade === "solo" ? Math.min(b + 1, LEITNER_DAYS.length)
+      : grade === "hints" ? b : grade === "peeked" ? 1 : 0;
+    if (!nb) return null;
+    return { box: nb, days: LEITNER_DAYS[nb - 1] };
+  }
+  function daysBetween(fromKey, toKey) {
+    var a = parseDayKey(fromKey);
+    var b = parseDayKey(toKey);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fromKey)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(toKey))) {
+      return null;
+    }
+    if (isNaN(a.getTime()) || isNaN(b.getTime())) return null;
+    return Math.round((b.getTime() - a.getTime()) / 86400000);
+  }
+  // "due today" / "overdue by 3 days" / "due tomorrow" / "due in 5 days".
+  function dueLabel(due, today) {
+    if (!due) return "not scheduled yet";
+    var d = daysBetween(today, due);
+    if (d === null) return "due " + due;
+    if (d === 0) return "due today";
+    if (d === 1) return "due tomorrow";
+    if (d > 1) return "due in " + d + " days";
+    return "overdue by " + (-d) + (d === -1 ? " day" : " days");
+  }
+  function plural(n, word) {
+    return n + " " + word + (n === 1 ? "" : "s");
+  }
+
+  // The doc "Give up / show solution" reveals: the newest logged Answer or
+  // Guided doc (they carry a solution), else the newest doc of any mode,
+  // else the record's last listed .md.
+  var SOLUTION_MODES = { answer: 1, guided: 1 };
+  function latestDocFor(record) {
+    record = record || {};
+    var log = (record.log || []).slice();
+    log.sort(function (a, b) { return String(a.ts || "").localeCompare(String(b.ts || "")); });
+    function mdOf(entry) {
+      var files = (entry && entry.files) || [];
+      for (var i = 0; i < files.length; i++) {
+        if (/\.md$/i.test(String(files[i]))) return String(files[i]);
+      }
+      return "";
+    }
+    var best = "";
+    var any = "";
+    log.forEach(function (e) {
+      var md = mdOf(e);
+      if (!md) return;
+      any = md;
+      if (SOLUTION_MODES[String(e.mode || "")]) best = md;
+    });
+    if (best || any) return best || any;
+    var runs = (record.runs || []).filter(function (p) { return /\.md$/i.test(String(p)); });
+    return runs.length ? String(runs[runs.length - 1]) : "";
+  }
+
+  // "Test my code" per-case / overall status -> label + style.
+  var CASE_INFO = {
+    pass: { label: "Passed", cls: "pass", glyph: "✓" },
+    fail: { label: "Wrong answer", cls: "fail", glyph: "✗" },
+    error: { label: "Error", cls: "fail", glyph: "!" },
+    ran: { label: "Ran", cls: "none", glyph: "•" },
+    not_verified: { label: "Not run", cls: "warn", glyph: "?" },
+    not_supported: { label: "Not supported", cls: "warn", glyph: "?" },
+  };
+  function caseInfo(status) {
+    return CASE_INFO[status] || CASE_INFO.not_verified;
+  }
+
+  // A Python starter that follows the sandbox contract (read the sample
+  // `Input:` text on stdin, print the `Output:` JSON-style).
+  var PY_STARTER =
+    "import ast\nimport json\nimport re\nimport sys\n\n\n" +
+    "def solve(args):\n" +
+    "    # args holds the named inputs, e.g. args[\"nums\"], args[\"target\"]\n" +
+    "    return None\n\n\n" +
+    "if __name__ == \"__main__\":\n" +
+    "    text = sys.stdin.read()\n" +
+    "    # `nums = [2,7,11,15], target = 9` -> {\"nums\": [2, 7, 11, 15], \"target\": 9}\n" +
+    "    pairs = re.findall(r\"(\\w+)\\s*=\\s*(.+?)(?=,\\s*\\w+\\s*=|$)\", text.strip(), re.S)\n" +
+    "    args = {name: ast.literal_eval(value.strip()) for name, value in pairs}\n" +
+    "    print(json.dumps(solve(args), separators=(\",\", \":\")))\n";
+  function starterCode(language) {
+    return language === "python" ? PY_STARTER : "";
+  }
+
+  // Tab / Shift+Tab in a code textarea. No selection: Tab inserts `unit` at
+  // the caret, Shift+Tab removes up to one unit before the caret's line start.
+  // A selection: every line it touches is indented / outdented. Returns the
+  // new { value, start, end } (pure - the caller writes it back).
+  function indentText(value, start, end, outdent, unit) {
+    value = String(value || "");
+    unit = unit || "    ";
+    start = Math.max(0, Math.min(start | 0, value.length));
+    end = Math.max(start, Math.min(end | 0, value.length));
+    var lineStart = value.lastIndexOf("\n", start - 1) + 1;
+    if (!outdent && start === end) {
+      return { value: value.slice(0, start) + unit + value.slice(end), start: start + unit.length,
+        end: start + unit.length };
+    }
+    // a selection ending right at a line start does not include that line
+    var lastEnd = end > start && value.charAt(end - 1) === "\n" ? end - 1 : end;
+    var blockEnd = value.indexOf("\n", lastEnd);
+    if (blockEnd === -1) blockEnd = value.length;
+    var lines = value.slice(lineStart, blockEnd).split("\n");
+    var delta0 = 0;
+    var total = 0;
+    var out = lines.map(function (line, i) {
+      var d;
+      if (!outdent) {
+        d = unit.length;
+        line = unit + line;
+      } else {
+        var m = /^( +|\t)/.exec(line);
+        var remove = 0;
+        if (m) remove = m[1] === "\t" ? 1 : Math.min(m[1].length, unit.length);
+        d = -remove;
+        line = line.slice(remove);
+      }
+      if (i === 0) delta0 = d;
+      total += d;
+      return line;
+    });
+    var next = value.slice(0, lineStart) + out.join("\n") + value.slice(blockEnd);
+    var ns = Math.max(lineStart, start + delta0);
+    var ne = start === end ? ns : Math.max(ns, end + total);
+    return { value: next, start: ns, end: ne };
+  }
+
+  // Wrap-around deck navigation.
+  function wrapIndex(i, n, step) {
+    if (n <= 0) return 0;
+    return (((i + step) % n) + n) % n;
+  }
+
+  // The notes editor's visible state line.
+  function notesStatus(state, info) {
+    info = info || {};
+    if (state === "saving") return "Saving…";
+    if (state === "dirty") return "Unsaved changes";
+    if (state === "saved") return "Saved";
+    if (state === "error") return "Not saved" + (info.reason ? " (" + info.reason + ")" : "") + " — retry";
+    return "";
   }
 
   // ---- hardened marked renderer (KEEP the policy; moved here for tests) ---------
@@ -754,5 +920,18 @@
     isComposingEnter: isComposingEnter,
     makePrefs: makePrefs,
     hardenedRenderer: hardenedRenderer,
+    modeName: modeName,
+    untiered: untiered,
+    LEITNER_DAYS: LEITNER_DAYS,
+    leitnerPreview: leitnerPreview,
+    daysBetween: daysBetween,
+    dueLabel: dueLabel,
+    plural: plural,
+    latestDocFor: latestDocFor,
+    caseInfo: caseInfo,
+    starterCode: starterCode,
+    indentText: indentText,
+    wrapIndex: wrapIndex,
+    notesStatus: notesStatus,
   };
 });
