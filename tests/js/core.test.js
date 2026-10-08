@@ -144,7 +144,8 @@ test("verdictInfo gives a class, glyph and label for each verdict", function () 
 });
 
 // ---- library runs -----------------------------------------------------------------
-test("deriveRuns groups files, keeps the newest doc and its verdict", function () {
+test("deriveRuns groups a run's files and keeps its doc and verdict", function () {
+  // SP6/A8: tiers are separate runs (they used to collapse into one).
   var runs = core.deriveRuns([
     { path: "answers/hash_map/two_sum__normal.md", mtime: 100, verdict: "fail" },
     { path: "answers/hash_map/two_sum__normal.py", mtime: 101 },
@@ -152,18 +153,21 @@ test("deriveRuns groups files, keeps the newest doc and its verdict", function (
     { path: "learning/hash_map_learning/two_sum.md", mtime: 50 },
     { path: "loose.md", mtime: 10 },
   ]);
-  assert.strictEqual(runs.length, 2);
+  assert.strictEqual(runs.length, 3);
   var ans = runs[0];
   assert.strictEqual(ans.mode, "Answer");
   assert.strictEqual(ans.topic, "Hash Map");
   assert.strictEqual(ans.problem, "Two Sum");
-  assert.strictEqual(ans.mdPath, "answers/hash_map/two_sum__optimal.md");
-  assert.strictEqual(ans.verdict, "pass");
+  assert.strictEqual(ans.mdPath, "answers/hash_map/two_sum__normal.md");
+  assert.strictEqual(ans.verdict, "fail");
   assert.strictEqual(ans.language, "Python");
-  assert.strictEqual(ans.savedAt, 200);
-  assert.strictEqual(runs[1].mode, "Learning");
-  assert.strictEqual(runs[1].topic, "Hash Map");
-  assert.strictEqual(runs[1].verdict, "");
+  assert.strictEqual(ans.savedAt, 101);
+  assert.strictEqual(runs[1].mdPath, "answers/hash_map/two_sum__optimal.md");
+  assert.strictEqual(runs[1].verdict, "pass");
+  assert.strictEqual(runs[1].tier, "optimal");
+  assert.strictEqual(runs[2].mode, "Learning");
+  assert.strictEqual(runs[2].topic, "Hash Map");
+  assert.strictEqual(runs[2].verdict, "");
 });
 
 test("runSiblings matches the server's scope=run", function () {
