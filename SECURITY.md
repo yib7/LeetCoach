@@ -40,20 +40,32 @@ best-effort. What the sandbox does:
   ("sandbox caps unavailable"). It never falls back to an uncapped run;
 - on POSIX, the equivalent memory/CPU/file-size/process resource limits, set by
   the bootstrap before the go signal. If a required limit cannot be set, the
-  generated code does not run and the result is "not verified";
+  generated code does not run and the result is "not verified". macOS often
+  refuses the address-space (memory) limit; there it is skipped with a note on
+  stderr, so the memory cap is best-effort on macOS only;
+- the bootstrap tells the app it is ready right before it waits for the go
+  signal, and the app only sends go after that. If the bootstrap stops before
+  that point (limits that could not be set, a malformed config), none of the
+  generated code has run and the result is "not verified". Once go is sent,
+  every exit code belongs to the generated code, so it cannot pass itself off
+  as a sandbox failure;
 - the bootstrap's own settings (the throwaway directory and the list of secret
   paths) are passed on stdin, not on the command line, and the generated code's
   stdin holds only the sample input;
 - an **audit hook** (`sys.addaudithook`, installed by the bootstrap before any
   generated code runs) that refuses:
-  - writing, deleting or renaming files outside the throwaway directory, including
-    SQLite database files (in-memory databases are fine);
+  - writing, deleting or renaming files outside the throwaway directory;
+  - SQLite altogether (`sqlite3.connect`, `enable_load_extension`,
+    `load_extension`): even an in-memory database can `ATTACH` a file anywhere
+    on disk, and extensions are native code, so no path check could hold;
   - opening or listing known secret locations: `~/.claude` and `~/.claude.json`,
     this repo's `.env`, `~/.ssh`, `~/.aws`, git and GitHub CLI credentials, and
     the Windows credential stores under `%APPDATA%` / `%LOCALAPPDATA%`;
   - network connections and DNS lookups. The single exception is a socket pair
-    inside the process itself (bind to a free port on `127.0.0.1`, then connect to
-    that same listener), which `asyncio` needs on Windows; connecting to any other
+    inside the process itself (bind a TCP socket to a free port on `127.0.0.1`
+    and listen, then connect one socket of the same kind to that same listener),
+    which `asyncio` needs on Windows. The allowance is used up by that one
+    connect; any other bind (UDP included) and any connection to another
     address, local services included, is still refused;
   - starting processes (`subprocess`, `os.system`, `os.exec*`, `os.spawn*`,
     `multiprocessing`);
@@ -62,7 +74,8 @@ best-effort. What the sandbox does:
   - creating symlinks or junctions, and writing to the registry.
 
   A run stopped by the hook is reported as "blocked by sandbox (...)" rather than
-  a bare exit code.
+  a bare exit code (only when the hook's error is the one that ended the run,
+  not when the code caught it and failed with something else).
 
 **The audit hook is defence in depth, not a security boundary.** Python's own
 documentation says audit hooks cannot sandbox malicious code, and there are known

@@ -1023,32 +1023,313 @@ def test_binding_anything_but_an_ephemeral_loopback_port_is_blocked(body):
     "body",
     [
         "import sqlite3\nsqlite3.connect(':memory:').execute('select 1')",
-        "import sqlite3\nsqlite3.connect('').execute('select 1')",
-        "import sqlite3\n"
-        "sqlite3.connect('file::memory:?cache=shared', uri=True).execute('select 1')",
         "import sqlite3\nsqlite3.connect('local.db').execute('create table t(x)')",
-    ],
-)
-def test_sqlite_in_memory_and_in_the_run_dir_still_work(body):
-    r = sandbox.verify_python(_probe(body), "\n", "ALLOWED")
-    assert r.status == "pass", r
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
         "import sqlite3\nsqlite3.connect(arg).execute('create table t(x)')",
-        "import sqlite3, pathlib\n"
-        "sqlite3.connect(pathlib.Path(arg).as_uri(), uri=True).execute('create table t(x)')",
+        # SP3 re-review I-2: an in-memory db could ATTACH a file anywhere on
+        # disk (sqlite does that write itself, no audited open), and
+        # enable_load_extension would load native code.
+        "import sqlite3\n"
+        "sqlite3.connect(':memory:').execute(f\"ATTACH DATABASE '{arg}' AS x\")\n"
+        "sqlite3.connect(':memory:').execute('create table x.t(v)')",
+        "import sqlite3\nc = sqlite3.connect(':memory:')\nc.enable_load_extension(True)",
+        "import sqlite3\nc = sqlite3.connect(':memory:')\nc.load_extension('nope')",
     ],
 )
-def test_sqlite_database_outside_the_run_dir_is_blocked(tmp_path, body):
-    """Minor 3: ``sqlite3.connect`` creates / writes its file, so it is
-    path-checked like an open for writing."""
+def test_sqlite_is_blocked_outright(tmp_path, body):
+    """SP3 re-review I-2: ``sqlite3.connect`` is refused whatever the path,
+    since ATTACH and extension loading bypass any path check; a solution has
+    no business opening a database to answer a LeetCode sample."""
     target = tmp_path / "outside.db"
     r = _run_probe(body, str(target))
     assert r.status == "pass", r
     assert not target.exists()
+
+
+def test_sqlite_is_reported_as_blocked_by_the_sandbox():
+    r = sandbox.verify_python("import sqlite3\nsqlite3.connect(':memory:')\n", "", "x")
+    assert r.status == "error", r
+    assert r.note == "blocked by sandbox (sqlite3.connect)", r
+
+
+def test_sqlite_uri_helper_is_gone():
+    """I-2: the URI path parser only existed for the per-path check."""
+    import sandbox_bootstrap
+
+    assert not hasattr(sandbox_bootstrap, "_sqlite_uri_path")
+    for event in ("sqlite3.connect", "sqlite3.enable_load_extension", "sqlite3.load_extension"):
+        assert event in sandbox_bootstrap._ALWAYS_BLOCKED, event
+
+
+# --- SP3 re-review (round 2) ------------------------------------------------
+
+
+def test_a_udp_bind_does_not_unlock_a_tcp_connect_to_a_foreign_listener(tmp_path, monkeypatch):
+    """I-1 (the reviewer's repro): a UDP socket bound to 127.0.0.1:0 lands on
+    port P; a foreign TCP service then listens on P. The socketpair allowance
+    must not let the solution TCP-connect to it (the UDP and TCP port spaces
+    are separate, so "a listener of this process on P" proves nothing)."""
+    import socket
+
+    dirs = _record_run_dirs(monkeypatch)
+    go_file = tmp_path / "go"
+    received: list = []
+
+    def foreign_service():
+        end = time.monotonic() + 15
+        port_file = None
+        while time.monotonic() < end:
+            if dirs and os.path.exists(os.path.join(dirs[0], "port.txt")):
+                port_file = os.path.join(dirs[0], "port.txt")
+                break
+            time.sleep(0.02)
+        if port_file is None:
+            go_file.write_text("x")  # the bind itself was refused: nothing to serve
+            return
+        time.sleep(0.05)
+        port = int(open(port_file).read())
+        with socket.socket() as srv:
+            srv.bind(("127.0.0.1", port))
+            srv.listen(1)
+            srv.settimeout(4)
+            go_file.write_text("x")
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(2)
+                try:
+                    received.append(conn.recv(16))
+                except OSError:
+                    received.append(b"<connected>")
+
+    t = threading.Thread(target=foreign_service, daemon=True)
+    t.start()
+    body = (
+        "import socket, time, os\n"
+        "u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+        "u.bind(('127.0.0.1', 0))\n"
+        "open('port.txt', 'w').write(str(u.getsockname()[1]))\n"
+        "end = time.time() + 10\n"
+        "while not os.path.exists(arg) and time.time() < end:\n"
+        "    time.sleep(0.02)\n"
+        "c = socket.socket()\n"
+        "c.settimeout(2)\n"
+        "c.connect(('127.0.0.1', u.getsockname()[1]))\n"
+        "c.sendall(b'EXFIL')"
+    )
+    r = _run_probe(body, str(go_file))
+    t.join(timeout=10)
+    assert r.status == "pass", r
+    assert received == [], received
+
+
+def test_the_socketpair_allowance_is_single_use_stream_only_and_needs_a_listener():
+    """I-1: the connect half must be a socket of the SAME family and type as
+    this process's own listening socket, and the allowance is spent by the
+    first matching connect."""
+    code = (
+        "import socket\n"
+        "def attempt(fn):\n"
+        "    try:\n"
+        "        fn()\n"
+        "        return 'ok'\n"
+        "    except PermissionError as e:\n"
+        "        return 'blocked' if 'LeetCoach sandbox' in str(e) else 'other'\n"
+        "    except OSError:\n"
+        "        return 'oserror'\n"
+        "l = socket.socket(); l.bind(('127.0.0.1', 0)); l.listen(4)\n"
+        "addr = l.getsockname()\n"
+        "u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+        "udp = attempt(lambda: u.connect(addr))\n"
+        "a = socket.socket()\n"
+        "first = attempt(lambda: a.connect(addr))\n"
+        "b = socket.socket(); b.settimeout(2)\n"
+        "second = attempt(lambda: b.connect(addr))\n"
+        "n = socket.socket(); n.bind(('127.0.0.1', 0))\n"
+        "d = socket.socket(); d.settimeout(2)\n"
+        "unlistened = attempt(lambda: d.connect(n.getsockname()))\n"
+        "print(udp, first, second, unlistened)\n"
+    )
+    r = sandbox.verify_python(code, "", "blocked ok blocked blocked")
+    assert r.status == "pass", r
+
+
+def test_a_udp_bind_is_refused():
+    r = _run_probe(
+        "import socket\n"
+        "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).bind(('127.0.0.1', 0))"
+    )
+    assert r.status == "pass", r
+
+
+@pytest.mark.parametrize("code_exit", [98, 97])
+def test_a_solution_cannot_fake_a_bootstrap_failure(code_exit):
+    """M-1 / M-3: after the go byte, exit 98 + the caps marker (or 97) is just
+    the solution's own exit code: an ``error``, never ``not_verified``."""
+    import sandbox_bootstrap
+
+    code = (
+        "import sys\n"
+        f"sys.stderr.write({sandbox_bootstrap.CAPS_MARKER!r} + ' (spoofed)\\n')\n"
+        f"sys.exit({code_exit})\n"
+    )
+    r = sandbox.verify_python(code, "", "x")
+    assert r.status == "error", r
+    assert r.note == f"exited with code {code_exit}", r
+
+
+def test_a_bootstrap_failure_before_the_go_byte_is_not_verified(monkeypatch, caplog):
+    """M-3: a bad config frame makes the bootstrap exit before it ever
+    signals ready: an internal sandbox problem, not the solution's error."""
+    monkeypatch.setattr(sandbox, "_frame_config", lambda cfg: b"\x00\x00\x00\x03abc")
+    with caplog.at_level("WARNING", logger="sandbox"):
+        r = sandbox.verify_python("print(1)\n", "", "1")
+    assert r.status == "not_verified", r
+    assert r.note.startswith("sandbox internal error"), r
+    assert "97" in r.note, r
+    assert any("before" in rec.getMessage() for rec in caplog.records)
+
+
+def test_pre_go_exit_classification():
+    """M-1 / M-3: the caps note needs POSIX + exit 98 + the marker; any other
+    pre-go exit is an internal error. Both are ``not_verified``."""
+    import sandbox_bootstrap as sb
+
+    marker = sb.CAPS_MARKER + " (ValueError: nope)\n"
+    caps = "sandbox caps unavailable (resource limits could not be applied)"
+    assert sandbox._classify_pre_go_exit(sb.EXIT_NO_CAPS, marker, posix=True) == (
+        "not_verified", caps
+    )
+    for rc, err, posix in [
+        (sb.EXIT_NO_CAPS, marker, False),
+        (sb.EXIT_NO_CAPS, "", True),
+        (sb.EXIT_NO_GO, "", True),
+        (1, "Traceback...\n", False),
+    ]:
+        status, note = sandbox._classify_pre_go_exit(rc, err, posix=posix)
+        assert status == "not_verified", (rc, err, posix)
+        assert note == (
+            f"sandbox internal error (bootstrap exited with code {rc} before "
+            "running the solution)"
+        ), note
+
+
+def test_a_later_not_verified_sample_does_not_mask_an_earlier_failure(monkeypatch):
+    """M-1 / M-5: sample 1 genuinely failed, sample 2 came back not_verified:
+    the run is still a ``fail`` (a wrong answer is never hidden)."""
+    results = iter([
+        sandbox.VerifyResult(status="fail", note="output differed",
+                             detail=[{"stdout": "2", "match": False}]),
+        sandbox.VerifyResult(status="not_verified", note="sandbox caps unavailable (x)"),
+    ])
+    monkeypatch.setattr(sandbox, "verify_python", lambda *a, **k: next(results))
+    samples = [sandbox.Sample("1\n", "1"), sandbox.Sample("2\n", "2")]
+    r = sandbox._verify_python_samples("print(1)", samples)
+    assert r.status == "fail", r
+    assert r.samples_total == 2 and r.samples_passed == 0, r
+    assert "not verified" in r.note, r
+
+
+def test_a_not_verified_sample_after_passes_is_still_not_verified(monkeypatch):
+    results = iter([
+        sandbox.VerifyResult(status="pass", note="output matched"),
+        sandbox.VerifyResult(status="not_verified", note="sandbox caps unavailable (x)"),
+    ])
+    monkeypatch.setattr(sandbox, "verify_python", lambda *a, **k: next(results))
+    samples = [sandbox.Sample("1\n", "1"), sandbox.Sample("2\n", "2")]
+    r = sandbox._verify_python_samples("print(1)", samples)
+    assert r.status == "not_verified", r
+    assert r.note == "sandbox caps unavailable (x)", r
+
+
+def test_a_caught_and_replaced_sandbox_error_is_not_blamed_on_the_sandbox(tmp_path):
+    """M-2: the solution caught the sandbox's PermissionError and raised
+    something else; the run ended on the IndexError, not on the sandbox."""
+    target = tmp_path / "x.txt"
+    code = (
+        "try:\n"
+        f"    open({str(target)!r}, 'w')\n"
+        "except PermissionError:\n"
+        "    raise IndexError('mine')\n"
+    )
+    r = sandbox.verify_python(code, "", "x")
+    assert r.status == "error", r
+    assert r.note == "exited with code 1", r
+    assert "LeetCoach sandbox" in r.detail[0]["stderr"]  # context is still shown
+
+
+def test_exit_note_only_reads_the_final_exception_line():
+    blocked = "PermissionError: LeetCoach sandbox: os.system is blocked\n"
+    assert sandbox._exit_note(1, "Traceback...\n" + blocked) == "blocked by sandbox (os.system)"
+    chained = (
+        "Traceback...\n" + blocked + "\nDuring handling of the above exception, "
+        "another exception occurred:\n\nTraceback...\nIndexError: mine\n"
+    )
+    assert sandbox._exit_note(1, chained) == "exited with code 1"
+    assert sandbox._exit_note(1, "") == "exited with code 1"
+
+
+@pytest.mark.parametrize(
+    "raw, resolved, is_stream, ok",
+    [
+        # macOS: realpath('/dev/stdout') is '/dev/fd/1' (a device node, not a
+        # symlink), so the fd itself has to be asked what it is
+        ("/dev/stdout", "/dev/fd/1", True, True),
+        ("/dev/stderr", "/dev/fd/2", True, True),
+        ("/dev/fd/5", "/dev/fd/5", True, True),
+        ("/dev/stdout", "/dev/fd/1", False, False),  # dup2'd onto a real file
+        ("/dev/stdout", "/dev/fd/1x", True, False),
+        ("/dev/stdout", "/dev/fd/", True, False),
+        ("/etc/passwd", "/dev/fd/1", True, False),
+    ],
+)
+def test_macos_dev_fd_resolution_is_checked_by_fd_kind(raw, resolved, is_stream, ok):
+    """M-4: a ``/dev/fd/N`` resolve-result is exempt only when fd N is a
+    pipe / socket / tty (decided by the injected probe)."""
+    import sandbox_bootstrap
+
+    asked: list = []
+
+    def probe(fd):
+        asked.append(fd)
+        return is_stream
+
+    assert sandbox_bootstrap.is_stream_alias(raw, resolved, probe) is ok
+    if ok:
+        assert asked == [int(resolved.rsplit("/", 1)[1])]
+
+
+def test_fd_is_stream_recognises_a_pipe_and_rejects_a_file(tmp_path):
+    import sandbox_bootstrap
+
+    r_fd, w_fd = os.pipe()
+    try:
+        assert sandbox_bootstrap.fd_is_stream(r_fd) is True
+    finally:
+        os.close(r_fd)
+        os.close(w_fd)
+    with open(tmp_path / "f.txt", "w") as f:
+        assert sandbox_bootstrap.fd_is_stream(f.fileno()) is False
+    assert sandbox_bootstrap.fd_is_stream(987654) is False  # not open
+
+
+def test_rlimit_as_is_best_effort_on_macos_only(monkeypatch, capsys):
+    """M-4: macOS often refuses RLIMIT_AS; there it is logged and skipped,
+    while CPU / FSIZE stay required, and AS stays required elsewhere."""
+    import sandbox_bootstrap
+
+    limits = sandbox._bootstrap_config("r", "r/solution.py", True)["rlimits"]
+    monkeypatch.setattr(sys, "platform", "darwin")
+    res = _FakeResource(fail={9})
+    sandbox_bootstrap.apply_rlimits(limits, res)  # no raise
+    assert sandbox_bootstrap.RLIMIT_AS_SKIPPED_MARKER in capsys.readouterr().err
+    assert {c[0] for c in res.calls} == {res.RLIMIT_CPU, res.RLIMIT_FSIZE, res.RLIMIT_NPROC}
+    with pytest.raises(ValueError):
+        sandbox_bootstrap.apply_rlimits(limits, _FakeResource(fail={0}))  # CPU: still fatal
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(ValueError):
+        sandbox_bootstrap.apply_rlimits(limits, _FakeResource(fail={9}))
 
 
 @pytest.mark.parametrize(
@@ -1192,13 +1473,11 @@ def test_no_preexec_fn_and_a_caps_failure_is_not_verified(monkeypatch):
     assert r.status == "pass", r
     assert "preexec_fn" not in calls[0]
     assert not hasattr(sandbox, "_posix_limits")
-    assert sandbox._classify_failure(
+    assert sandbox._classify_pre_go_exit(
         sandbox_bootstrap.EXIT_NO_CAPS,
         sandbox_bootstrap.CAPS_MARKER + " (ValueError: nope)\n",
+        posix=True,
     ) == ("not_verified", "sandbox caps unavailable (resource limits could not be applied)")
-    assert sandbox._classify_failure(sandbox_bootstrap.EXIT_NO_CAPS, "") == (
-        "error", f"exited with code {sandbox_bootstrap.EXIT_NO_CAPS}"
-    )
 
 
 @pytest.mark.parametrize(

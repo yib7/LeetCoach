@@ -48,8 +48,10 @@ Statuses (see :class:`VerifyResult`):
 * ``"fail"``         — at least one sample's stdout differed.
 * ``"error"``        — the code crashed / timed out / wouldn't run.
 * ``"not_verified"`` — couldn't verify (no samples, no compiler, unsupported
-                       language, sandbox caps unavailable) — *not* a failure,
-                       just "not auto-verified".
+                       language, sandbox caps unavailable, the bootstrap
+                       failed before running the solution) — *not* a
+                       failure, just "not auto-verified". A later
+                       not-verified sample never hides an earlier fail.
 """
 from __future__ import annotations
 
@@ -82,6 +84,7 @@ from sandbox_bootstrap import (
     DENY_PREFIX,
     EXIT_NO_CAPS,
     GO,
+    READY,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,6 +130,10 @@ _BOOTSTRAP_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "sandbox_bootstrap.py"
 )
 _GO = GO
+# The bootstrap writes READY to stdout right before it blocks on the go byte;
+# the parent reads it before sending go, so a pre-READY exit is known to be
+# the bootstrap's, never the solution's (M-1 / M-3).
+_READY = READY
 
 # I1: the verdict when the caps cannot be put in place (fail closed).
 _CAPS_UNAVAILABLE_NOTE = "sandbox caps unavailable (job object could not be applied)"
@@ -475,12 +482,15 @@ class _StdinFeeder(threading.Thread):
 
 
 def _exit_note(returncode: int, stderr: str) -> str:
-    """The note for a nonzero exit: "blocked by sandbox (<what>)" when the
-    audit hook's PermissionError is what ended the run (the last one named
-    in stderr), else the bare exit code."""
-    matches = list(_BLOCKED_RE.finditer(stderr or ""))
-    if matches:
-        m = matches[-1]
+    """The note for a nonzero exit of the SOLUTION: "blocked by sandbox
+    (<what>)" when the audit hook's PermissionError is what ended the run,
+    else the bare exit code. Only the final exception line (the last
+    non-blank line of stderr) is looked at, so a solution that caught the
+    sandbox's error and raised something else is not blamed on the sandbox
+    (M-2)."""
+    lines = [ln for ln in (stderr or "").splitlines() if ln.strip()]
+    m = _BLOCKED_RE.search(lines[-1]) if lines else None
+    if m:
         what = m.group("event")
         if m.group("why"):
             what += f": {m.group('why')}"
@@ -488,14 +498,73 @@ def _exit_note(returncode: int, stderr: str) -> str:
     return f"exited with code {returncode}"
 
 
-def _classify_failure(returncode: int, stderr: str) -> tuple:
-    """``(status, note)`` for a nonzero exit. The bootstrap's own "rlimits
-    could not be set" exit (POSIX, before the go byte: the solution never
-    ran) is ``not_verified``, like a missing Windows job; anything else is
-    an ``error``."""
-    if returncode == EXIT_NO_CAPS and (stderr or "").startswith(CAPS_MARKER):
+def _classify_pre_go_exit(returncode, stderr: str, *, posix: bool | None = None) -> tuple:
+    """``(status, note)`` for a child that exited BEFORE signalling READY,
+    i.e. before the go byte: the bootstrap's own failure, never the
+    solution's (no solution code had run), so it is always ``not_verified``.
+    The caps note needs POSIX (only there does the bootstrap set rlimits),
+    :data:`EXIT_NO_CAPS` and the marker; anything else is an internal error.
+    A solution exiting 98 AFTER go is an ordinary ``error`` (M-1)."""
+    if posix is None:
+        posix = os.name != "nt"
+    if posix and returncode == EXIT_NO_CAPS and CAPS_MARKER in (stderr or ""):
         return "not_verified", _RLIMITS_UNAVAILABLE_NOTE
-    return "error", _exit_note(returncode, stderr)
+    return "not_verified", (
+        f"sandbox internal error (bootstrap exited with code {returncode} before "
+        "running the solution)"
+    )
+
+
+class _ReadyWaiter(threading.Thread):
+    """Read the bootstrap's one-byte READY signal off the child's stdout on a
+    daemon thread (a raw read, so nothing past it is consumed and the
+    :class:`_CappedReader` started afterwards sees all of the solution's
+    output). ``data`` is READY, ``b""`` (EOF: the child exited before the
+    handshake) or None while still waiting."""
+
+    def __init__(self, stream) -> None:
+        super().__init__(daemon=True)
+        self._stream = stream
+        self.data: bytes | None = None
+        self.start()
+
+    def run(self) -> None:  # noqa: D102 - thread body
+        try:
+            self.data = os.read(self._stream.fileno(), len(_READY))
+        except (OSError, ValueError):
+            self.data = b""
+
+
+def _pre_go_result(proc, waiter, err_reader, timeout, stdin_text, expected) -> VerifyResult:
+    """The verdict when the bootstrap never signalled READY: still starting
+    when the budget ran out (``error``, timed out) or exited / misbehaved
+    before the go byte (``not_verified``, :func:`_classify_pre_go_exit`).
+    Either way no solution code has run, so the child has no descendants."""
+    timed_out = waiter.is_alive()
+    if timed_out or waiter.data:
+        _discard_child(proc)
+    else:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _discard_child(proc)
+    err_reader.join(timeout=2)
+    stderr = err_reader.text()
+    detail = [{
+        "stdin": stdin_text,
+        "expected": expected,
+        "stdout": "",
+        "stderr": stderr,
+        "returncode": proc.returncode,
+    }]
+    if timed_out:
+        return VerifyResult(status="error", note=f"timed out after {timeout}s", detail=detail)
+    status, note = _classify_pre_go_exit(proc.returncode, stderr)
+    logger.warning(
+        "sandbox: bootstrap exited before the go byte (code %s): %s",
+        proc.returncode, stderr.strip()[:200],
+    )
+    return VerifyResult(status=status, note=note, detail=detail)
 
 
 def _discard_child(proc) -> None:
@@ -712,7 +781,9 @@ def verify_python(
     byte. Both fail CLOSED: if the job cannot be created or assigned (or a
     required rlimit cannot be set) the solution never runs and the result is
     ``not_verified`` with a "sandbox caps unavailable" note, plus a logged
-    warning.
+    warning. The go byte is sent only after the bootstrap's READY signal, so
+    any bootstrap exit before it (caps, a bad config frame) is
+    ``not_verified`` too, and any exit after it is the solution's own.
 
     ``audit_hook=False`` skips the C6 audit hook. It exists ONLY so tests can
     exercise the other containment layers (job caps, tree kill, grandchild
@@ -781,6 +852,10 @@ def verify_python(
             _frame_config(_bootstrap_config(run_dir, script_path, audit_hook)),
             (stdin_text or "").encode("utf-8"),
         )
+        # stderr can be drained from the start (the bootstrap's own pre-go
+        # messages land there); stdout's first byte is the READY signal.
+        err_reader = _CappedReader(proc.stderr)
+        waiter = _ReadyWaiter(proc.stdout)
 
         # A5 ordering: assign the job FIRST, and only then release the go byte.
         # Until the bootstrap reads it, no untrusted line has run — so it no
@@ -799,14 +874,22 @@ def verify_python(
             _discard_child(proc)
             return VerifyResult(status="not_verified", note=_CAPS_UNAVAILABLE_NOTE)
 
+        # M-1 / M-3: wait for the bootstrap's READY before sending go. An
+        # exit before READY is the bootstrap's own failure (bad config, caps
+        # that could not be applied) and no solution code ran; once go is
+        # sent, every exit code is the solution's, so it cannot fake one.
+        deadline = time.monotonic() + timeout
+        waiter.join(timeout=max(0.0, deadline - time.monotonic()))
+        if waiter.is_alive() or waiter.data != _READY:
+            feeder.abort()
+            return _pre_go_result(proc, waiter, err_reader, timeout, stdin_text, expected_stdout)
+
         feeder.release()
         out_reader = _CappedReader(proc.stdout)
-        err_reader = _CappedReader(proc.stderr)
 
         # Wait for exit / timeout / output overflow — whichever comes first.
         # A short poll loop (not proc.wait(timeout)) so the overflow flag can
         # interrupt the wait; 50ms granularity is plenty for a verifier.
-        deadline = time.monotonic() + timeout
         timed_out = False
         while proc.poll() is None:
             if out_reader.overflowed.is_set() or err_reader.overflowed.is_set():
@@ -883,15 +966,13 @@ def verify_python(
 
         if proc.returncode != 0:
             # A crash / nonzero exit is an `error`, not a content `fail` (a
-            # sandbox block is named as such; POSIX rlimits that could not be
-            # set are `not_verified`). stdout/stderr are already capped+marked
-            # by the readers.
-            status, note = _classify_failure(proc.returncode, stderr)
-            if status == "not_verified":
-                logger.warning("sandbox: %s", stderr.strip()[:200])
+            # sandbox block is named as such). The go byte was sent, so this
+            # is the solution's exit, never a bootstrap failure (those were
+            # handled before go). stdout/stderr are already capped+marked by
+            # the readers.
             return VerifyResult(
-                status=status,
-                note=note,
+                status="error",
+                note=_exit_note(proc.returncode, stderr),
                 detail=[{
                     "stdin": stdin_text,
                     "expected": expected_stdout,
@@ -1164,17 +1245,23 @@ def _verify_python_samples(
     passed = 0
     errored = 0
     detail: list = []
+    unverified_note = ""
     for idx, s in enumerate(samples, start=1):
         r = verify_python(
             code, s.stdin, s.expected_stdout, timeout=timeout, problem_text=problem_text
         )
         if r.status == "not_verified":
-            # The sandbox refused to run it (caps unavailable): the whole run
-            # is unverified, never a "0/N passed" fail. Later samples would
-            # hit the same wall, so stop here.
-            return VerifyResult(
-                status="not_verified", note=r.note, samples_total=total, detail=detail
-            )
+            # The sandbox refused to run it (caps unavailable): later samples
+            # would hit the same wall, so stop here. With nothing failed so
+            # far the whole run is unverified, never a "0/N passed" fail; but
+            # an earlier genuine fail / error still stands (M-1): a wrong
+            # answer is never hidden behind "not verified".
+            if passed == len(detail):
+                return VerifyResult(
+                    status="not_verified", note=r.note, samples_total=total, detail=detail
+                )
+            unverified_note = r.note
+            break
         # B4: seed the entry with the sample's own stdin/expected AND the
         # verifier's note (the timeout/crash reason) up front — some error
         # paths (timeout, "could not run", ...) carry a `note` but no
@@ -1196,9 +1283,10 @@ def _verify_python_samples(
         elif r.status == "error":
             errored += 1
 
+    ran = len(detail)
     if passed == total:
         status, note = "pass", f"all {total} sample(s) passed"
-    elif errored and passed == 0 and errored == total - passed:
+    elif errored and passed == 0 and errored == ran:
         # every non-passing sample crashed — a pure error, not a wrong answer
         status, note = "error", f"code errored on {errored}/{total} sample(s)"
     elif errored:
@@ -1206,6 +1294,8 @@ def _verify_python_samples(
         status, note = "fail", f"{passed}/{total} sample(s) passed, {errored} errored"
     else:
         status, note = "fail", f"{passed}/{total} sample(s) passed"
+    if ran < total:
+        note += f"; {total - ran} not verified ({unverified_note})"
 
     return VerifyResult(
         status=status,

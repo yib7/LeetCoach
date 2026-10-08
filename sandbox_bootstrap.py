@@ -22,13 +22,15 @@ so ``sys.orig_argv`` does not reveal it), the go byte, then the sample input.
      passes the list: ``~/.claude``, the repo ``.env``, credential stores...);
    * network: ``socket.connect`` / ``bind`` / ``sendto`` / ``sendmsg`` and
      name resolution. The one exception is the shape of
-     ``socket.socketpair()`` on Windows (bind to an EPHEMERAL port on
-     127.0.0.1 / ::1, then connect to that same, still-open listener of this
-     process), which asyncio's Proactor loop needs for its self-pipe; a
-     connect to any other address, including another local service, is
-     refused;
-   * ``sqlite3.connect`` to a database file outside the run dir
-     (``:memory:`` and temporary databases are fine);
+     ``socket.socketpair()`` on Windows (bind a STREAM socket to an EPHEMERAL
+     port on 127.0.0.1 / ::1 and listen, then connect ONE socket of the same
+     family and type to that same listener of this process), which asyncio's
+     Proactor loop needs for its self-pipe. The allowance is spent by that
+     first connect; any other bind (UDP included) or connect, including to
+     another local service, is refused;
+   * SQLite entirely (``sqlite3.connect``, extension loading): ``ATTACH
+     DATABASE`` writes wherever it is told without an audited ``open``, and
+     extensions are native code, so no per-path check could hold;
    * process creation: ``subprocess``, ``os.system`` / ``popen``, ``os.exec*``,
      ``os.spawn*``, ``posix_spawn``, ``fork``, ``_winapi.CreateProcess``,
      ``os.startfile``, and ``os.kill``;
@@ -41,11 +43,15 @@ so ``sys.orig_argv`` does not reveal it), the go byte, then the sample input.
    are known gaps (e.g. ``dir_fd``-relative opens on POSIX). It exists to stop
    careless or prompt-injected solution code from touching credentials, the
    network or the rest of the disk.
-2. **Handshake (A5).** Block on an unbuffered ONE-byte ``os.read(0, 1)`` until
-   the parent sends the go byte. The parent sends it only AFTER it has put this
-   process into the Windows Job Object, so no untrusted line can allocate or
-   spawn outside the memory / process caps, however long a GIL-starved parent
-   takes to get to ``AssignProcessToJobObject``. The config and the go byte
+2. **Handshake (A5).** Write the one-byte :data:`READY` signal to stdout,
+   then block on an unbuffered ONE-byte ``os.read(0, 1)`` until the parent
+   sends the go byte. The parent reads READY before it sends go, so an exit
+   BEFORE READY is known to be the bootstrap's own (bad config, caps that
+   could not be applied: the solution never ran), and nothing the solution
+   does after go can pass for one. The parent sends go only AFTER it has put
+   this process into the Windows Job Object, so no untrusted line can
+   allocate or spawn outside the memory / process caps, however long a
+   GIL-starved parent takes to get to ``AssignProcessToJobObject``. The config and the go byte
    are read with raw, exact-length reads that leave the rest of stdin (the
    sample input) untouched in the pipe, so every way a solution reads stdin
    (``input()``, ``sys.stdin``, ``sys.stdin.buffer``, ``open(0)``,
@@ -66,18 +72,26 @@ import _thread
 import json
 import os
 import runpy
+import stat
 import sys
 import traceback
 import weakref
-from urllib.parse import unquote
 
 # The go byte. ``sandbox.py`` imports this constant, so parent and child can
 # never disagree on it.
 GO = b"\x01"
+# Written to stdout right before the go-byte read ("config read, caps and hook
+# in place, parked at the handshake"). The parent waits for it before sending
+# go, so an exit with no READY is a bootstrap failure, never the solution's.
+READY = b"\x02"
 EXIT_NO_GO = 97  # parent vanished / closed stdin before releasing us
 EXIT_NO_CAPS = 98  # a required POSIX rlimit could not be set: fail closed
 DENY_PREFIX = "LeetCoach sandbox:"
 CAPS_MARKER = f"{DENY_PREFIX} resource limits could not be applied"
+# macOS often refuses RLIMIT_AS; there the memory cap is best-effort.
+RLIMIT_AS_SKIPPED_MARKER = (
+    f"{DENY_PREFIX} RLIMIT_AS could not be set on macOS; memory cap is best-effort"
+)
 
 # Framed config: a 4-byte big-endian length, then that many bytes of UTF-8
 # JSON. Bounded so a corrupt header cannot make us allocate gigabytes.
@@ -96,6 +110,7 @@ _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 # POSIX names that are aliases of an already-open fd rather than files.
 _STD_ALIASES = frozenset({"/dev/stdin", "/dev/stdout", "/dev/stderr"})
 _FD_ALIAS_DIRS = ("/dev/fd/", "/proc/self/fd/")
+_DEV_FD = "/dev/fd/"
 _ANON_FD_KINDS = ("pipe:[", "socket:[", "anon_inode:")
 
 # Refused outright, whatever the arguments.
@@ -119,6 +134,9 @@ _ALWAYS_BLOCKED = frozenset({
     "winreg.CreateKey", "winreg.SetValue", "winreg.DeleteKey", "winreg.DeleteValue",
     # heap walking (could reach objects the bootstrap holds)
     "gc.get_objects", "gc.get_referrers", "gc.get_referents",
+    # SQLite: ATTACH DATABASE writes anywhere (sqlite's own I/O, no audited
+    # open) and extensions are native code, so it is refused outright.
+    "sqlite3.connect", "sqlite3.enable_load_extension", "sqlite3.load_extension",
 })
 
 # Path-mutating events -> indexes of their path arguments. Allowed only when
@@ -146,7 +164,22 @@ def _deny(event: str, what: str = "") -> None:
     raise PermissionError(f"{DENY_PREFIX} {event} is blocked{suffix}")
 
 
-def is_stream_alias(raw: str, resolved: str) -> bool:
+def fd_is_stream(fd: int) -> bool:
+    """Is open fd ``fd`` a pipe, socket or terminal (never a regular file)?
+    False when it is not open."""
+    try:
+        mode = os.fstat(fd).st_mode
+    except (OSError, ValueError, OverflowError):
+        return False
+    if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode):
+        return True
+    try:
+        return os.isatty(fd)
+    except (OSError, ValueError, OverflowError):
+        return False
+
+
+def is_stream_alias(raw: str, resolved: str, fd_probe=None) -> bool:
     """POSIX: is ``raw`` a std-stream / fd alias (``/dev/stdin``,
     ``/dev/stdout``, ``/dev/stderr``, ``/dev/fd/N``, ``/proc/self/fd/N``)
     that ``resolved`` (its realpath) shows to be a pipe, socket or terminal?
@@ -155,7 +188,10 @@ def is_stream_alias(raw: str, resolved: str) -> bool:
     resolved target matters: on Linux, opening ``/proc/self/fd/N`` (or
     ``/dev/stdout`` after an ``os.dup2``) REOPENS the underlying file with
     new flags, so an alias that points at a real file is still checked as
-    that file. Pure string logic, so it is unit-testable on any OS.
+    that file. On macOS ``/dev/fd/N`` is a device node, not a symlink, so
+    ``realpath('/dev/stdout')`` stops at ``/dev/fd/1``; that fd is then asked
+    what it is (``fd_probe``, default :func:`fd_is_stream`). String logic
+    apart from that probe, so it is unit-testable on any OS.
     """
     if raw not in _STD_ALIASES:
         for prefix in _FD_ALIAS_DIRS:
@@ -167,24 +203,18 @@ def is_stream_alias(raw: str, resolved: str) -> bool:
     head, _, tail = resolved.rpartition("/")
     if resolved.startswith("/proc/") and head.endswith("/fd") and tail.startswith(_ANON_FD_KINDS):
         return True
+    if resolved.startswith(_DEV_FD):
+        num = resolved[len(_DEV_FD):]
+        if not (num.isascii() and num.isdigit()):
+            return False
+        return bool((fd_probe or fd_is_stream)(int(num)))
     return resolved.startswith("/dev/pts/") or resolved in ("/dev/tty", "/dev/null")
 
 
-def _sqlite_uri_path(uri: str):
-    """The filesystem path a ``file:`` URI names, or ``None`` for an
-    in-memory / temporary database."""
-    path, _, query = uri[len("file:"):].partition("#")[0].partition("?")
-    if "mode=memory" in query.split("&"):
-        return None
-    if path.startswith("//"):  # file://host/path -> /path
-        slash = path.find("/", 2)
-        path = path[slash:] if slash != -1 else ""
-    path = unquote(path)
-    if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
-        path = path[1:]  # /C:/x -> C:/x
-    if path in ("", ":memory:"):
-        return None
-    return path
+def _socket_mod():
+    """The ``_socket`` C module. Every socket.bind / connect event comes from
+    it, so it is already imported whenever the hook asks (never imports)."""
+    return sys.modules.get("_socket")
 
 
 def install_audit_hook(run_dir: str, secret_paths: list) -> None:
@@ -203,7 +233,7 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
     devnull = normcase(os.devnull)
     posix = os.name != "nt"
     local = _thread._local()  # per-thread re-entrancy guard (realpath -> events)
-    own_listeners = weakref.WeakSet()  # sockets bound to an ephemeral loopback port
+    own_listeners = weakref.WeakSet()  # STREAM sockets bound to an ephemeral loopback port
 
     def path_of(arg):
         """A normalized path, or None for an fd / None / non-path argument."""
@@ -246,44 +276,56 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
             if path is not None and not path.startswith("\\\\.\\pipe\\"):
                 check_inside_run(event, path)
 
-    def on_sqlite_connect(event: str, args) -> None:
-        # sqlite opens read-write and creates the file, so it is checked like
-        # an open for writing.
+    def kind_of(sock):
+        """``(family, type)`` of a socket object, or None."""
         try:
-            db = fsdecode(args[0] if args else None)
-        except TypeError:
-            _deny(event, "unrecognised database argument")
-        if db in ("", ":memory:"):
-            return
-        if db.startswith("file:"):
-            # Whether uri=True was passed is not visible here, so the URI
-            # reading is what gets checked (the literal reading, a file named
-            # "file:..." relative to the cwd, is inside the run dir anyway).
-            uri_path = _sqlite_uri_path(db)
-            if uri_path is None:
-                return
-            db = uri_path
-        path = path_of(db)
-        check_secret(event, path)
-        check_inside_run(event, path)
+            return (sock.family, sock.type)
+        except (AttributeError, OSError, ValueError):
+            return None
+
+    def is_listening(sock) -> bool:
+        mod = _socket_mod()
+        sol = getattr(mod, "SOL_SOCKET", None)
+        acceptconn = getattr(mod, "SO_ACCEPTCONN", None)
+        if sol is None or acceptconn is None:
+            return False  # cannot tell: fail closed
+        try:
+            return bool(sock.getsockopt(sol, acceptconn))
+        except (OSError, ValueError, TypeError):
+            return False
 
     def on_bind(event: str, args) -> None:
+        sock = args[0] if args else None
         addr = args[1] if len(args) > 1 else None
-        if (isinstance(addr, tuple) and len(addr) >= 2
+        kind = kind_of(sock)
+        stream = getattr(_socket_mod(), "SOCK_STREAM", None)
+        if (kind is not None and stream is not None and kind[1] == stream
+                and isinstance(addr, tuple) and len(addr) >= 2
                 and addr[0] in _LOOPBACK and addr[1] == 0):
-            # An OS-assigned free port on loopback: half of socketpair().
-            own_listeners.add(args[0])
+            # An OS-assigned free loopback port for a STREAM socket: the
+            # listening half of socketpair(). Nothing else may bind (a UDP
+            # socket's port space is separate from TCP's, so "this process
+            # holds port P" would prove nothing about a TCP connect to P).
+            own_listeners.add(sock)
             return
         _deny(event)
 
     def on_connect(event: str, args) -> None:
+        sock = args[0] if args else None
         addr = args[1] if len(args) > 1 else None
-        if isinstance(addr, tuple) and len(addr) >= 2 and addr[0] in _LOOPBACK:
+        kind = kind_of(sock)
+        if (kind is not None and isinstance(addr, tuple) and len(addr) >= 2
+                and addr[0] in _LOOPBACK):
             target = (addr[0], addr[1])
             for listener in list(own_listeners):
                 try:
-                    if tuple(listener.getsockname()[:2]) == target:
-                        return  # this process's own listener: the other half
+                    if (kind_of(listener) == kind
+                            and tuple(listener.getsockname()[:2]) == target
+                            and is_listening(listener)):
+                        # The other half of this process's own socketpair.
+                        # Single use: the allowance is spent here.
+                        own_listeners.discard(listener)
+                        return
                 except (OSError, ValueError, TypeError):
                     continue  # closed / detached: no longer ours to talk to
         _deny(event)
@@ -291,7 +333,6 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
     handlers = {
         "open": on_open,
         "_winapi.CreateFile": on_create_file,
-        "sqlite3.connect": on_sqlite_connect,
         "socket.bind": on_bind,
         "socket.connect": on_connect,
     }
@@ -352,7 +393,13 @@ def apply_rlimits(limits: dict, resource_mod=None) -> None:
     """POSIX: set each configured limit with soft == hard, so the solution
     cannot raise it. A required limit that cannot be set raises; the
     optional NPROC is skipped. Runs before the go byte, so the caps exist
-    before any untrusted line."""
+    before any untrusted line.
+
+    macOS often refuses ``RLIMIT_AS``; there (and only there) a failed AS is
+    reported on stderr (:data:`RLIMIT_AS_SKIPPED_MARKER`) and skipped, so the
+    memory cap is best-effort on macOS. CPU / FSIZE stay required everywhere
+    and AS stays required on Linux (Windows' cap is the parent's Job
+    Object)."""
     if resource_mod is None:
         import resource as resource_mod  # noqa: PLC0415 - POSIX only
     for name, value in limits.items():
@@ -361,7 +408,11 @@ def apply_rlimits(limits: dict, resource_mod=None) -> None:
             raise ValueError(f"unknown rlimit {name!r}")
         try:
             resource_mod.setrlimit(getattr(resource_mod, f"RLIMIT_{name}"), (value, value))
-        except (ValueError, OSError, AttributeError):
+        except (ValueError, OSError, AttributeError) as exc:
+            if name == "AS" and sys.platform == "darwin":
+                sys.stderr.write(f"{RLIMIT_AS_SKIPPED_MARKER} ({type(exc).__name__}: {exc})\n")
+                sys.stderr.flush()
+                continue
             if required:
                 raise
 
@@ -388,8 +439,14 @@ def main(argv: list) -> None:
     if ready_marker:
         open(ready_marker, "wb").close()
 
-    # The handshake. Nothing below this line runs until the parent has
-    # assigned the job object.
+    # The handshake. Tell the parent we are parked here (it reads READY
+    # before it sends go, so an exit before READY is ours, never the
+    # solution's), then wait. Nothing below this line runs until the parent
+    # has assigned the job object.
+    try:
+        os.write(1, READY)
+    except OSError:
+        os._exit(EXIT_NO_GO)
     if os.read(0, 1) != GO:
         os._exit(EXIT_NO_GO)
 
