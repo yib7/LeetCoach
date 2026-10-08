@@ -52,6 +52,7 @@ import time
 import urllib.request
 import uuid
 import webbrowser
+from html import escape as html_escape
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -1029,6 +1030,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         html = html.replace("__CLAUDE_AVAILABLE__", "true" if installed else "false")
         html = html.replace("__CLAUDE_LOGGED_IN__", "true" if logged_in else "false")
         html = html.replace("__CLAUDE_MODEL__", config.model_alias())
+        # C13: the Quick Ask tag names the model /ask really uses (escaped:
+        # it comes from LEETCOACH_QUICK_ASK_MODEL), not a hardcoded "haiku".
+        html = html.replace("__QUICK_ASK_MODEL__", html_escape(config.quick_ask_model()))
+        html = html.replace("__FOLLOWUP_MAX_QUESTION__", str(FOLLOWUP_MAX_QUESTION))
         # Display-only version labels for the picker tooltips (the alias, not
         # this label, is what reaches `--model`).
         for alias in config.ALLOWED_MODEL_ALIASES:

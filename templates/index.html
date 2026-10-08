@@ -180,7 +180,7 @@
           <!-- quick ask (one-shot; independent of the run stream) -->
           <section class="panel qa" id="quickask">
             <div class="p-head">
-              <label class="p-title" for="qa-input">Quick Ask <span class="tag">haiku</span></label>
+              <label class="p-title" for="qa-input">Quick Ask <span class="tag" title="Quick Ask model (LEETCOACH_QUICK_ASK_MODEL)">__QUICK_ASK_MODEL__</span></label>
               <button class="btn ghost" id="qa-toggle" type="button" aria-expanded="true" aria-controls="qa-body">Hide</button>
             </div>
             <div id="qa-body">
@@ -278,6 +278,23 @@
                 <button id="library-viewer-close" class="mini" type="button">Close</button>
               </div>
               <div id="library-viewer-body" class="md pad"></div>
+              <!-- SP8 / D6: a follow-up question on this doc (Markdown docs only) -->
+              <section id="library-viewer-followup" class="vw-followup" aria-labelledby="followup-title" hidden>
+                <div class="fu-head">
+                  <h3 id="followup-title" class="fu-label">Ask a follow-up</h3>
+                  <span id="followup-source" class="chip mono fu-source" hidden></span>
+                </div>
+                <textarea id="followup-input" class="fu-input" rows="3" maxlength="__FOLLOWUP_MAX_QUESTION__"
+                          aria-label="Follow-up question about this doc" aria-describedby="followup-hint"
+                          placeholder="Ask about this doc, e.g. &#8220;Why store the index after the check?&#8221;"></textarea>
+                <div class="fu-row">
+                  <button id="followup-ask" class="btn green" type="button">Ask</button>
+                  <button id="followup-stop" class="btn ghost" type="button" hidden>Stop</button>
+                  <span id="followup-hint" class="fu-hint"><kbd data-mod>Ctrl</kbd> + <kbd>Enter</kbd> to ask · <kbd>Esc</kbd> to stop · the answer is added to the end of this doc</span>
+                </div>
+                <div id="followup-status" class="fu-status" role="status" aria-live="polite"></div>
+                <div id="followup-answer" class="md fu-answer" hidden></div>
+              </section>
               <!-- SP7 / D9: per-problem notes (problem-linked docs only) -->
               <div id="library-viewer-notes" class="vw-notes" hidden></div>
             </div>

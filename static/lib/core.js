@@ -935,7 +935,42 @@
     };
   }
 
+  // ---- SP8 / D6: follow-up questions on a saved doc -------------------------
+  // The question as the server will see it (trimmed), or why it can't be sent.
+  function followupCheck(text, max) {
+    var q = String(text == null ? "" : text).trim();
+    if (!q) return { ok: false, message: "Type a question about this doc first." };
+    if (max && q.length > max) {
+      return { ok: false, message: "That question is too long (max " + max + " characters)." };
+    }
+    return { ok: true, question: q };
+  }
+  var FOLLOWUP_FALLBACK_NOTES = {
+    no_session: "no saved session for this doc, so a fresh call read the doc",
+    resume_failed: "the saved session could not be resumed, so a fresh call read the doc",
+    unsupported: "this claude CLI has no --resume, so a fresh call read the doc",
+  };
+  // A `phase` event's source ("resume" | "fallback" + reason) as a chip.
+  function followupSource(p) {
+    if (!p || typeof p !== "object" || !p.source) return null;
+    if (p.source === "resume") {
+      return { kind: "resume", label: "Resumed study session",
+        note: "Claude still has the conversation that wrote this doc" };
+    }
+    return { kind: "fallback", label: "Answered from the doc",
+      note: FOLLOWUP_FALLBACK_NOTES[p.reason] || "" };
+  }
+  function followupDoneText(done) {
+    var heading = done && typeof done.heading === "string" ? done.heading.replace(/^#+\s*/, "") : "";
+    if (!heading) return "Added to the doc.";
+    var how = done.source === "resume" ? "resumed the study session" : "answered from the doc";
+    return "Added to the doc under “" + heading + "” (" + how + ").";
+  }
+
   return {
+    followupCheck: followupCheck,
+    followupSource: followupSource,
+    followupDoneText: followupDoneText,
     escapeHtml: escapeHtml,
     unescapeEntities: unescapeEntities,
     cap: cap,
