@@ -6,16 +6,21 @@ analysis code (``statlee/sandbox.py``):
 * a throwaway working directory (``tempfile.mkdtemp``) cleaned in ``finally``;
 * a **secret-free** environment (``_safe_env``) so the child can't read an API
   key or any other app secret — only the bare minimum Windows/CPython needs;
-* POSIX ``resource`` rlimits where available; on Windows a **Job Object**
-  (``proc_util.create_job_with_caps`` created+configured *before* the spawn,
-  ``assign_to_job`` right after) caps per-process memory (512 MB, parity with
-  ``RLIMIT_AS``) and active process count (16), with KILL_ON_JOB_CLOSE so
-  closing the job handle in the ``finally`` nukes any straggler;
+* POSIX ``resource`` rlimits, set by the bootstrap itself before the go byte
+  (no ``preexec_fn``: it is not fork-safe in a threaded parent); on Windows a
+  **Job Object** (``proc_util.create_job_with_caps`` created+configured
+  *before* the spawn, ``assign_to_job`` right after) caps per-process memory
+  (512 MB, parity with ``RLIMIT_AS``) and active process count (16), with
+  KILL_ON_JOB_CLOSE so closing the job handle in the ``finally`` nukes any
+  straggler. Both FAIL CLOSED: if the caps cannot be applied the solution
+  never runs and the verdict is ``not_verified`` ("sandbox caps
+  unavailable");
 * a **trusted bootstrap** (``sandbox_bootstrap.py``, SP3 A5) is what the child
   actually runs, under the REAL interpreter (``sys._base_executable -I``, never
-  the venv launcher stub). It blocks on a one-byte handshake that the parent
-  sends only after the job is assigned, so no untrusted line can run outside
-  the caps, however long a GIL-starved parent takes to assign it;
+  the venv launcher stub). Its config arrives framed on stdin (not argv), then
+  it blocks on a one-byte handshake that the parent sends only after the job
+  is assigned, so no untrusted line can run outside the caps, however long a
+  GIL-starved parent takes to assign it;
 * an **audit hook** installed by that bootstrap (C6) refuses writes outside the
   run dir, reads of known secret paths (:func:`_secret_paths`), sockets,
   process creation and ctypes loading — defence in depth, NOT a security
@@ -43,7 +48,8 @@ Statuses (see :class:`VerifyResult`):
 * ``"fail"``         — at least one sample's stdout differed.
 * ``"error"``        — the code crashed / timed out / wouldn't run.
 * ``"not_verified"`` — couldn't verify (no samples, no compiler, unsupported
-                       language) — *not* a failure, just "not auto-verified".
+                       language, sandbox caps unavailable) — *not* a failure,
+                       just "not auto-verified".
 """
 from __future__ import annotations
 
@@ -69,6 +75,13 @@ from proc_util import (
     create_job_with_caps,
     kill_process_tree,
     terminate_job,
+)
+from sandbox_bootstrap import (
+    CAPS_MARKER,
+    CONFIG_LEN_BYTES,
+    DENY_PREFIX,
+    EXIT_NO_CAPS,
+    GO,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,14 +110,32 @@ _MEM_LIMIT_BYTES = 512 * 1024 * 1024
 # headroom and stops a fork bomb almost immediately.
 _JOB_PROCESS_CAP = 16
 
-# A5: the trusted bootstrap the child runs first (see sandbox_bootstrap.py). It
-# blocks on a one-byte handshake until the parent has assigned the job object,
-# then runs the solution. The go byte is sent as the first byte of the child's
-# stdin, immediately followed by the sample input.
+# POSIX rlimits, applied by the bootstrap (soft == hard) before the go byte.
+# NPROC is optional there (not adjustable in some containers).
+_POSIX_RLIMITS = {
+    "AS": _MEM_LIMIT_BYTES,
+    "CPU": 30,
+    "FSIZE": 16 * 1024 * 1024,
+    "NPROC": 64,
+}
+
+# A5: the trusted bootstrap the child runs first (see sandbox_bootstrap.py).
+# Its stdin carries the framed config, then the go byte (sent only after the
+# job object is assigned), then the sample input. The go byte is the
+# bootstrap's own constant, so the two sides cannot drift apart.
 _BOOTSTRAP_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "sandbox_bootstrap.py"
 )
-_GO = b""
+_GO = GO
+
+# I1: the verdict when the caps cannot be put in place (fail closed).
+_CAPS_UNAVAILABLE_NOTE = "sandbox caps unavailable (job object could not be applied)"
+_RLIMITS_UNAVAILABLE_NOTE = "sandbox caps unavailable (resource limits could not be applied)"
+
+# "LeetCoach sandbox: <event> is blocked (<why>)" -- the audit hook's message.
+_BLOCKED_RE = re.compile(
+    re.escape(DENY_PREFIX) + r" (?P<event>.+?) is blocked(?: \((?P<why>[^()\n]*)\))?"
+)
 
 _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -154,12 +185,38 @@ def _child_python() -> str:
     grandchild can be created before the parent assigns the stub to the job
     object, i.e. entirely outside the memory / process caps. Falls back to
     ``sys.executable`` when there is no distinct base (not a venv, or an
-    embedded interpreter without the attribute / file).
+    embedded interpreter without the attribute / file), with a warning when
+    that fallback is a Windows venv launcher.
     """
     base = getattr(sys, "_base_executable", None)
     if base and os.path.isfile(base):
         return base
+    if os.name == "nt" and sys.prefix != sys.base_prefix:
+        logger.warning(
+            "sandbox: base interpreter %r not found; falling back to the venv "
+            "launcher %s, whose real python.exe grandchild can start before the "
+            "job object is assigned", base, sys.executable,
+        )
     return sys.executable
+
+
+def _bootstrap_config(run_dir: str, script_path: str, audit: bool) -> dict:
+    """The config the bootstrap reads from stdin (never argv, so the run dir
+    and secret-path list do not show up in ``sys.orig_argv``)."""
+    return {
+        "script": script_path,
+        "run_dir": run_dir,
+        "audit": bool(audit),
+        "secret_paths": _secret_paths(),
+        "rlimits": dict(_POSIX_RLIMITS),
+    }
+
+
+def _frame_config(cfg: dict) -> bytes:
+    """Length-prefixed JSON, read back exactly by
+    ``sandbox_bootstrap.read_config``."""
+    body = json.dumps(cfg).encode("utf-8")
+    return len(body).to_bytes(CONFIG_LEN_BYTES, "big") + body
 
 
 @dataclass
@@ -219,25 +276,6 @@ def _safe_env(run_dir: str) -> dict:
                 env[key] = os.environ[key]
         env["TEMP"] = env["TMP"] = run_dir
     return env
-
-
-def _posix_limits():
-    """A ``preexec_fn`` applying conservative rlimits. POSIX only; ``None`` on
-    Windows (the dev host), matching STATlee."""
-    if os.name == "nt":
-        return None
-    import resource  # noqa: PLC0415 - POSIX-only import
-
-    def set_limits():
-        resource.setrlimit(resource.RLIMIT_AS, (_MEM_LIMIT_BYTES,) * 2)
-        resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (16 * 1024 * 1024,) * 2)
-        try:
-            resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
-        except (ValueError, OSError):
-            pass  # not adjustable in some containers
-
-    return set_limits
 
 
 class _CappedReader(threading.Thread):
@@ -391,18 +429,91 @@ def sweep_stale_run_dirs(
     return removed
 
 
-def _feed_stdin(stdin_pipe, data: bytes) -> None:
-    """Write ``data`` (go byte + sample input) to the child's stdin and close it
-    (own daemon thread: a child that never reads stdin must not deadlock the
-    parent's write)."""
-    try:
-        stdin_pipe.write(data)
-    except (BrokenPipeError, OSError, ValueError):
-        pass  # child exited / closed stdin without reading — not an error
-    finally:
+class _StdinFeeder(threading.Thread):
+    """Feed the child's stdin on a daemon thread (a child that never reads
+    stdin must not deadlock the parent's write).
+
+    Writes ``preamble`` (the framed bootstrap config) at once, then holds the
+    go byte + ``payload`` (the sample input) until :meth:`release`. The
+    parent releases only after the job object is assigned (A5); :meth:`abort`
+    instead closes stdin with no go byte, and the bootstrap exits without
+    running anything.
+    """
+
+    def __init__(self, stdin_pipe, preamble: bytes, payload: bytes) -> None:
+        super().__init__(daemon=True)
+        self._pipe = stdin_pipe
+        self._preamble = preamble
+        self._payload = payload
+        self._gate = threading.Event()
+        self._go = False
+        self.start()
+
+    def release(self) -> None:
+        """Send the go byte + sample (once the caps are in place)."""
+        self._go = True
+        self._gate.set()
+
+    def abort(self) -> None:
+        """Close stdin without a go byte (no-op after :meth:`release`)."""
+        self._gate.set()
+
+    def run(self) -> None:  # noqa: D102 - thread body
         try:
-            stdin_pipe.close()
+            self._pipe.write(self._preamble)
+            self._pipe.flush()
+            self._gate.wait()
+            if self._go:
+                self._pipe.write(_GO + self._payload)
         except (BrokenPipeError, OSError, ValueError):
+            pass  # child exited / closed stdin without reading — not an error
+        finally:
+            try:
+                self._pipe.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+
+
+def _exit_note(returncode: int, stderr: str) -> str:
+    """The note for a nonzero exit: "blocked by sandbox (<what>)" when the
+    audit hook's PermissionError is what ended the run (the last one named
+    in stderr), else the bare exit code."""
+    matches = list(_BLOCKED_RE.finditer(stderr or ""))
+    if matches:
+        m = matches[-1]
+        what = m.group("event")
+        if m.group("why"):
+            what += f": {m.group('why')}"
+        return f"blocked by sandbox ({what})"
+    return f"exited with code {returncode}"
+
+
+def _classify_failure(returncode: int, stderr: str) -> tuple:
+    """``(status, note)`` for a nonzero exit. The bootstrap's own "rlimits
+    could not be set" exit (POSIX, before the go byte: the solution never
+    ran) is ``not_verified``, like a missing Windows job; anything else is
+    an ``error``."""
+    if returncode == EXIT_NO_CAPS and (stderr or "").startswith(CAPS_MARKER):
+        return "not_verified", _RLIMITS_UNAVAILABLE_NOTE
+    return "error", _exit_note(returncode, stderr)
+
+
+def _discard_child(proc) -> None:
+    """Kill a child that is still parked at the handshake (no untrusted code
+    has run, so it has no descendants) and reap it. Never raises."""
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
             pass
 
 
@@ -596,9 +707,12 @@ def verify_python(
     killed (grandchildren included), and each output stream is capped at
     ``_OUTPUT_LIMIT`` — exceeding it kills the tree and yields ``error``
     ("output exceeded ... limit") since the capture is incomplete. On Windows
-    the child also runs inside a Job Object capping memory and process count
-    (best effort — a job API failure degrades to an uncapped run, never an
-    error); POSIX gets the equivalent rlimits via ``preexec_fn``.
+    the child also runs inside a Job Object capping memory and process count;
+    POSIX gets the equivalent rlimits, set by the bootstrap before the go
+    byte. Both fail CLOSED: if the job cannot be created or assigned (or a
+    required rlimit cannot be set) the solution never runs and the result is
+    ``not_verified`` with a "sandbox caps unavailable" note, plus a logged
+    warning.
 
     ``audit_hook=False`` skips the C6 audit hook. It exists ONLY so tests can
     exercise the other containment layers (job caps, tree kill, grandchild
@@ -607,6 +721,7 @@ def verify_python(
     """
     run_dir = tempfile.mkdtemp(prefix=_RUN_DIR_PREFIX)
     job_handle = None
+    feeder = None
     try:
         script_path = os.path.join(run_dir, "solution.py")
         try:
@@ -616,12 +731,10 @@ def verify_python(
             return VerifyResult(status="error", note=f"could not write script: {exc}")
 
         popen_kwargs = {"cwd": run_dir, "env": _safe_env(run_dir)}
-        preexec = _posix_limits()
-        if preexec:
-            popen_kwargs["preexec_fn"] = preexec
         if os.name != "nt":
             # Own session => own process group, so a whole-tree kill can
             # reach grandchildren via killpg (C5 parity with the claude runner).
+            # No preexec_fn: the rlimits are set by the bootstrap itself.
             popen_kwargs["start_new_session"] = True
 
         # Windows: create + configure the Job Object BEFORE the spawn. Every
@@ -630,27 +743,26 @@ def verify_python(
         # revision did the ctypes setup lazily AFTER Popen, and the ~100ms
         # first-call import cost let the first child of a fresh process run
         # its untrusted code before the caps existed (cold-start race).
-        # None on POSIX or if the job API failed -> run uncapped; caps are
-        # defense-in-depth and must never break a verification run.
+        # None is normal on POSIX (rlimits instead); on Windows it means NO
+        # memory / process caps, so we fail closed without spawning anything.
         job_handle = create_job_with_caps(
             memory_bytes=_MEM_LIMIT_BYTES,
             active_processes=_JOB_PROCESS_CAP,
         )
+        if os.name == "nt" and job_handle is None:
+            logger.warning(
+                "sandbox: job object could not be created; refusing to run the "
+                "solution without memory / process caps"
+            )
+            return VerifyResult(status="not_verified", note=_CAPS_UNAVAILABLE_NOTE)
 
         # A5: the child is the REAL interpreter in isolated mode (-I: no user
         # site, no PYTHON* env, script dir off sys.path; -X utf8: UTF-8 stdio
         # regardless of the console code page; -B: no .pyc writes) running the
-        # trusted bootstrap, which blocks until we release it below. Binary
-        # pipes: output is read raw and decoded once at the end (B6).
-        argv = [
-            _child_python(), "-I", "-X", "utf8", "-B",
-            _BOOTSTRAP_PATH, script_path, run_dir,
-            json.dumps({
-                "run_dir": run_dir,
-                "audit": bool(audit_hook),
-                "secret_paths": _secret_paths(),
-            }),
-        ]
+        # trusted bootstrap, which reads its config from stdin and then blocks
+        # until we release it below. Binary pipes: output is read raw and
+        # decoded once at the end (B6).
+        argv = [_child_python(), "-I", "-X", "utf8", "-B", _BOOTSTRAP_PATH]
         try:
             proc = subprocess.Popen(
                 argv,
@@ -662,18 +774,32 @@ def verify_python(
         except (OSError, ValueError) as exc:
             return VerifyResult(status="error", note=f"could not run: {exc}")
 
+        # The config goes out at once (it is not untrusted code); the go byte
+        # and the sample wait for release().
+        feeder = _StdinFeeder(
+            proc.stdin,
+            _frame_config(_bootstrap_config(run_dir, script_path, audit_hook)),
+            (stdin_text or "").encode("utf-8"),
+        )
+
         # A5 ordering: assign the job FIRST, and only then release the go byte.
         # Until the bootstrap reads it, no untrusted line has run — so it no
         # longer matters how long this thread takes to get here (the old
         # "one syscall beats ~20ms of interpreter startup" argument lost to GIL
         # contention: a busy parent let a 700 MB allocation escape 19/20 runs).
-        assign_to_job(job_handle, proc)
+        # I1: a failed assignment on Windows means no caps — kill the child
+        # while it is still parked at the handshake (fail closed).
+        assigned = assign_to_job(job_handle, proc)
+        if os.name == "nt" and not assigned:
+            logger.warning(
+                "sandbox: job object could not be assigned to the child; killed "
+                "it before any solution code ran"
+            )
+            feeder.abort()
+            _discard_child(proc)
+            return VerifyResult(status="not_verified", note=_CAPS_UNAVAILABLE_NOTE)
 
-        threading.Thread(
-            target=_feed_stdin,
-            args=(proc.stdin, _GO + (stdin_text or "").encode("utf-8")),
-            daemon=True,
-        ).start()
+        feeder.release()
         out_reader = _CappedReader(proc.stdout)
         err_reader = _CappedReader(proc.stderr)
 
@@ -756,11 +882,16 @@ def verify_python(
             )
 
         if proc.returncode != 0:
-            # A crash / nonzero exit is an `error`, not a content `fail`.
-            # stdout/stderr are already capped+marked by the readers.
+            # A crash / nonzero exit is an `error`, not a content `fail` (a
+            # sandbox block is named as such; POSIX rlimits that could not be
+            # set are `not_verified`). stdout/stderr are already capped+marked
+            # by the readers.
+            status, note = _classify_failure(proc.returncode, stderr)
+            if status == "not_verified":
+                logger.warning("sandbox: %s", stderr.strip()[:200])
             return VerifyResult(
-                status="error",
-                note=f"exited with code {proc.returncode}",
+                status=status,
+                note=note,
                 detail=[{
                     "stdin": stdin_text,
                     "expected": expected_stdout,
@@ -785,6 +916,8 @@ def verify_python(
             }],
         )
     finally:
+        if feeder is not None:
+            feeder.abort()  # no-op once released; never leaves the thread parked
         # KILL_ON_JOB_CLOSE: closing the job handle terminates anything still
         # alive inside the job — the second kill mechanism after
         # kill_process_tree — and runs BEFORE rmtree so no straggler can hold
@@ -1035,6 +1168,13 @@ def _verify_python_samples(
         r = verify_python(
             code, s.stdin, s.expected_stdout, timeout=timeout, problem_text=problem_text
         )
+        if r.status == "not_verified":
+            # The sandbox refused to run it (caps unavailable): the whole run
+            # is unverified, never a "0/N passed" fail. Later samples would
+            # hit the same wall, so stop here.
+            return VerifyResult(
+                status="not_verified", note=r.note, samples_total=total, detail=detail
+            )
         # B4: seed the entry with the sample's own stdin/expected AND the
         # verifier's note (the timeout/crash reason) up front — some error
         # paths (timeout, "could not run", ...) carry a `note` but no

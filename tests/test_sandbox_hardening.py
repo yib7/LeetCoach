@@ -48,8 +48,9 @@ def test_child_is_the_base_interpreter_in_isolated_mode_running_the_bootstrap(mo
         expected_exe = sys.executable
     assert os.path.normcase(argv[0]) == os.path.normcase(expected_exe)
     assert "-I" in argv
-    assert os.path.normcase(sandbox._BOOTSTRAP_PATH) in [os.path.normcase(a) for a in argv]
-    assert any(a.endswith("solution.py") for a in argv)
+    # The bootstrap is the LAST argument: its config (script, run dir, secret
+    # paths) travels on stdin, not on the command line (review minor 5).
+    assert os.path.normcase(argv[-1]) == os.path.normcase(sandbox._BOOTSTRAP_PATH)
 
 
 def test_child_python_falls_back_to_sys_executable(monkeypatch):
@@ -60,33 +61,45 @@ def test_child_python_falls_back_to_sys_executable(monkeypatch):
 
 
 def test_untrusted_code_cannot_run_before_the_job_is_assigned(monkeypatch):
-    """A5 ordering: the solution's first statement must not execute until the
-    parent has assigned the job object and released the go byte. The spy
-    stalls the assignment for 1.5 s (longer than interpreter startup — a
-    GIL-starved parent does exactly this) and then checks that the solution's
-    first-line marker file does not exist yet."""
+    """A5 ordering, non-vacuous (review minor 6): the stalled assignment does
+    not race interpreter startup with a fixed sleep. It first waits for the
+    bootstrap's explicit pre-go marker (written once the config is read and
+    the audit hook is installed, i.e. the very last step before the
+    handshake), and from then on waits for EITHER the solution's first-line
+    marker to appear OR a 2 s grace. Without the handshake the bootstrap would
+    run the solution immediately after its pre-go marker, so ``started`` shows
+    up within milliseconds of it and this test fails deterministically."""
     seen: dict = {}
     real_assign = sandbox.assign_to_job
+    real_config = sandbox._bootstrap_config
+
+    def config_with_ready_marker(run_dir, script_path, audit):
+        cfg = real_config(run_dir, script_path, audit)
+        cfg["ready_marker"] = os.path.join(run_dir, "bootstrap.ready")
+        seen["run_dir"] = run_dir
+        return cfg
+
+    def _wait(pred, timeout):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and not pred():
+            time.sleep(0.01)
+        return pred()
 
     def slow_assign(job, proc):
-        time.sleep(1.5)
         run_dir = seen["run_dir"]
-        seen["started_before_assign"] = os.path.exists(os.path.join(run_dir, "started"))
+        ready = os.path.join(run_dir, "bootstrap.ready")
+        started = os.path.join(run_dir, "started")
+        seen["bootstrap_ready"] = _wait(lambda: os.path.exists(ready), 30)
+        _wait(lambda: os.path.exists(started), 2.0)
+        seen["started_before_assign"] = os.path.exists(started)
         return real_assign(job, proc)
 
-    real_popen = subprocess.Popen
-
-    class _Spy(real_popen):  # type: ignore[misc, valid-type]
-        def __init__(self, args, *a, **k):
-            if "run_dir" not in seen and k.get("cwd"):
-                seen["run_dir"] = k["cwd"]
-            super().__init__(args, *a, **k)
-
-    monkeypatch.setattr(sandbox.subprocess, "Popen", _Spy)
+    monkeypatch.setattr(sandbox, "_bootstrap_config", config_with_ready_marker)
     monkeypatch.setattr(sandbox, "assign_to_job", slow_assign)
     code = "open('started', 'w').write('x')\nprint('ok')\n"
-    r = sandbox.verify_python(code, "", "ok", timeout=15)
+    r = sandbox.verify_python(code, "", "ok", timeout=40)
     assert r.status == "pass", r
+    assert seen["bootstrap_ready"] is True, "bootstrap never reached the handshake"
     assert seen["started_before_assign"] is False, (
         "solution code ran before the job object was assigned"
     )
@@ -660,24 +673,52 @@ def test_grandchild_output_is_captured_even_when_it_outlives_the_child(tmp_path)
 
 
 def test_go_byte_is_released_only_after_the_job_assignment(monkeypatch):
-    """A5 ordering, checked at the call level: the stdin feeder (which sends
-    the go byte) starts strictly after ``assign_to_job`` returned."""
+    """A5 ordering, checked at the call level: the stdin feeder is released
+    (the only thing that writes the go byte) strictly after ``assign_to_job``
+    returned."""
     events: list = []
-    real_assign, real_feed = sandbox.assign_to_job, sandbox._feed_stdin
+    real_assign, real_release = sandbox.assign_to_job, sandbox._StdinFeeder.release
 
     def assign(job, proc):
         events.append("assign")
         return real_assign(job, proc)
 
-    def feed(pipe, data):
-        events.append(("feed", data[:1]))
-        return real_feed(pipe, data)
+    def release(self):
+        events.append("release")
+        return real_release(self)
 
     monkeypatch.setattr(sandbox, "assign_to_job", assign)
-    monkeypatch.setattr(sandbox, "_feed_stdin", feed)
+    monkeypatch.setattr(sandbox._StdinFeeder, "release", release)
     r = sandbox.verify_python("print(input())\n", "7\n", "7")
     assert r.status == "pass", r
-    assert events == ["assign", ("feed", sandbox._GO)]
+    assert events == ["assign", "release"]
+
+
+def _drain(fd) -> bytes:
+    chunks = []
+    while True:
+        b = os.read(fd, 65536)
+        if not b:
+            return b"".join(chunks)
+        chunks.append(b)
+
+
+def test_stdin_feeder_writes_the_go_byte_only_when_released():
+    """The feeder writes the framed config at once, then holds the go byte +
+    sample until ``release()``; ``abort()`` closes stdin with no go byte at
+    all (the bootstrap then exits without running anything)."""
+    for released in (True, False):
+        r_fd, w_fd = os.pipe()
+        feeder = sandbox._StdinFeeder(open(w_fd, "wb"), b"CFG", b"sample\n")
+        assert os.read(r_fd, 3) == b"CFG"
+        if released:
+            feeder.release()
+        else:
+            feeder.abort()
+        rest = _drain(r_fd)
+        os.close(r_fd)
+        feeder.join(timeout=5)
+        assert rest == (sandbox._GO + b"sample\n" if released else b"")
 
 
 def _record_run_dirs(monkeypatch) -> list:
@@ -835,3 +876,340 @@ def test_sweep_survives_an_entry_that_errors(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sandbox, "_rmtree_with_retry", boom)
     assert sandbox.sweep_stale_run_dirs(tmp_root=str(tmp_path)) == 0
+
+
+# --- SP3 review fixes -------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object caps")
+def test_windows_fails_closed_when_the_job_cannot_be_created(monkeypatch, caplog):
+    """I1: no job -> no memory / process caps. Nothing is spawned; the run is
+    ``not_verified`` with a clear note and a logged warning."""
+    calls = _spy_popen(monkeypatch)
+    monkeypatch.setattr(sandbox, "create_job_with_caps", lambda **k: None)
+    with caplog.at_level("WARNING", logger="sandbox"):
+        r = sandbox.verify_python("print(1)\n", "", "1")
+    assert r.status == "not_verified", r
+    assert r.note == "sandbox caps unavailable (job object could not be applied)"
+    assert calls == []
+    assert any("job object" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object caps")
+def test_windows_fails_closed_when_the_job_cannot_be_assigned(monkeypatch, caplog, tmp_path):
+    """I1 (the reviewer's repro: a 700 MB allocation passed uncapped with no
+    log): when ``assign_to_job`` reports failure the child is killed BEFORE
+    the go byte, so not one line of the solution runs."""
+    procs: list = []
+    real_popen = subprocess.Popen
+
+    class _Spy(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, args, *a, **k):
+            super().__init__(args, *a, **k)
+            procs.append(self)
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", _Spy)
+    monkeypatch.setattr(sandbox, "assign_to_job", lambda job, proc: False)
+    marker = tmp_path / "ran.txt"
+    code = f"open({str(marker)!r}, 'w').write('x')\nprint('ALLOCATED')\n"
+    with caplog.at_level("WARNING", logger="sandbox"):
+        r = sandbox.verify_python(code, "", "ALLOCATED", audit_hook=False)
+    assert r.status == "not_verified", r
+    assert r.note == "sandbox caps unavailable (job object could not be applied)"
+    assert len(procs) == 1 and procs[0].poll() is not None, "child left running"
+    assert not marker.exists(), "solution code ran without the job caps"
+    assert any("job object" in rec.getMessage() for rec in caplog.records)
+
+
+def test_a_caps_unavailable_sample_makes_the_whole_run_not_verified(monkeypatch):
+    """I1: a fail-closed sample must not be folded into ``fail 0/N``."""
+    note = "sandbox caps unavailable (job object could not be applied)"
+    monkeypatch.setattr(
+        sandbox, "verify_python",
+        lambda *a, **k: sandbox.VerifyResult(status="not_verified", note=note),
+    )
+    samples = [sandbox.Sample("1\n", "1"), sandbox.Sample("2\n", "2")]
+    r = sandbox._verify_python_samples("print(1)", samples)
+    assert r.status == "not_verified", r
+    assert r.note == note
+
+
+def test_go_constant_is_an_explicit_escape_shared_with_the_bootstrap():
+    """Minor 1: one constant (the bootstrap's), and no raw control bytes in
+    the source of either file."""
+    import sandbox_bootstrap
+
+    assert sandbox._GO is sandbox_bootstrap.GO
+    assert sandbox_bootstrap.GO == b"\x01"
+    for mod in (sandbox, sandbox_bootstrap):
+        raw = open(mod.__file__, "rb").read()
+        bad = [b for b in raw if b < 0x20 and b not in (0x09, 0x0A, 0x0D)]
+        assert bad == [], f"raw control bytes in {mod.__file__}: {bad}"
+
+
+@pytest.mark.parametrize(
+    "code, note",
+    [
+        ("import subprocess\nsubprocess.run(['x'])\n", "blocked by sandbox (subprocess.Popen)"),
+        (
+            "import os\nopen(os.path.join('..', 'escape.txt'), 'w')\n",
+            "blocked by sandbox (open for writing: outside the run directory)",
+        ),
+    ],
+)
+def test_a_blocked_action_is_reported_as_blocked_not_as_a_bare_exit_code(code, note):
+    """Minor 2: an uncaught sandbox PermissionError reads as what it is."""
+    r = sandbox.verify_python(code, "", "x")
+    assert r.status == "error", r
+    assert r.note == note, r
+
+
+def test_exit_note_falls_back_to_the_exit_code():
+    assert sandbox._exit_note(3, "Traceback...\nValueError: boom\n") == "exited with code 3"
+    assert sandbox._exit_note(
+        1, "x\nurllib.error.URLError: <urlopen error LeetCoach sandbox: "
+        "socket.connect is blocked>\n"
+    ) == "blocked by sandbox (socket.connect)"
+
+
+def test_asyncio_run_works_under_the_audit_hook():
+    """Minor 2: Windows' Proactor loop builds its self-pipe with
+    ``socket.socketpair()`` (bind to 127.0.0.1:0 + connect to that same
+    listener); that one shape is allowed, so ``asyncio.run`` works."""
+    code = (
+        "import asyncio, socket\n"
+        "async def main():\n"
+        "    await asyncio.sleep(0)\n"
+        "    return 5\n"
+        "a, b = socket.socketpair()\n"
+        "a.sendall(b'hi')\n"
+        "print(asyncio.run(main()), b.recv(2).decode())\n"
+    )
+    r = sandbox.verify_python(code, "", "5 hi")
+    assert r.status == "pass", r
+
+
+def test_a_loopback_service_the_solution_does_not_own_is_still_unreachable():
+    """Minor 2 scoping: the socketpair allowance never lets a solution reach
+    another local service (e.g. this app on 127.0.0.1)."""
+    import socket
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        body = (
+            "s = __import__('socket').socket()\ns.settimeout(2)\n"
+            f"s.connect(('127.0.0.1', {port}))"
+        )
+        r = _run_probe(body)
+    assert r.status == "pass", r
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import socket\nsocket.socket().bind(('127.0.0.1', 50999))",
+        "import socket\nsocket.socket().bind(('0.0.0.0', 0))",
+        "import socket\nsocket.socket().bind(('', 0))",
+    ],
+)
+def test_binding_anything_but_an_ephemeral_loopback_port_is_blocked(body):
+    r = _run_probe(body)
+    assert r.status == "pass", r
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import sqlite3\nsqlite3.connect(':memory:').execute('select 1')",
+        "import sqlite3\nsqlite3.connect('').execute('select 1')",
+        "import sqlite3\n"
+        "sqlite3.connect('file::memory:?cache=shared', uri=True).execute('select 1')",
+        "import sqlite3\nsqlite3.connect('local.db').execute('create table t(x)')",
+    ],
+)
+def test_sqlite_in_memory_and_in_the_run_dir_still_work(body):
+    r = sandbox.verify_python(_probe(body), "\n", "ALLOWED")
+    assert r.status == "pass", r
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import sqlite3\nsqlite3.connect(arg).execute('create table t(x)')",
+        "import sqlite3, pathlib\n"
+        "sqlite3.connect(pathlib.Path(arg).as_uri(), uri=True).execute('create table t(x)')",
+    ],
+)
+def test_sqlite_database_outside_the_run_dir_is_blocked(tmp_path, body):
+    """Minor 3: ``sqlite3.connect`` creates / writes its file, so it is
+    path-checked like an open for writing."""
+    target = tmp_path / "outside.db"
+    r = _run_probe(body, str(target))
+    assert r.status == "pass", r
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    "raw, resolved, ok",
+    [
+        ("/dev/stdout", "/proc/123/fd/pipe:[456]", True),
+        ("/dev/stderr", "/dev/pts/3", True),
+        ("/dev/stdin", "/proc/1/fd/pipe:[9]", True),
+        ("/dev/fd/1", "/proc/1/fd/socket:[9]", True),
+        ("/proc/self/fd/2", "/proc/1/fd/pipe:[1]", True),
+        ("/dev/fd/5", "/proc/1/fd/anon_inode:[eventfd]", True),
+        # an alias whose fd was dup2'd onto a REAL file: reopening it for
+        # writing would write that file, so it is not exempt
+        ("/dev/stdout", "/etc/passwd", False),
+        ("/proc/self/fd/3", "/home/u/.bashrc", False),
+        ("/dev/fd/1", "/tmp/elsewhere/pipe:[1]", False),
+        ("/etc/passwd", "/etc/passwd", False),
+        ("/dev/fdx", "/proc/1/fd/pipe:[1]", False),
+        ("/dev/fd/../../etc/x", "/etc/x", False),
+        ("/dev/fd/\uff11", "/proc/1/fd/pipe:[1]", False),  # non-ASCII digit
+        ("/proc/1/fd/1", "/proc/1/fd/pipe:[1]", False),  # only /proc/self
+    ],
+)
+def test_posix_std_stream_aliases_are_exempt_only_when_they_are_streams(raw, resolved, ok):
+    """Minor 4: ``/dev/stdout`` & co. are not falsely blocked, but only while
+    they resolve to a pipe / socket / terminal, never to a real file."""
+    import sandbox_bootstrap
+
+    assert sandbox_bootstrap.is_stream_alias(raw, resolved) is ok
+
+
+def test_bootstrap_config_is_not_on_the_command_line(monkeypatch):
+    """Minor 5: the run dir and the secret-path list travel on stdin, so
+    neither the parent's argv nor the child's ``sys.orig_argv`` carries them;
+    the solution's stdin still holds only the sample."""
+    calls = _spy_popen(monkeypatch)
+    code = (
+        "import sys\n"
+        "leak = [a for a in sys.orig_argv if 'leetcoach_run_' in a or 'secret' in a]\n"
+        "print(leak, repr(sys.stdin.read()))\n"
+    )
+    r = sandbox.verify_python(code, "1 2\n", "[] '1 2\\n'")
+    assert r.status == "pass", r
+    joined = " ".join(calls[0])
+    assert "leetcoach_run_" not in joined and "secret_paths" not in joined
+
+
+def test_config_framing_round_trips_through_a_pipe():
+    import sandbox_bootstrap
+
+    cfg = {"script": "C:\\r\\solution.py", "run_dir": "C:\\r", "secret_paths": ["\u00e9"]}
+    r_fd, w_fd = os.pipe()
+    os.write(w_fd, sandbox._frame_config(cfg) + sandbox._GO + b"sample")
+    os.close(w_fd)
+    assert sandbox_bootstrap.read_config(r_fd) == cfg
+    assert os.read(r_fd, 1) == sandbox._GO  # read exactly: nothing over-consumed
+    assert _drain(r_fd) == b"sample"
+    os.close(r_fd)
+
+
+def test_truncated_config_is_refused():
+    import sandbox_bootstrap
+
+    r_fd, w_fd = os.pipe()
+    os.write(w_fd, sandbox._frame_config({"a": 1})[:-2])
+    os.close(w_fd)
+    with pytest.raises(EOFError):
+        sandbox_bootstrap.read_config(r_fd)
+    os.close(r_fd)
+
+
+def test_child_python_fallback_warns_inside_a_windows_venv(monkeypatch, caplog):
+    """Minor 7: the ``sys.executable`` fallback reintroduces the venv
+    launcher's grandchild on Windows, so it is logged."""
+    monkeypatch.setattr(sandbox.sys, "_base_executable", r"Z:\no\such\python.exe", raising=False)
+    monkeypatch.setattr(sandbox.sys, "prefix", r"C:\venv")
+    monkeypatch.setattr(sandbox.sys, "base_prefix", r"C:\Python")
+    with caplog.at_level("WARNING", logger="sandbox"):
+        assert sandbox._child_python() == sys.executable
+    warned = any("launcher" in rec.getMessage() for rec in caplog.records)
+    assert warned is (os.name == "nt")
+    caplog.clear()
+    monkeypatch.setattr(sandbox.sys, "base_prefix", r"C:\venv")  # not a venv
+    with caplog.at_level("WARNING", logger="sandbox"):
+        sandbox._child_python()
+    assert not caplog.records
+
+
+class _FakeResource:
+    RLIMIT_AS, RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_NPROC = 9, 0, 1, 6
+
+    def __init__(self, fail=()):
+        self.calls: list = []
+        self._fail = set(fail)
+
+    def setrlimit(self, which, limits):
+        if which in self._fail:
+            raise ValueError("not allowed here")
+        self.calls.append((which, limits))
+
+
+def test_bootstrap_applies_the_configured_rlimits_before_the_go_byte():
+    """Minor 8: POSIX rlimits are set by the bootstrap (no ``preexec_fn`` in a
+    threaded parent), soft == hard so the solution can't raise them."""
+    import sandbox_bootstrap
+
+    res = _FakeResource()
+    limits = sandbox._bootstrap_config("r", "r/solution.py", True)["rlimits"]
+    sandbox_bootstrap.apply_rlimits(limits, res)
+    mem = sandbox._MEM_LIMIT_BYTES
+    assert sorted(res.calls) == sorted([
+        (res.RLIMIT_AS, (mem, mem)),
+        (res.RLIMIT_CPU, (30, 30)),
+        (res.RLIMIT_FSIZE, (16 * 1024 * 1024,) * 2),
+        (res.RLIMIT_NPROC, (64, 64)),
+    ])
+
+
+def test_bootstrap_rlimits_fail_closed_except_the_optional_nproc():
+    import sandbox_bootstrap
+
+    limits = sandbox._bootstrap_config("r", "r/solution.py", True)["rlimits"]
+    sandbox_bootstrap.apply_rlimits(limits, _FakeResource(fail={6}))  # NPROC: tolerated
+    with pytest.raises(ValueError):
+        sandbox_bootstrap.apply_rlimits(limits, _FakeResource(fail={9}))  # AS: fatal
+
+
+def test_no_preexec_fn_and_a_caps_failure_is_not_verified(monkeypatch):
+    import sandbox_bootstrap
+
+    calls: list = []
+    real_popen = subprocess.Popen
+
+    class _Spy(real_popen):  # type: ignore[misc, valid-type]
+        def __init__(self, args, *a, **k):
+            calls.append(k)
+            super().__init__(args, *a, **k)
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", _Spy)
+    r = sandbox.verify_python("print(1)\n", "", "1")
+    assert r.status == "pass", r
+    assert "preexec_fn" not in calls[0]
+    assert not hasattr(sandbox, "_posix_limits")
+    assert sandbox._classify_failure(
+        sandbox_bootstrap.EXIT_NO_CAPS,
+        sandbox_bootstrap.CAPS_MARKER + " (ValueError: nope)\n",
+    ) == ("not_verified", "sandbox caps unavailable (resource limits could not be applied)")
+    assert sandbox._classify_failure(sandbox_bootstrap.EXIT_NO_CAPS, "") == (
+        "error", f"exited with code {sandbox_bootstrap.EXIT_NO_CAPS}"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "import gc\ngc.get_objects()",
+        "import gc\ngc.get_referrers(sys)",
+        "import gc\ngc.get_referents(sys)",
+    ],
+)
+def test_gc_introspection_is_blocked(body):
+    """Minor 9: cheap hardening against walking the heap to the hook."""
+    r = _run_probe(body)
+    assert r.status == "pass", r

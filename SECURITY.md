@@ -33,19 +33,36 @@ best-effort. What the sandbox does:
   survives the run. The child is the real Python interpreter (not the venv launcher,
   whose own child could start outside the job), and it runs a small trusted
   bootstrap that waits for a go signal. That signal is only sent after the child is
-  inside the job, so no generated code runs before the caps apply;
-- on POSIX, the equivalent memory/CPU/file-size resource limits;
+  inside the job, so no generated code runs before the caps apply. If the Job
+  Object cannot be created or the child cannot be put into it, the sandbox
+  **fails closed**: the child is killed before the go signal, none of the
+  generated code runs, a warning is logged, and the result is "not verified"
+  ("sandbox caps unavailable"). It never falls back to an uncapped run;
+- on POSIX, the equivalent memory/CPU/file-size/process resource limits, set by
+  the bootstrap before the go signal. If a required limit cannot be set, the
+  generated code does not run and the result is "not verified";
+- the bootstrap's own settings (the throwaway directory and the list of secret
+  paths) are passed on stdin, not on the command line, and the generated code's
+  stdin holds only the sample input;
 - an **audit hook** (`sys.addaudithook`, installed by the bootstrap before any
   generated code runs) that refuses:
-  - writing, deleting or renaming files outside the throwaway directory;
+  - writing, deleting or renaming files outside the throwaway directory, including
+    SQLite database files (in-memory databases are fine);
   - opening or listing known secret locations: `~/.claude` and `~/.claude.json`,
     this repo's `.env`, `~/.ssh`, `~/.aws`, git and GitHub CLI credentials, and
     the Windows credential stores under `%APPDATA%` / `%LOCALAPPDATA%`;
-  - network connections and DNS lookups;
+  - network connections and DNS lookups. The single exception is a socket pair
+    inside the process itself (bind to a free port on `127.0.0.1`, then connect to
+    that same listener), which `asyncio` needs on Windows; connecting to any other
+    address, local services included, is still refused;
   - starting processes (`subprocess`, `os.system`, `os.exec*`, `os.spawn*`,
     `multiprocessing`);
-  - loading libraries through `ctypes`;
+  - loading libraries through `ctypes`, and walking the heap with
+    `gc.get_objects` / `get_referrers` / `get_referents`;
   - creating symlinks or junctions, and writing to the registry.
+
+  A run stopped by the hook is reported as "blocked by sandbox (...)" rather than
+  a bare exit code.
 
 **The audit hook is defence in depth, not a security boundary.** Python's own
 documentation says audit hooks cannot sandbox malicious code, and there are known

@@ -14,7 +14,7 @@ Windows:
 Both need the same primitive, so it lives here rather than being copy-pasted.
 
 The sandbox additionally needs *resource caps* for its untrusted child. POSIX
-gets rlimits (in ``sandbox._posix_limits``); the Windows analogue is a **Job
+gets rlimits (set by ``sandbox_bootstrap.apply_rlimits``); the Windows analogue is a **Job
 Object** (:func:`create_job_with_caps` pre-spawn, :func:`assign_to_job` right
 after spawn, :func:`close_job` in cleanup), implemented via ctypes so no new
 dependency (pywin32/psutil) is pulled in.
@@ -248,7 +248,9 @@ def assign_to_job(job_handle, proc: "subprocess.Popen[str]") -> bool:
     that ``subprocess.Popen`` doesn't expose.
 
     Returns True when the child is inside the job; False (``None`` handle,
-    POSIX, or API failure) means the caller proceeds uncapped. Never raises.
+    POSIX, or API failure) means the child is NOT capped: ``claude_cli``
+    proceeds without the kill-on-close job, while the sandbox fails closed
+    (kills the child before its go byte). Never raises.
     """
     if job_handle is None or _job_api is None:
         return False

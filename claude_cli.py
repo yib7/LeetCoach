@@ -831,7 +831,7 @@ def _real_runner(
         # multi-MB) prompt synchronously here first would deadlock a child that
         # floods stdout before it finishes reading stdin: the parent blocks on
         # stdin.write (child not yet reading) while the child blocks on
-        # stdout.write (parent not yet draining). Mirrors sandbox._feed_stdin.
+        # stdout.write (parent not yet draining). Mirrors sandbox._StdinFeeder.
         #
         # `stdin_ok` records whether the child consumed stdin cleanly. A broken
         # pipe means the child exited at startup (bad flag, corrupt install)

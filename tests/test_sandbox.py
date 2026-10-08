@@ -415,13 +415,18 @@ def test_memory_cap_applies_on_first_call_in_fresh_interpreter():
     )
 
 
-def test_verify_works_when_job_caps_unavailable(monkeypatch):
-    """Graceful degradation: if the job APIs fail (old Windows, unexpected
-    environment) verification must proceed WITHOUT the caps, never break.
-    Simulated by forcing the pre-spawn job creation to report failure (None)."""
+def test_job_caps_unavailable_fails_closed_on_windows_only(monkeypatch):
+    """SP3 review I1: on Windows a missing Job Object means the untrusted code
+    would run with NO memory / process caps, so verification fails CLOSED
+    (``not_verified``, never run) instead of silently degrading. POSIX never
+    has a job (its caps are rlimits), so ``None`` there is the normal path."""
     monkeypatch.setattr(sandbox, "create_job_with_caps", lambda *a, **k: None)
     r = sandbox.verify_python(GOOD_DOUBLE, "21\n", "42")
-    assert r.status == "pass", r
+    if os.name == "nt":
+        assert r.status == "not_verified", r
+        assert "sandbox caps unavailable" in r.note, r
+    else:
+        assert r.status == "pass", r
 
 
 # --- secret-free environment ---------------------------------------------
