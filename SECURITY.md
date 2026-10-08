@@ -3,18 +3,41 @@
 ## Scope and threat model
 
 LeetCoach is a **single-user tool that runs on `localhost`** and drives your own
-authenticated `claude` CLI. It has no accounts, no login, and stores nothing but the
-study notes you generate. It holds no API keys or secrets: it uses your Claude Code
-subscription through the CLI, not an API key.
+authenticated `claude` CLI. It has no accounts and no login. It holds no API keys or
+secrets: it uses your Claude Code subscription through the CLI.
 
-Two parts handle untrusted input, and both are deliberately contained:
+Everything it stores lives under `output/`:
 
-- **Pasted problem text** only ever flows into the prompt (sent to `claude` on stdin,
-  never on the command line) and into filename generation, where a single `slug()`
-  function strips path separators and `..` so a write can never escape `output/`.
+- the study docs you generate;
+- per-problem records (statement, notes, review schedule) and a run log, in the hidden
+  `output/.leetcoach/` folder;
+- the topic index.
+
+These parts handle untrusted input, and each is deliberately contained:
+
+- **Pasted problem text, your own code (Code Review) and follow-up questions** flow only
+  into prompts and into filename generation.
+  - Prompts are sent to `claude` on stdin, never on the command line. The text is fenced
+    with random delimiters generated for each prompt, so it cannot close its own fence.
+  - Filenames go through a single `slug()` function, which strips path separators and
+    `..` so a write can never escape `output/`.
+  - A library path named in a request must resolve inside `output/` and not be
+    dot-prefixed, so the app's metadata is never served or deleted.
 - **Answer / Guided verification** runs the Python solution Claude generated, to check
-  it against the problem's own sample I/O. This runs in a throwaway directory with a
-  secret-free environment, resource caps, and a wall-clock timeout.
+  it against the problem's own sample I/O.
+- **"Test my code" (`POST /attempt/test`)** runs the Python you type in the re-attempt
+  view against the samples and your own cases.
+  - It runs **only** through the same sandbox: there is no other code path that executes
+    submitted code.
+  - Only Python is accepted.
+  - One test runs at a time, and it can be cancelled.
+
+  Both kinds of run use a throwaway directory, a secret-free environment, resource
+  caps, an audit hook and a wall-clock timeout, as described below.
+- **Claude's output** (study docs, follow-up answers, Quick Ask replies) is rendered in
+  the page through a hardened markdown renderer. Model-derived interface elements are
+  built with `textContent`, never `innerHTML`, under a strict CSP (see
+  [Keep it local](#keep-it-local)).
 
 ### The sample-I/O sandbox is a convenience check, not a security boundary
 
@@ -91,14 +114,58 @@ hook can read what you can read. Treat it like running any AI-generated snippet
 locally: don't paste a problem whose generated solution you would not be willing to
 run yourself.
 
+### The `claude` calls are isolated
+
+`claude -p` is a full Claude Code agent by default. It would load your plugins, hooks,
+skills, `CLAUDE.md` and output style, and it could use tools. LeetCoach narrows every
+call (`claude_cli.build_argv`):
+
+- `--safe-mode`, `--tools ""` (no built-in tools), `--strict-mcp-config` (no MCP
+  servers) and a short `--system-prompt` persona in place of the agent prompt.
+  - Each flag is passed only when the installed CLI's cached `claude --help` lists it,
+    so an older CLI still works, just with less isolation.
+  - `--bare` is never passed, because it drops the subscription login.
+- Every call runs in a neutral working directory (`LEETCOACH_CLAUDE_CWD`, by default
+  under `%LOCALAPPDATA%\LeetCoach` or `~/.local/share/leetcoach`), never in this repo.
+  The CLI cannot pick up the repo's `CLAUDE.md`, settings or `.env` from its cwd.
+- **Session persistence.** Study runs (`/run`) keep their session, because a later
+  follow-up resumes it with `claude -p --resume <session_id>`. That session lives in the
+  neutral directory's project bucket, not in your own projects' history. A session id
+  read back from the run log must be a plain token (`[A-Za-z0-9_-]`) before it reaches
+  argv. Utility calls (the classifier, Quick Ask and the follow-up fallback) pass
+  `--no-session-persistence`. The sign-in probe is `claude auth status`, which makes no
+  model call.
+- The prompt goes on stdin. A watchdog kills the whole `claude` process tree on timeout
+  or cancel.
+
 ### Keep it local
 
 The app binds to `127.0.0.1`, has no authentication, and intentionally shows the real
 error text in the browser to make local debugging easy. Every request's `Host` header
 is checked against a loopback allowlist (`127.0.0.1`, `localhost`, `[::1]`) and
 anything else gets a 403, so a malicious web page cannot drive the app through your
-browser via DNS rebinding. Do not expose it to a network or run it as a
-shared/multi-user service.
+browser via DNS rebinding.
+
+Other web hardening:
+
+- **CSP.** Every page response carries `default-src 'none'; script-src 'self';
+  style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self';
+  base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. All scripts, styles and
+  fonts are vendored, with no CDN and no inline script.
+- **No framing.** `frame-ancestors 'none'` and `X-Frame-Options: DENY` stop
+  clickjacking of Run, Delete and the model picker.
+- **Plain-text library files.** `X-Content-Type-Options: nosniff` keeps
+  `/library/file`, which is served as `text/plain`, from being interpreted as HTML.
+- **Same-origin check.** Every unsafe request (POST, PUT, PATCH, DELETE) with an
+  `Origin` header must come from this exact origin, and `Sec-Fetch-Site: cross-site` is
+  refused. `GET /`, which runs the sign-in probe, may be loaded cross-site only by a
+  top-level navigation. JSON routes accept only a JSON object body.
+- **Anki export.** In `GET /flashcards.tsv`, any cell a spreadsheet would read as a
+  formula (starting with `=`, `+`, `-`, `@`, a tab or a line break) is prefixed with `'`.
+  A field holding a tab, a line break or a quote is quoted, so it cannot break the
+  columns.
+
+Do not expose LeetCoach to a network or run it as a shared/multi-user service.
 
 ## Reporting a vulnerability
 
