@@ -845,6 +845,70 @@
     return "";
   }
 
+  // SP7 fix: one save queue per problem's notes, shared by every notes editor
+  // of that problem. One request at a time; text pushed while a save is in
+  // flight waits (only the newest is kept) and is sent when it lands - even if
+  // the editor that pushed it is gone. `send(text, keepalive, done)` must call
+  // done(err) once; `cb(err, savedText)` gets the text actually sent (newer
+  // pushes coalesce). flushNow() (pagehide) sends the waiting text right away
+  // with keepalive: the page will not live to see the in-flight save land.
+  function makeSaveQueue(send) {
+    var active = 0;
+    var next = null;
+    var latest = null;
+    function run(job) {
+      active++;
+      var finished = false;
+      var done = function (err) {
+        if (finished) return;
+        finished = true;
+        active--;
+        job.cbs.forEach(function (cb) { cb(err || null, job.text); });
+        if (!active && next) {
+          var n = next;
+          next = null;
+          run(n);
+        }
+      };
+      try {
+        send(job.text, job.keepalive, done);
+      } catch (e) {
+        done(e || new Error("send failed"));
+      }
+    }
+    return {
+      push: function (text, keepalive, cb) {
+        latest = text;
+        if (next) {
+          next.text = text;
+          next.keepalive = next.keepalive || !!keepalive;
+          if (cb) next.cbs.push(cb);
+          return;
+        }
+        var job = { text: text, keepalive: !!keepalive, cbs: cb ? [cb] : [] };
+        if (active) next = job;
+        else run(job);
+      },
+      flushNow: function () {
+        if (!next) return;
+        var n = next;
+        next = null;
+        n.keepalive = true;
+        run(n);
+      },
+      pending: function () { return active > 0 || !!next; },
+      latest: function () { return latest; },
+    };
+  }
+
+  // The local day the review queue's labels count from: the server's `today`
+  // while it is still that day here, else the local date (a tab left open
+  // past midnight; the caller also re-fetches /review).
+  function reviewToday(review, fetchedDay, now) {
+    var local = dayKey(now || new Date());
+    return review && review.today && fetchedDay === local ? review.today : local;
+  }
+
   // ---- hardened marked renderer (KEEP the policy; moved here for tests) ---------
   // Claude's output is untrusted markdown rendered via innerHTML. marked v12
   // dropped `sanitize`, so raw HTML is escaped (visible as text), links must be
@@ -933,5 +997,7 @@
     indentText: indentText,
     wrapIndex: wrapIndex,
     notesStatus: notesStatus,
+    makeSaveQueue: makeSaveQueue,
+    reviewToday: reviewToday,
   };
 });
