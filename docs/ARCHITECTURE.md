@@ -153,6 +153,7 @@ check. Unsafe methods (POST/PUT/DELETE) also pass the same-origin check.
 | --- | --- | --- |
 | GET | `/` | The single page. It shows the CLI sign-in banner from a cached `claude auth status` probe. |
 | GET | `/healthz` | `{"app": "leetcoach", "version"}`. A second launch uses it to find a running instance. |
+| GET | `/favicon.ico` | The app icon (`static/favicon.svg`), for pages without the `<link rel="icon">` (JSON and plain-text routes). |
 | POST | `/run` | Study run (Answer / Learning / Guided / Code Review) as an SSE stream. |
 | POST | `/run/cancel` | Cancel a run by `run_id`. |
 | POST | `/followup` | Follow-up question on a saved doc, as an SSE stream (see above). |
