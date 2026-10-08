@@ -62,8 +62,10 @@ import classifier
 import claude_cli
 import config
 import parsing
+import problem_store
 import prompts
 import sandbox
+import stats
 import storage
 import topic_index
 
@@ -145,6 +147,10 @@ RUN_SIBLING_EXTENSIONS = (".md", ".py", ".cpp", ".java", ".txt")
 # novel can't balloon the Haiku prompt.
 QUICK_ASK_MAX_QUESTION = 500
 QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
+
+# GET /problems lists these fields of each record (+ run_count).
+PROBLEM_SUMMARY_FIELDS = ("id", "number", "title", "difficulty", "pattern",
+                          "created", "updated", "review")
 
 # Allowlists — never pass an arbitrary string downstream to prompts/storage.
 MODES = ("answer", "learning", "guided")
@@ -615,6 +621,7 @@ def _library_signature(root: Path) -> tuple:
 _VERIFICATION_LINE_RE = re.compile(
     r"(?:^|\n)---\n\n\*\*Verification:\*\*[ \t]*([^\n]+?)[ \t]*(?=\n|$)"
 )
+_SAMPLE_VERDICT_RE = re.compile(r"Sample tests (PASS|FAIL|ERROR)\b")
 _FOLLOW_UP_RE = re.compile(r"^##[ \t]+Follow-up\b", re.MULTILINE | re.IGNORECASE)
 _VERDICT_READ_CAP = 1024 * 1024
 _verdict_cache: dict = {}
@@ -637,10 +644,28 @@ def verdict_from_text(text: str) -> str | None:
     if follow_up is not None:
         text = text[: follow_up.start()]
     matches = _VERIFICATION_LINE_RE.findall(text)
-    m =re.search(r"Sample tests (PASS|FAIL|ERROR)\b", matches[-1])
+    m = _SAMPLE_VERDICT_RE.search(matches[-1])
     if m:
         return m.group(1).lower()
     return "not_verified"
+
+
+def verdict_from_line(line: str | None) -> str | None:
+    """``pass`` / ``fail`` / ``error`` / ``not_verified`` for a
+    :func:`_verification_line`, ``None`` when the run was not verified."""
+    if line is None:
+        return None
+    m = _SAMPLE_VERDICT_RE.search(line)
+    return m.group(1).lower() if m else "not_verified"
+
+
+def _log_index(root: Path) -> dict:
+    """SP6: path -> {verdict, problem_id, difficulty} from the run log;
+    empty (doc fallback everywhere) if the log can't be read."""
+    try:
+        return problem_store.path_index(root=root)
+    except Exception:  # noqa: BLE001 - the listing must never fail on metadata
+        return {}
 
 
 def _md_verdict(path: Path, stat) -> str | None:
@@ -673,6 +698,7 @@ def _library_files(root: Path) -> list[dict]:
         return []
     files = []
     topic_index_file = _topic_index_resolved()
+    log_index = _log_index(root)
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in LIBRARY_EXTENSIONS:
             continue
@@ -687,8 +713,17 @@ def _library_files(root: Path) -> list[dict]:
             "size": stat.st_size,
             "mtime": stat.st_mtime,
         }
-        if path.suffix.lower() == ".md":
-            # SP5 B18: additive - only present when the doc recorded one.
+        logged = log_index.get(entry["path"])
+        if logged is not None:
+            # SP6: the run log is the source of truth for a run it recorded.
+            if logged.get("difficulty"):
+                entry["difficulty"] = logged["difficulty"]
+            if logged.get("problem_id"):
+                entry["problem_id"] = logged["problem_id"]
+            if path.suffix.lower() == ".md" and logged.get("verdict"):
+                entry["verdict"] = logged["verdict"]
+        elif path.suffix.lower() == ".md":
+            # SP5 B18 (legacy files the log never saw): parsed from the doc.
             verdict = _md_verdict(path, stat)
             if verdict:
                 entry["verdict"] = verdict
@@ -1029,6 +1064,33 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"error": "Not found."}), 404
         return jsonify({"deleted": True, "paths": deleted})
 
+    @app.get("/problems")
+    def problems():
+        # SP6 / D1: every problem record, without the (possibly long)
+        # statement; GET /problems/<id> has the full record.
+        listing = []
+        for rec in problem_store.list_problems():
+            item = {k: rec.get(k) for k in PROBLEM_SUMMARY_FIELDS}
+            runs = rec.get("runs")
+            item["run_count"] = len(runs) if isinstance(runs, list) else 0
+            listing.append(item)
+        return jsonify({"problems": listing})
+
+    @app.get("/problems/<pid>")
+    def problem_detail(pid):
+        rec = problem_store.load_problem(pid)  # None for an invalid id too
+        if rec is None:
+            return jsonify({"error": "Not found."}), 404
+        log = [e for e in problem_store.read_runs() if e.get("problem_id") == pid]
+        return jsonify({**rec, "log": log})
+
+    @app.get("/stats")
+    def stats_route():
+        # SP6 / A8: computed from the run log, legacy files (no log entry)
+        # counted per saved run by their own mtime.
+        return jsonify(stats.compute_stats(
+            problem_store.read_runs(), _cached_library_files()))
+
     @app.post("/run")
     def run():
         data, err = _json_object()
@@ -1132,6 +1194,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         full.append(delta)
                         yield _sse_text(delta)
                 yield from _announce_model(call)
+                # SP6: the session id (from system/init or result) goes into
+                # the run log - D6's follow-up resumes it.
+                session_id = getattr(call, "session_id", None)
+                if isinstance(session_id, str) and session_id:
+                    run_meta["session_id"] = session_id
                 state.check()
                 # A stream that ends without producing any text is a failure,
                 # not an empty success (audit P2-1): raising here — one place
@@ -1253,6 +1320,30 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             )
             state.check()  # cancelled while verifying: report that, not a verdict
             return verified
+
+        def _record_run(paths, verification, cls, doc):
+            """SP6 / D1: upsert the problem record and append the run-log
+            line. Best-effort: a metadata failure is logged, never fails a
+            run whose files are already saved. Returns the problem id."""
+            try:
+                return problem_store.record_run(
+                    problem,
+                    mode=mode,
+                    language=language,
+                    tier=None if mode == "learning" else tier,
+                    model=run_meta.get("model") or model or config.model(),
+                    verdict=verdict_from_line(verification),
+                    paths=paths,
+                    session_id=run_meta.get("session_id"),
+                    duration_s=time.monotonic() - started,
+                    pattern=cls.problem_type,
+                    doc=doc,
+                )
+            except Exception:  # noqa: BLE001 - metadata is best-effort
+                app.logger.exception("could not record the run (mode=%s)", mode)
+                return None
+
+        started = time.monotonic()
 
         def event_stream():
             save_warning = None
@@ -1413,6 +1504,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     )
                     _record_topics(cls)
 
+                problem_id = _record_run(paths, verification, cls, out[0])
+
                 # A new artifact just landed under output/ — drop the library
                 # cache so the next /library (the frontend refreshes right after
                 # a run) reflects it even for a nested save the root mtime misses.
@@ -1431,6 +1524,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     done_payload["save_warning"] = save_warning
                 if run_meta.get("model"):
                     done_payload["model"] = run_meta["model"]
+                if problem_id:
+                    done_payload["problem_id"] = problem_id
                 yield _sse_event("done", done_payload)
             except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
                 if state.cancelled:
