@@ -2136,8 +2136,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         # Fall back only when the resume failed BEFORE any text
                         # (session not found, a nonzero exit, a CLI without
                         # --resume). A sign-in / usage-limit failure would hit
-                        # the fresh call too, so it is reported as is.
+                        # the fresh call too, so it is reported as is - and so
+                        # is a watchdog timeout (SP8 fix M4): a second full call
+                        # would double an already maximal wait.
                         if (acc or state.cancelled
+                                or isinstance(exc, claude_cli.ClaudeTimeoutError)
                                 or claude_cli.is_auth_or_limit_error(str(exc))):
                             raise
                         reason = ("unsupported"
