@@ -79,6 +79,9 @@ _MAX_SLUG = 80
 # that only guarded `_resolve_slot` and released before writing would still
 # let two threads resolve to the same free slot before either had written.
 _WRITE_LOCK = threading.Lock()
+# SP8 fix M5: the library's write lock, public so DELETE /library/file can
+# take it too and never race a follow-up append's read-then-write.
+WRITE_LOCK = _WRITE_LOCK
 
 
 def _ascii_form(ch: str) -> str:
