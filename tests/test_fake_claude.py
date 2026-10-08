@@ -442,3 +442,124 @@ def test_seed_has_a_review_doc_and_a_review_queue(tmp_path):
     # Two Sum keeps a statement with a sample, so "Test my code" has a case
     two_sum = problem_store.load_problem("1-two_sum", root=out)
     assert sandbox.parse_samples(two_sum["statement"])
+
+
+# ---- SP8 / D6: follow-ups (--resume) ----------------------------------------
+
+def _followup(flags, question, *, resume=None, doc=None, env=None):
+    prompt = prompts.build_followup(question, doc=doc)
+    handle = claude_cli.run(
+        prompt, runner=_runner(env), flags=flags, model="opus",
+        system_prompt=prompts.FOLLOWUP_SYSTEM_PROMPT,
+        persist_session=resume is not None, resume=resume,
+    )
+    return handle, "".join(handle)
+
+
+def test_help_lists_resume(flags):
+    assert claude_cli.FLAG_RESUME in flags
+
+
+def test_fake_resume_answers_in_the_resumed_session(flags):
+    handle, text = _followup(flags, "Why store the index after the check?",
+                             resume="fake-session-3")
+    assert handle.session_id == "fake-session-3"
+    assert "still have the study note" in text
+    assert "You asked: Why store the index after the check?" in text
+    assert "\n# " not in text and "\n## " not in text  # no H1/H2 in a follow-up
+
+
+def test_fake_fallback_answer_says_it_read_the_note(flags):
+    handle, text = _followup(flags, "Space cost?", doc="# 1. Two Sum\n\nUse a map.\n")
+    assert "read the saved study note" in text
+    assert handle.session_id and handle.session_id != "fake-session-3"
+
+
+def test_fake_noresume_fails_like_a_missing_session(flags):
+    with pytest.raises(claude_cli.ClaudeUnavailableError, match="No conversation found"):
+        _followup(flags, "Why? FAKE_NORESUME", resume="fake-session-3")
+    # the app's fallback call (no --resume) still answers
+    _, text = _followup(flags, "Why? FAKE_NORESUME", doc="# note\n")
+    assert "read the saved study note" in text
+
+
+def test_fake_followup_fail_marker_ends_in_an_error_result(flags):
+    with pytest.raises(claude_cli.ClaudeUnavailableError, match="FAKE_FAIL"):
+        _followup(flags, "Why? FAKE_FAIL", resume="fake-session-3")
+
+
+def test_fake_followup_slow_marker_still_answers(flags):
+    _, text = _followup(flags, "Why? FAKE_SLOW", resume="fake-session-3")
+    assert "You asked: Why? FAKE_SLOW" in text
+
+
+def test_seed_gives_followups_a_session_a_logged_doc_without_one_and_legacy_docs(tmp_path):
+    import problem_store
+
+    run_fake = _load_run_fake()
+    out = tmp_path / "output"
+    run_fake.seed(out)
+    guided = problem_store.session_for_doc("guided/hash_map/1_two_sum.md", root=out)
+    assert claude_cli.SESSION_ID_RE.fullmatch(guided["session_id"])
+    java = problem_store.session_for_doc(
+        "answers/linked_list/reverse_linked_list__normal.md", root=out)
+    assert java is not None and java["session_id"] is None
+    assert problem_store.session_for_doc("guided/stack/20_valid_parentheses.md",
+                                         root=out) is None
+    assert (out / "guided/stack/20_valid_parentheses.md").is_file()
+
+
+@pytest.mark.parametrize("path, question, source, reason", [
+    ("guided/hash_map/1_two_sum.md", "Why a map?", "resume", None),
+    ("guided/hash_map/1_two_sum.md", "Why a map? FAKE_NORESUME", "fallback", "resume_failed"),
+    ("answers/linked_list/reverse_linked_list__normal.md", "Recursion?", "fallback",
+     "no_session"),
+    ("guided/stack/20_valid_parentheses.md", "Why a stack?", "fallback", "no_session"),
+])
+def test_app_followup_on_the_seeded_library(tmp_path, monkeypatch, flags, path, question,
+                                            source, reason):
+    import functools
+
+    from _helpers import parse_sse
+
+    run_fake = _load_run_fake()
+    out = tmp_path / "output"
+    run_fake.seed(out)
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(out))
+    run_fn = functools.partial(claude_cli.run, runner=_runner(), flags=flags)
+    application = app.create_app(
+        run_fn=run_fn,
+        auth_probe=lambda: claude_cli.AuthStatus(installed=True, logged_in=True))
+    before = (out / path).read_text(encoding="utf-8")
+    verdict = app.verdict_from_text(before)
+    body = application.test_client().post(
+        "/followup", json={"path": path, "question": question}).get_data(as_text=True)
+    name, done = parse_sse(body)[1][-1]
+    assert name == "done", done
+    assert done["source"] == source and done.get("reason") == reason
+    after = (out / path).read_text(encoding="utf-8")
+    assert after.startswith(before.rstrip("\n"))
+    assert f"## Follow-up — {question}" in after
+    assert app.verdict_from_text(after) == verdict
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the .cmd shim is Windows-only")
+def test_cmd_shim_resume_through_the_real_runner(monkeypatch, flags):
+    monkeypatch.setenv("LEETCOACH_CLAUDE_BIN", str(DEV / "fake_claude.cmd"))
+    monkeypatch.setenv("FAKE_CLAUDE_PYTHON", sys.executable)
+    monkeypatch.setenv("FAKE_CLAUDE_DELAY", "0")
+    monkeypatch.delenv("FAKE_CLAUDE_FAIL", raising=False)
+    handle = claude_cli.run(
+        prompts.build_followup("Why?"), flags=flags, model="opus",
+        system_prompt=prompts.FOLLOWUP_SYSTEM_PROMPT, persist_session=True,
+        resume="fake-session-7",
+    )
+    assert "still have the study note" in "".join(handle)
+    assert handle.session_id == "fake-session-7"
+    missing = claude_cli.run(
+        prompts.build_followup("Why? FAKE_NORESUME"), flags=flags, model="opus",
+        system_prompt=prompts.FOLLOWUP_SYSTEM_PROMPT, persist_session=True,
+        resume="fake-session-7",
+    )
+    with pytest.raises(claude_cli.ClaudeUnavailableError, match="No conversation found"):
+        list(missing)
