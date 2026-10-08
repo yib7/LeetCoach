@@ -21,13 +21,23 @@ differ.
 
 SSE event protocol (shared by every mode):
     data: "<text delta>"\n\n                 # incremental answer text (json string)
+    event: phase\ndata: {json}\n\n            # progress (SP5 D11), any number:
+        {"phase": "streaming"} | {"phase": "verifying"[, "i": int, "n": int]}
+        | {"phase": "saving"}
+    event: meta\ndata: {"model": str}\n\n    # the concrete model id from the
+                                              # CLI's system/init (SP5), once
     event: done\ndata: {json}\n\n             # terminal success:
         { "problem_type": str, "topics": [str], "paths": [str], "mode": str,
-          "verification": str (Answer/Guided only — the sandbox verdict line) }
+          "verification": str (Answer/Guided only — the sandbox verdict line),
+          "model": str (when the CLI reported one) }
     event: error\ndata: "<message>"\n\n        # terminal failure (json string)
+    : ping\n\n                                # heartbeat comment (C3)
+
+Clients must ignore event names they do not know (phase/meta are additive).
 """
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import os
@@ -317,14 +327,18 @@ def _iter_with_heartbeat(iterable):
                     pass
 
 
-def _call_with_heartbeat(fn, *, on_abandon=None):
+def _call_with_heartbeat(fn, *, on_abandon=None, updates=None):
     """Run the blocking ``fn()`` on a helper thread, yielding ``SSE_PING``
     every ``SSE_PING_INTERVAL`` while it works; ``return`` its result (use
     with ``yield from`` inside an SSE generator) or re-raise its exception.
 
     If the consumer stops early (the client went away: ``GeneratorExit`` at a
     ping), ``on_abandon()`` is called so the work can be stopped instead of
-    running out its clock unobserved (SP4 review M2: the sandbox)."""
+    running out its clock unobserved (SP4 review M2: the sandbox).
+
+    ``updates`` (SP5 D11): an optional ``queue.Queue`` of ready-made SSE
+    frames the work posts while it runs (verification progress); they are
+    yielded as they arrive, and each one also counts as keep-alive."""
     box: dict = {}
     done = threading.Event()
 
@@ -337,9 +351,33 @@ def _call_with_heartbeat(fn, *, on_abandon=None):
             done.set()
 
     threading.Thread(target=work, name="leetcoach-blocking-call", daemon=True).start()
+
+    def drain():
+        while updates is not None:
+            try:
+                yield updates.get_nowait()
+            except queue.Empty:
+                return
+
     try:
-        while not done.wait(SSE_PING_INTERVAL):
-            yield SSE_PING
+        if updates is None:
+            while not done.wait(SSE_PING_INTERVAL):
+                yield SSE_PING
+        else:
+            last = time.monotonic()
+            while True:
+                for frame in drain():
+                    yield frame
+                    last = time.monotonic()
+                if done.is_set():
+                    break
+                wait = SSE_PING_INTERVAL - (time.monotonic() - last)
+                if wait <= 0:
+                    yield SSE_PING
+                    last = time.monotonic()
+                    continue
+                done.wait(min(wait, 0.1))
+            yield from drain()
     finally:
         if not done.is_set() and on_abandon is not None:
             try:
@@ -491,14 +529,29 @@ def _verification_line(result) -> str:
     return f"⚠ not auto-verified ({note})" if note else "⚠ not auto-verified"
 
 
-def _verify_code(code: str, problem: str, language: str, *, cancel=None):
+def _accepts_kwarg(fn, name: str) -> bool:
+    """True if ``fn`` can be called with keyword ``name`` (or **kwargs)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def _verify_code(code: str, problem: str, language: str, *, cancel=None, progress=None):
     """Best-effort sandbox verification of pre-extracted ``code`` (the caller
     extracts exactly once — audit6 P2-13). Returns ``(result, verdict_line)``;
     never raises (a verifier hiccup must not break a run). ``result`` may be
     ``None`` if verification couldn't even start. ``cancel`` (a
-    ``threading.Event``) stops the sandbox early (SP4 review M2)."""
+    ``threading.Event``) stops the sandbox early (SP4 review M2); ``progress``
+    (SP5 D11) is passed on when the verifier accepts it."""
     try:
-        result = sandbox.verify_answer(code, problem, language, cancel=cancel)
+        extra = {}
+        if progress is not None and _accepts_kwarg(sandbox.verify_answer, "progress"):
+            extra["progress"] = progress
+        result = sandbox.verify_answer(code, problem, language, cancel=cancel, **extra)
         return result, _verification_line(result)
     except Exception as exc:  # noqa: BLE001 - verification is strictly best-effort
         return None, f"⚠ not auto-verified (verifier error: {exc})"
@@ -550,6 +603,46 @@ def _library_signature(root: Path) -> tuple:
     return tuple(sorted(sig, key=lambda item: item[0]))
 
 
+# SP5 B18: the sandbox verdict a saved doc recorded in its trailing
+# "**Verification:** <line>" (written by /run for Answer and Guided). Keyed by
+# path + (mtime_ns, size) so an unchanged file is read once per process.
+_VERIFICATION_LINE_RE = re.compile(r"^\*\*Verification:\*\*[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+_VERDICT_READ_CAP = 1024 * 1024
+_verdict_cache: dict = {}
+_verdict_lock = threading.Lock()
+
+
+def verdict_from_text(text: str) -> str | None:
+    """``pass`` / ``fail`` / ``error`` / ``not_verified`` from the LAST
+    ``**Verification:**`` line in ``text``, or ``None`` when it has none
+    (Learning docs, legacy files). Mirrors :func:`_verification_line`."""
+    matches = _VERIFICATION_LINE_RE.findall(text or "")
+    if not matches:
+        return None
+    m = re.search(r"Sample tests (PASS|FAIL|ERROR)\b", matches[-1])
+    if m:
+        return m.group(1).lower()
+    return "not_verified"
+
+
+def _md_verdict(path: Path, stat) -> str | None:
+    key = str(path)
+    sig = (stat.st_mtime_ns, stat.st_size)
+    with _verdict_lock:
+        hit = _verdict_cache.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(_VERDICT_READ_CAP)
+    except OSError:
+        return None
+    verdict = verdict_from_text(raw.decode("utf-8", errors="replace"))
+    with _verdict_lock:
+        _verdict_cache[key] = (sig, verdict)
+    return verdict
+
+
 def _library_files(root: Path) -> list[dict]:
     """The library listing: every allowlisted file under ``root``, as
     ``{"path": <relative, forward slashes>, "size": <bytes>, "mtime": <epoch
@@ -571,11 +664,17 @@ def _library_files(root: Path) -> list[dict]:
             stat = path.stat()
         except OSError:
             continue  # vanished mid-walk — skip, never 500 a listing
-        files.append({
+        entry = {
             "path": path.relative_to(root).as_posix(),
             "size": stat.st_size,
             "mtime": stat.st_mtime,
-        })
+        }
+        if path.suffix.lower() == ".md":
+            # SP5 B18: additive - only present when the doc recorded one.
+            verdict = _md_verdict(path, stat)
+            if verdict:
+                entry["verdict"] = verdict
+        files.append(entry)
     return files
 
 
@@ -693,7 +792,16 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     # only ever by its owner, so a finishing old run can't free a new one's key.
     _inflight_runs: dict = {}
     _runs: dict = {}
+    _asks: dict = {}  # B20: ask_id -> (call, cancelled Event) for /ask/cancel
     _inflight_lock = threading.Lock()
+
+    def _cancel_ask_call(call) -> None:
+        cancel = getattr(call, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001 - cancelling is best-effort
+                app.logger.exception("could not cancel the quick ask call")
 
     def _release_run(run_id: str, state: _RunState) -> None:
         with _inflight_lock:
@@ -973,6 +1081,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             # (in the neutral cwd's project bucket) for a later --resume.
             try:
                 state.check()  # cancelled before the stream even started
+                yield _sse_event("phase", {"phase": "streaming"})
                 call = run_fn(
                     prompt,
                     system_prompt=prompts.TUTOR_SYSTEM_PROMPT,
@@ -983,6 +1092,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 state.add_cancel_hook(lambda: _cancel_call(call, "study call"))
                 # C3: pings keep flowing while Claude thinks in silence.
                 for delta in _iter_with_heartbeat(call):
+                    yield from _announce_model(call)
                     if delta is _HEARTBEAT:
                         yield SSE_PING
                         continue
@@ -990,6 +1100,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     if delta:
                         full.append(delta)
                         yield _sse_text(delta)
+                yield from _announce_model(call)
                 state.check()
                 # A stream that ends without producing any text is a failure,
                 # not an empty success (audit P2-1): raising here — one place
@@ -1006,6 +1117,16 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 out[0] = "".join(full)
 
         out = [""]  # accumulator shared with the helper above
+        run_meta: dict = {}  # SP5: what the client is told about the run
+
+        def _announce_model(call):
+            """SP5 model chip: once the CLI has named the concrete model it
+            runs (``ClaudeRun.model``, from system/init), send it to the
+            client - the picker only knows the alias. Once per run."""
+            model_id = getattr(call, "model", None)
+            if isinstance(model_id, str) and model_id and "model" not in run_meta:
+                run_meta["model"] = model_id
+                yield _sse_event("meta", {"model": model_id})
 
         # A6: the classifier call(s) this run started, so they can be
         # cancelled when the run no longer needs them (bounded join expired,
@@ -1085,9 +1206,19 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             it run out its timeout unobserved."""
             stop = threading.Event()
             state.add_cancel_hook(stop.set)
+            # SP5 D11: "verifying i/n" progress frames ride the heartbeat loop.
+            updates: queue.Queue = queue.Queue()
+
+            def progress(i, n):
+                updates.put(_sse_event("phase", {"phase": "verifying", "i": i, "n": n}))
+
+            yield _sse_event("phase", {"phase": "verifying"})
             verified = yield from _call_with_heartbeat(
-                lambda: _verify_code(code, problem, language, cancel=stop),
+                lambda: _verify_code(
+                    code, problem, language, cancel=stop, progress=progress
+                ),
                 on_abandon=stop.set,
+                updates=updates,
             )
             state.check()  # cancelled while verifying: report that, not a verdict
             return verified
@@ -1177,6 +1308,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         + _verification_detail(result)
                     )
 
+                    yield _sse_event("phase", {"phase": "saving"})  # SP5 D11
                     cls = yield from _classification()  # join before the save
                     state.commit()  # B14 / M1: cancel wins only before this point
 
@@ -1209,6 +1341,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         already_learned_topics=learned or None,
                     )
                     yield from _stream_and_accumulate(prompt)
+                    yield _sse_event("phase", {"phase": "saving"})  # SP5 D11
                     cls = yield from _classification()  # join before the save
                     state.commit()  # B14 / M1: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
@@ -1240,6 +1373,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         body + "\n\n---\n\n**Verification:** " + verdict + "\n"
                         + _verification_detail(result)
                     )
+                    yield _sse_event("phase", {"phase": "saving"})  # SP5 D11
                     cls = yield from _classification()  # join before the save
                     state.commit()  # B14 / M1: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
@@ -1264,6 +1398,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     done_payload["verification"] = verification
                 if save_warning:
                     done_payload["save_warning"] = save_warning
+                if run_meta.get("model"):
+                    done_payload["model"] = run_meta["model"]
                 yield _sse_event("done", done_payload)
             except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
                 if state.cancelled:
@@ -1339,10 +1475,15 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         type_err = _non_string_field_error(
             data,
             (("question", "Question"), ("language", "Language"),
-             ("problem", "Problem")),
+             ("problem", "Problem"), ("ask_id", "Ask id")),
         )
         if type_err:
             return jsonify({"error": type_err}), 400
+        # B20: an optional client id so the page's Cancel (or its 60 s
+        # timeout) can kill the call via POST /ask/cancel.
+        ask_id = data.get("ask_id")
+        if ask_id is not None and not _RUN_ID_RE.fullmatch(ask_id):
+            return jsonify({"error": "Invalid ask id."}), 400
 
         question = (data.get("question") or "").strip()
         language = (data.get("language") or "").strip().lower() or "python"
@@ -1363,23 +1504,55 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             language=language,
             problem=problem[:QUICK_ASK_PROBLEM_CONTEXT_CAP],
         )
+        cancelled = threading.Event()
         try:
-            answer = "".join(
-                run_fn(
-                    prompt,
-                    model=config.quick_ask_model(),
-                    system_prompt=prompts.QUICK_ASK_SYSTEM_PROMPT,
-                    persist_session=False,  # A7: utility call, never resumed
-                )
-            ).strip()
+            call = run_fn(
+                prompt,
+                model=config.quick_ask_model(),
+                system_prompt=prompts.QUICK_ASK_SYSTEM_PROMPT,
+                persist_session=False,  # A7: utility call, never resumed
+            )
+            if ask_id:
+                with _inflight_lock:
+                    _asks[ask_id] = (call, cancelled)
+            try:
+                answer = "".join(call).strip()
+            finally:
+                if ask_id:
+                    with _inflight_lock:
+                        if _asks.get(ask_id, (None,))[0] is call:
+                            del _asks[ask_id]
         except Exception as exc:  # noqa: BLE001 - surface as a clean 502, log the rest
+            if cancelled.is_set():
+                return jsonify({"error": "Quick Ask cancelled."}), 409
             app.logger.exception("quick ask failed")
             return jsonify({"error": f"Quick Ask failed: {exc}"}), 502
+        if cancelled.is_set():
+            return jsonify({"error": "Quick Ask cancelled."}), 409
         if not answer:
             # Same stance as /run's empty-stream guard: no text is a failure,
             # not an empty success.
             return jsonify({"error": "Claude returned an empty answer."}), 502
         return jsonify({"answer": answer})
+
+    @app.post("/ask/cancel")
+    def cancel_ask():
+        # B20: the Quick Ask Cancel button / 60 s client timeout. Kills the
+        # named call's `claude` process so it doesn't run out its watchdog.
+        data, err = _json_object()
+        if err:
+            return err
+        ask_id = data.get("ask_id")
+        if not isinstance(ask_id, str) or not _RUN_ID_RE.fullmatch(ask_id):
+            return jsonify({"error": "A valid ask_id is required."}), 400
+        with _inflight_lock:
+            entry = _asks.get(ask_id)
+        if entry is None:
+            return jsonify({"cancelled": False}), 404
+        call, flag = entry
+        flag.set()
+        _cancel_ask_call(call)
+        return jsonify({"cancelled": True})
 
     return app
 

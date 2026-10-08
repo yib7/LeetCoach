@@ -235,6 +235,9 @@ class ClaudeRun:
     * ``session_id`` - captured from the stream-json ``system``/``result``
       events (``None`` until seen, or if the CLI never reports one); stored by
       later phases so a follow-up can ``--resume`` the study session.
+    * ``model`` - the concrete model id the CLI reports in its ``system/init``
+      event (e.g. ``claude-opus-5-5`` when ``--model opus`` was passed), or
+      ``None`` until seen. Display only (SP5 model chip).
     * ``cancel()`` - thread-safe: kills the `claude` process tree from ANY
       thread (a generator's ``close()`` cannot be called while another thread
       is blocked inside it). The blocked reader then sees end-of-stream and
@@ -243,6 +246,7 @@ class ClaudeRun:
 
     def __init__(self) -> None:
         self.session_id: Optional[str] = None
+        self.model: Optional[str] = None
         self._lock = threading.Lock()
         self._cancelled = False
         self._killer: Optional[Callable[[], None]] = None
@@ -1059,6 +1063,18 @@ def _iter_text_deltas(
             if state is not None and isinstance(sid, str) and sid:
                 if kind in ("system", "result") or state.session_id is None:
                     state.session_id = sid
+
+            # SP5: the concrete model id behind an alias (system/init first;
+            # an assistant message's own `model` only if init never said).
+            if state is not None:
+                if kind == "system" and obj.get("subtype") == "init":
+                    model = obj.get("model")
+                    if isinstance(model, str) and model.strip():
+                        state.model = model.strip()
+                elif kind == "assistant" and state.model is None:
+                    model = _as_dict(obj.get("message")).get("model")
+                    if isinstance(model, str) and model.strip():
+                        state.model = model.strip()
 
             if kind == "stream_event":
                 event = _as_dict(obj.get("event"))

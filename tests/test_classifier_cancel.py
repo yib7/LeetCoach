@@ -105,6 +105,8 @@ def test_client_disconnect_cancels_the_classifier_call(tmp_path, monkeypatch):
         resp = client.post("/run", json=RUN_PAYLOAD, buffered=False)
         chunks = iter(resp.response)
         first = next(chunks)
+        while first.startswith(b"event: phase"):  # SP5 progress frames come first
+            first = next(chunks)
         assert b"first chunk" in first
         release.set()
         resp.close()  # the browser went away: Flask closes the generator
