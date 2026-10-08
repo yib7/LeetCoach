@@ -28,6 +28,7 @@ SSE event protocol (shared by every mode):
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import socket
@@ -57,7 +58,17 @@ def _maybe_load_dotenv(path: Path) -> None:
     """
     if os.environ.get("LEETCOACH_NO_DOTENV", "").strip().lower() in {"1", "true", "yes"}:
         return
-    load_dotenv(path)
+    # B12: decode it ourselves (UTF-8 with/without BOM, UTF-16 as written by
+    # Windows PowerShell) - python-dotenv assumes plain UTF-8, so a UTF-16
+    # .env crashed the boot and a BOM corrupted the first key. A file that
+    # still can't be read is skipped with a warning, never a crash.
+    try:
+        text = config.read_env_text(path)
+    except (OSError, ValueError) as exc:
+        print(f"WARNING: could not read {path} ({exc}); ignoring it.")
+        return
+    if text:
+        load_dotenv(stream=io.StringIO(text))
 
 
 # Load .env from the project root (next to this file) if present, so LEETCOACH_*
@@ -472,7 +483,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"error": "Unknown model."}), 400
         try:
             config.upsert_env_var(app.config["DOTENV_PATH"], "LEETCOACH_MODEL", alias)
-        except OSError:
+        except (OSError, ValueError):
+            # B12: an unreadable/undecodable .env aborts the upsert (the file
+            # is left untouched) instead of being wiped.
+            app.logger.exception("could not persist the model choice")
             return jsonify({"error": "Could not save the model setting."}), 500
         os.environ["LEETCOACH_MODEL"] = alias
         return jsonify({"ok": True, "model": alias})
@@ -530,7 +544,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         type_err = _non_string_field_error(
             data,
             (("problem", "Problem"), ("mode", "Mode"),
-             ("language", "Language"), ("tier", "Tier")),
+             ("language", "Language"), ("tier", "Tier"), ("model", "Model")),
         )
         if type_err:
             return jsonify({"error": type_err}), 400
@@ -539,6 +553,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         mode = (data.get("mode") or "").strip().lower()
         language = (data.get("language") or "").strip().lower()
         tier = (data.get("tier") or "").strip().lower()
+        # B12: an optional per-run model (the picker sends it with every run,
+        # so two tabs no longer share one global choice). Allowlisted because
+        # it becomes a `--model` argv token; absent/empty -> config default.
+        model = (data.get("model") or "").strip().lower()
+        if model and model not in config.ALLOWED_MODEL_ALIASES:
+            return jsonify({"error": f"Unknown model {model!r}."}), 400
 
         # --- validation (reject unknown values up front, before any Claude call)
         if not problem:
@@ -553,7 +573,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
         # De-dup identical in-flight runs (P2-12). Register atomically after
         # validation; an exact duplicate that's still streaming gets a 409.
-        run_key = (problem, mode, language, tier)
+        run_key = (problem, mode, language, tier, model)
+        study_kwargs = {"model": model} if model else {}
         with _inflight_lock:
             if run_key in _inflight_runs:
                 return jsonify(
@@ -584,6 +605,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     prompt,
                     system_prompt=prompts.TUTOR_SYSTEM_PROMPT,
                     persist_session=True,
+                    **study_kwargs,
                 ):
                     if delta:
                         full.append(delta)

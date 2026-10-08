@@ -38,9 +38,12 @@ environment without re-importing the module.
 """
 from __future__ import annotations
 
+import codecs
 import math
 import os
 from pathlib import Path
+
+import fsutil
 
 # Defaults live here so they are documented in one place and referenced by name.
 # An alias (not a pinned id): the CLI resolves it to the newest Opus, so the
@@ -270,29 +273,60 @@ def _env_line_key(line: str) -> str | None:
     return key.strip() if sep else None
 
 
+def _decode_env_bytes(data: bytes) -> str:
+    """Decode ``.env`` bytes (B12): UTF-8 (with or without a BOM) or UTF-16
+    (BOM, or BOM-less LE/BE detected by its NUL pattern - what Windows
+    PowerShell 5.1 ``Out-File``/``>`` produce). Raises ``UnicodeDecodeError``
+    (a ``ValueError``) for anything else rather than guessing."""
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16")
+    if data.startswith(codecs.BOM_UTF8):
+        return data.decode("utf-8-sig")
+    if bytes(1) in data and len(data) % 2 == 0:
+        if data[1::2].count(0) * 2 >= len(data) // 2:
+            return data.decode("utf-16-le")
+        if data[0::2].count(0) * 2 >= len(data) // 2:
+            return data.decode("utf-16-be")
+    return data.decode("utf-8")
+
+
+def read_env_text(path) -> str:
+    """The text of the dotenv file at ``path``, decoded per
+    :func:`_decode_env_bytes`; ``""`` when it does not exist. Any other
+    ``OSError`` and any decode error propagate - callers must not mistake an
+    unreadable file for an empty one (B12: that used to wipe ``.env``)."""
+    try:
+        data = Path(path).read_bytes()
+    except FileNotFoundError:
+        return ""
+    return _decode_env_bytes(data)
+
+
 def upsert_env_var(path, key: str, value: str) -> None:
     """Set ``key=value`` in the dotenv file at ``path``, in place.
 
-    Replaces the first existing assignment to ``key`` (preserving every other
-    line, comment, and blank), or appends the assignment when the key is absent.
-    Creates the file if it does not exist. This is how the in-app model picker
-    persists ``LEETCOACH_MODEL`` so the choice survives a restart. Pure I/O on
-    the given path — the live process env is updated separately by the caller.
+    Replaces EVERY existing assignment to ``key`` (dotenv is last-wins, so a
+    stale duplicate would otherwise override the choice), preserving every
+    other line, comment, and blank, or appends the assignment when the key is
+    absent. Creates the file if it does not exist. This is how the in-app
+    model picker persists ``LEETCOACH_MODEL`` so the choice survives a restart.
+
+    B12 robustness: a UTF-8 BOM or UTF-16 file is read correctly and written
+    back as plain UTF-8 (what python-dotenv reads at boot); a read or decode
+    error ABORTS (raises ``OSError`` / ``ValueError``) instead of treating the
+    file as empty and wiping it; the write is atomic (:mod:`fsutil`). Pure I/O
+    on the given path - the live process env is updated by the caller.
     """
-    p = Path(path)
-    try:
-        lines = p.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        lines = []
+    lines = read_env_text(path).splitlines()
     new_line = f"{key}={value}"
     out: list[str] = []
     replaced = False
     for line in lines:
-        if not replaced and _env_line_key(line) == key:
+        if _env_line_key(line) == key:
             out.append(new_line)
             replaced = True
         else:
             out.append(line)
     if not replaced:
         out.append(new_line)
-    p.write_text("\n".join(out) + "\n", encoding="utf-8")
+    fsutil.atomic_write_text(path, "\n".join(out) + "\n")

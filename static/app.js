@@ -16,7 +16,7 @@
  *    writes — render() never touches it.
  *  - Code-block chrome + hljs are per-frame post-render passes over #output.
  *    Copy is handled by ONE delegated click listener added once at init.
- *  - /run request body stays { problem, mode, language, tier }.
+ *  - /run request body is { problem, mode, language, tier, model? }.
  */
 (function () {
   "use strict";
@@ -724,8 +724,12 @@
     var language = activeVal("lang");
     var tierDisabled = mode === "learning";
     var tier = tierDisabled ? "" : activeVal("tier");
-    // Wire contract — unchanged: { problem, mode, language, tier }.
+    // Wire contract: { problem, mode, language, tier, model? }. The model is
+    // sent per run (B12) so each tab runs on the model it shows, not on a
+    // global default another tab may have changed.
     var body = { problem: problem, mode: mode, language: language, tier: tier };
+    var model = activeVal("model");
+    if (model) body.model = model;
     var meta = { mode: mode, language: language, tier: tier };
 
     acc = "";

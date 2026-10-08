@@ -106,3 +106,92 @@ def test_upsert_tolerates_export_prefix(tmp_path):
     lines = env.read_text(encoding="utf-8").splitlines()
     # the export-prefixed assignment is recognised and replaced (not duplicated)
     assert lines == ["LEETCOACH_MODEL=haiku"]
+
+
+# --- B12: robust .env upsert ------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+def test_upsert_handles_utf8_bom_without_duplicating_the_first_key(tmp_path):
+    env = tmp_path / ".env"
+    env.write_bytes(b"\xef\xbb\xbfLEETCOACH_MODEL=opus\nOTHER=1\n")
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "haiku")
+    raw = env.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")  # written back as plain UTF-8
+    assert raw.decode("utf-8").splitlines() == ["LEETCOACH_MODEL=haiku", "OTHER=1"]
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_upsert_reads_utf16_files(tmp_path, encoding):
+    env = tmp_path / ".env"
+    env.write_bytes("# picked\nLEETCOACH_MODEL=opus\n".encode(encoding))
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "sonnet")
+    # rewritten as UTF-8 so python-dotenv (UTF-8) can read it at boot
+    assert env.read_bytes().decode("utf-8").splitlines() == ["# picked", "LEETCOACH_MODEL=sonnet"]
+
+
+def test_upsert_replaces_every_duplicate_assignment(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("LEETCOACH_MODEL=opus\nX=1\nLEETCOACH_MODEL=haiku\n", encoding="utf-8")
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "fable")
+    lines = env.read_text(encoding="utf-8").splitlines()
+    # no stale later assignment can override the choice (dotenv is last-wins)
+    assert lines == ["LEETCOACH_MODEL=fable", "X=1", "LEETCOACH_MODEL=fable"]
+
+
+def test_upsert_aborts_on_read_error_and_leaves_the_file_alone(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    env = tmp_path / ".env"
+    env.write_text("KEEP=me\n", encoding="utf-8")
+    real_read_bytes = Path.read_bytes
+
+    def locked(self):
+        if self == env:
+            raise PermissionError(13, "locked")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", locked)
+    with pytest.raises(OSError):
+        config.upsert_env_var(env, "LEETCOACH_MODEL", "opus")
+    monkeypatch.undo()
+    assert env.read_text(encoding="utf-8") == "KEEP=me\n"  # not wiped
+
+
+def test_upsert_aborts_on_undecodable_file(tmp_path):
+    env = tmp_path / ".env"
+    original = b"KEEP=\xff\xfe\xfa broken\n"
+    env.write_bytes(original)
+    with pytest.raises(ValueError):
+        config.upsert_env_var(env, "LEETCOACH_MODEL", "opus")
+    assert env.read_bytes() == original
+
+
+def test_upsert_writes_atomically(tmp_path, monkeypatch):
+    import fsutil
+
+    seen = []
+    real = fsutil.atomic_write_text
+    monkeypatch.setattr(
+        fsutil, "atomic_write_text",
+        lambda p, t, **kw: (seen.append(str(p)), real(p, t, **kw))[1],
+    )
+    env = tmp_path / ".env"
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "opus")
+    assert seen == [str(env)]
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (b"\xef\xbb\xbfA=1\n", "A=1\n"),
+    ("A=1\n".encode("utf-16"), "A=1\n"),
+    (b"A=caf\xc3\xa9\n", "A=café\n"),
+])
+def test_read_env_text_decodes_bom_and_utf16(tmp_path, raw, expected):
+    env = tmp_path / ".env"
+    env.write_bytes(raw)
+    assert config.read_env_text(env).replace("\r\n", "\n") == expected
+
+
+def test_read_env_text_missing_file_is_empty(tmp_path):
+    assert config.read_env_text(tmp_path / "nope.env") == ""

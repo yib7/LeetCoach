@@ -85,3 +85,26 @@ def test_suite_env_isolation_sets_no_dotenv_and_private_output_dir():
 
     assert os.environ.get("LEETCOACH_NO_DOTENV") == "1"
     assert "leetcoach-output" in os.environ.get("LEETCOACH_OUTPUT_DIR", "")
+
+
+# --- B12: a UTF-16 / BOM .env must not crash the boot ------------------------
+
+def test_maybe_load_dotenv_reads_utf16_and_bom_files(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.delenv("LEETCOACH_NO_DOTENV", raising=False)
+    for raw in ("LEETCOACH_SENTINEL_B12=ok\n".encode("utf-16"),
+                b"\xef\xbb\xbfLEETCOACH_SENTINEL_B12=ok\n"):
+        envfile = tmp_path / ".env"
+        envfile.write_bytes(raw)
+        monkeypatch.delenv("LEETCOACH_SENTINEL_B12", raising=False)
+        app_module._maybe_load_dotenv(envfile)
+        assert os.environ.get("LEETCOACH_SENTINEL_B12") == "ok"
+    monkeypatch.delenv("LEETCOACH_SENTINEL_B12", raising=False)
+
+
+def test_maybe_load_dotenv_survives_an_undecodable_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("LEETCOACH_NO_DOTENV", raising=False)
+    envfile = tmp_path / ".env"
+    envfile.write_bytes(b"A=\xff\xfe\xfa\n")
+    app_module._maybe_load_dotenv(envfile)  # must not raise
