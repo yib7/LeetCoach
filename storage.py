@@ -136,12 +136,6 @@ def _problem_name(problem: str) -> str:
     return slug(problem)
 
 
-def _ensure_dir(path: Path) -> Path:
-    """Create ``path`` (a directory) and its parents; return it."""
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _same_content(path: Path, body: str) -> bool:
     """True iff ``path`` already holds exactly ``body`` (UTF-8 text).
 
