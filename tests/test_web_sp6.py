@@ -227,3 +227,21 @@ def test_stats_on_an_empty_library(out):
     s = _client(_run_fn()).get("/stats").get_json()
     assert s["total"] == 0 and s["currentStreak"] == 0
 
+
+# --- D2: the parsed paste feeds the doc contract --------------------------------------
+
+@pytest.mark.parametrize("mode", ["answer", "learning", "guided"])
+def test_study_prompt_carries_the_parsed_number_and_difficulty(out, mode):
+    seen = []
+
+    def run_fn(prompt, **kwargs):
+        if "Classify the following" in prompt:
+            return iter(['{"problem_type": "hash_map", "topics": []}'])
+        seen.append(prompt)
+        return Call([DOC])
+
+    _run(_client(run_fn), mode=mode)
+    [prompt] = seen
+    assert "OUTPUT CONTRACT" in prompt
+    assert "`# 1. <Title>`" in prompt
+    assert "`Difficulty: Easy`" in prompt
