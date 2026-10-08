@@ -79,3 +79,96 @@ def test_run_cases_strips_the_run_dir_from_stderr_and_notes():
     assert out["cases"][0]["stderr"] == (
         'Traceback (most recent call last):\n'
         '  File "solution.py", line 2, in <module>\nValueError: boom')
+
+
+# --- 6: a cancelled test frees the slot promptly ---------------------------------------
+
+PASTE = (
+    "1. Two Sum\nEasy\n\nGiven nums.\n\n"
+    "Example 1:\nInput: nums = [2,7,11,15], target = 9\nOutput: [0,1]\n"
+)
+
+
+@pytest.fixture
+def root(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(out))
+    return out
+
+
+@pytest.fixture
+def application(root):
+    def no_claude(*a, **k):  # pragma: no cover - must never be called
+        raise AssertionError("no Claude call expected")
+
+    application = app_module.create_app(
+        run_fn=no_claude,
+        auth_probe=lambda: claude_cli.AuthStatus(installed=True, logged_in=True))
+    application.config.update(TESTING=True)
+    return application
+
+
+def _seed(root, paste=PASTE):
+    return ps.record_run(
+        paste, mode="answer", language="python", tier="normal", model="m", verdict="pass",
+        paths=[root / "answers/hash_map/two_sum__normal.md"], session_id=None,
+        duration_s=1.0, pattern="hash_map", root=root)
+
+
+def _body(pid, test_id):
+    return {"problem_id": pid, "code": "print(1)", "language": "python", "test_id": test_id}
+
+
+def test_a_new_test_waits_for_a_cancelled_run_instead_of_409(application, root, monkeypatch):
+    pid = _seed(root)
+    started = threading.Event()
+
+    def slow_run_cases(code, cases, *, problem_text="", cancel=None, **kw):
+        if started.is_set():  # the second run: instant
+            return {"status": "pass", "cases": []}
+        started.set()
+        cancel.wait(10)
+        time.sleep(0.4)  # the sandbox takes a moment to kill and clean up
+        return {"status": "not_verified", "cases": []}
+
+    monkeypatch.setattr(practice, "run_cases", slow_run_cases)
+    box = {}
+
+    def first():
+        with application.test_client() as c:
+            box["resp"] = c.post("/attempt/test", json=_body(pid, "t-1"))
+
+    t = threading.Thread(target=first)
+    t.start()
+    assert started.wait(5)
+    client = application.test_client()
+    assert client.post("/attempt/cancel", json={"test_id": "t-1"}).get_json() == {
+        "cancelled": True}
+    resp = client.post("/attempt/test", json=_body(pid, "t-2"))
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["status"] == "pass"
+    t.join(10)
+    assert box["resp"].get_json()["cancelled"] is True
+
+
+def test_a_running_uncancelled_test_still_gives_409(application, root, monkeypatch):
+    pid = _seed(root)
+    started, release = threading.Event(), threading.Event()
+
+    def slow_run_cases(code, cases, *, problem_text="", cancel=None, **kw):
+        started.set()
+        release.wait(10)
+        return {"status": "pass", "cases": []}
+
+    monkeypatch.setattr(practice, "run_cases", slow_run_cases)
+    t = threading.Thread(target=lambda: application.test_client().post(
+        "/attempt/test", json=_body(pid, "t-1")))
+    t.start()
+    assert started.wait(5)
+    t0 = time.monotonic()
+    resp = application.test_client().post("/attempt/test", json=_body(pid, "t-2"))
+    assert resp.status_code == 409
+    assert time.monotonic() - t0 < 1  # no waiting on a run nobody cancelled
+    release.set()
+    t.join(10)

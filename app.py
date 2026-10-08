@@ -150,6 +150,11 @@ RUN_SIBLING_EXTENSIONS = (".md", ".py", ".cpp", ".java", ".txt")
 QUICK_ASK_MAX_QUESTION = 500
 QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
 
+# SP7 fix 6: how long a new "Test my code" waits for a CANCELLED test to
+# release the one-at-a-time slot (the sandbox kills its child within a poll
+# tick; this only bounds a pathological cleanup).
+ATTEMPT_CANCEL_GRACE_S = 10.0
+
 # GET /problems lists these fields of each record - everything but the
 # (possibly long) statement and notes - plus ``run_count`` (saved runs: the
 # run-log entries of the problem, merged aliases included) and ``file_count``
@@ -909,6 +914,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     _asks: dict = {}  # B20: ask_id -> [call or None, cancelled Event] for /ask/cancel
     _attempts: dict = {}  # SP7: test_id -> cancel Event for /attempt/cancel
     _attempt_slot = threading.Lock()  # SP7: one "Test my code" run at a time
+    # SP7 fix 6: the running test's cancel Event. A test cancelled (e.g. the
+    # learner opened another problem) still holds the slot while the sandbox
+    # kills its child, so the next test waits briefly for it instead of 409.
+    _attempt_running: dict = {"cancel": None}
     _inflight_lock = threading.Lock()
 
     def _cancel_ask_call(call) -> None:
@@ -1242,19 +1251,27 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         if not cases:
             return jsonify({"error": "No test cases: the saved statement has no sample "
                             "Input/Output - add a case of your own."}), 400
-        if not _attempt_slot.acquire(blocking=False):
+        acquired = _attempt_slot.acquire(blocking=False)
+        if not acquired:
+            with _inflight_lock:
+                running = _attempt_running["cancel"]
+            if running is not None and running.is_set():
+                acquired = _attempt_slot.acquire(timeout=ATTEMPT_CANCEL_GRACE_S)
+        if not acquired:
             return jsonify({"error": "A test run is already in progress."}), 409
         cancel = threading.Event()
         try:
-            if test_id:
-                with _inflight_lock:
+            with _inflight_lock:
+                _attempt_running["cancel"] = cancel
+                if test_id:
                     _attempts[test_id] = cancel
             result = practice.run_cases(code, cases, problem_text=statement, cancel=cancel)
         finally:
-            if test_id:
-                with _inflight_lock:
-                    if _attempts.get(test_id) is cancel:
-                        del _attempts[test_id]
+            with _inflight_lock:
+                if test_id and _attempts.get(test_id) is cancel:
+                    del _attempts[test_id]
+                if _attempt_running["cancel"] is cancel:
+                    _attempt_running["cancel"] = None
             _attempt_slot.release()
         if cancel.is_set():
             result["cancelled"] = True
