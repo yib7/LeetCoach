@@ -972,26 +972,26 @@ def test_exit_note_falls_back_to_the_exit_code():
     ) == "blocked by sandbox (socket.connect)"
 
 
-def test_asyncio_run_works_under_the_audit_hook():
-    """Minor 2: Windows' Proactor loop builds its self-pipe with
-    ``socket.socketpair()`` (bind to 127.0.0.1:0 + connect to that same
-    listener); that one shape is allowed, so ``asyncio.run`` works."""
+@pytest.mark.skipif(os.name != "nt", reason="POSIX asyncio uses a native socketpair (no bind)")
+def test_asyncio_run_is_reported_as_blocked_by_the_sandbox():
+    """SP3 (allowance dropped): Windows' Proactor loop builds its self-pipe
+    with ``socket.socketpair()``, which binds a loopback socket. Every bind is
+    refused, so ``asyncio.run`` is unavailable in the sandbox and the run
+    reads as blocked, not as a bare exit code."""
     code = (
-        "import asyncio, socket\n"
+        "import asyncio\n"
         "async def main():\n"
-        "    await asyncio.sleep(0)\n"
         "    return 5\n"
-        "a, b = socket.socketpair()\n"
-        "a.sendall(b'hi')\n"
-        "print(asyncio.run(main()), b.recv(2).decode())\n"
+        "print(asyncio.run(main()))\n"
     )
-    r = sandbox.verify_python(code, "", "5 hi")
-    assert r.status == "pass", r
+    r = sandbox.verify_python(code, "", "5")
+    assert r.status == "error", r
+    assert r.note == "blocked by sandbox (socket.bind)", r
 
 
 def test_a_loopback_service_the_solution_does_not_own_is_still_unreachable():
-    """Minor 2 scoping: the socketpair allowance never lets a solution reach
-    another local service (e.g. this app on 127.0.0.1)."""
+    """A solution can never reach another local service (e.g. this app on
+    127.0.0.1): every connect is refused."""
     import socket
 
     with socket.socket() as listener:
@@ -1012,9 +1012,12 @@ def test_a_loopback_service_the_solution_does_not_own_is_still_unreachable():
         "import socket\nsocket.socket().bind(('127.0.0.1', 50999))",
         "import socket\nsocket.socket().bind(('0.0.0.0', 0))",
         "import socket\nsocket.socket().bind(('', 0))",
+        # The old asyncio socketpair allowance (ephemeral loopback port) is gone.
+        "import socket\nsocket.socket().bind(('127.0.0.1', 0))",
+        "import socket\nsocket.socket(socket.AF_INET6).bind(('::1', 0))",
     ],
 )
-def test_binding_anything_but_an_ephemeral_loopback_port_is_blocked(body):
+def test_every_bind_is_blocked(body):
     r = _run_probe(body)
     assert r.status == "pass", r
 
@@ -1065,9 +1068,9 @@ def test_sqlite_uri_helper_is_gone():
 
 def test_a_udp_bind_does_not_unlock_a_tcp_connect_to_a_foreign_listener(tmp_path, monkeypatch):
     """I-1 (the reviewer's repro): a UDP socket bound to 127.0.0.1:0 lands on
-    port P; a foreign TCP service then listens on P. The socketpair allowance
-    must not let the solution TCP-connect to it (the UDP and TCP port spaces
-    are separate, so "a listener of this process on P" proves nothing)."""
+    port P; a foreign TCP service then listens on P. The solution must not
+    TCP-connect to it. (Every bind and connect is refused now; kept as a
+    regression guard.)"""
     import socket
 
     dirs = _record_run_dirs(monkeypatch)
@@ -1124,35 +1127,76 @@ def test_a_udp_bind_does_not_unlock_a_tcp_connect_to_a_foreign_listener(tmp_path
     assert received == [], received
 
 
-def test_the_socketpair_allowance_is_single_use_stream_only_and_needs_a_listener():
-    """I-1: the connect half must be a socket of the SAME family and type as
-    this process's own listening socket, and the allowance is spent by the
-    first matching connect."""
-    code = (
-        "import socket\n"
-        "def attempt(fn):\n"
-        "    try:\n"
-        "        fn()\n"
-        "        return 'ok'\n"
-        "    except PermissionError as e:\n"
-        "        return 'blocked' if 'LeetCoach sandbox' in str(e) else 'other'\n"
-        "    except OSError:\n"
-        "        return 'oserror'\n"
-        "l = socket.socket(); l.bind(('127.0.0.1', 0)); l.listen(4)\n"
-        "addr = l.getsockname()\n"
-        "u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
-        "udp = attempt(lambda: u.connect(addr))\n"
-        "a = socket.socket()\n"
-        "first = attempt(lambda: a.connect(addr))\n"
-        "b = socket.socket(); b.settimeout(2)\n"
-        "second = attempt(lambda: b.connect(addr))\n"
-        "n = socket.socket(); n.bind(('127.0.0.1', 0))\n"
-        "d = socket.socket(); d.settimeout(2)\n"
-        "unlistened = attempt(lambda: d.connect(n.getsockname()))\n"
-        "print(udp, first, second, unlistened)\n"
-    )
-    r = sandbox.verify_python(code, "", "blocked ok blocked blocked")
+def test_a_socket_subclass_cannot_fake_its_way_to_a_foreign_listener():
+    """SP3 review round 3 (the reviewer's repro): a ``socket.socket``
+    subclass overrides ``getsockname`` / ``family`` / ``type`` so a Python-
+    level check would take a foreign loopback service for "this process's own
+    listener". The hook consults none of that: the bind, the subclass
+    connect, a plain connect and a UDP sendto are all refused, and the
+    foreign listener receives nothing."""
+    import socket
+
+    received: list = []
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        code = (
+            "import socket\n"
+            "def attempt(fn):\n"
+            "    try:\n"
+            "        fn()\n"
+            "        return 'ok'\n"
+            "    except PermissionError as e:\n"
+            "        return 'blocked' if 'LeetCoach sandbox' in str(e) else 'other'\n"
+            "    except OSError:\n"
+            "        return 'oserror'\n"
+            f"FOREIGN = ('127.0.0.1', {port})\n"
+            "class L(socket.socket):\n"
+            "    def getsockname(self):\n"
+            "        return FOREIGN\n"
+            "    family = property(lambda self: socket.AF_INET)\n"
+            "    type = property(lambda self: socket.SOCK_STREAM)\n"
+            "    def getsockopt(self, *a):\n"
+            "        return 1\n"
+            "l = L()\n"
+            "bound = attempt(lambda: l.bind(('127.0.0.1', 0)))\n"
+            "attempt(lambda: l.listen(1))\n"
+            "c = L(); c.settimeout(2)\n"
+            "sub = attempt(lambda: c.connect(FOREIGN))\n"
+            "p = socket.socket(); p.settimeout(2)\n"
+            "plain = attempt(lambda: p.connect(FOREIGN))\n"
+            "u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+            "udp = attempt(lambda: u.sendto(b'X', FOREIGN))\n"
+            "print(bound, sub, plain, udp)\n"
+        )
+        r = sandbox.verify_python(code, "", "blocked blocked blocked blocked")
+        srv.settimeout(0.5)
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            pass
+        else:
+            with conn:
+                conn.settimeout(0.5)
+                try:
+                    received.append(conn.recv(16))
+                except OSError:
+                    received.append(b"<connected>")
     assert r.status == "pass", r
+    assert received == [], received
+
+
+def test_the_socketpair_allowance_is_gone():
+    """SP3: no listener tracking, no loopback special case; bind and connect
+    are refused outright like the other network events."""
+    import sandbox_bootstrap
+
+    assert not hasattr(sandbox_bootstrap, "_LOOPBACK")
+    assert not hasattr(sandbox_bootstrap, "_socket_mod")
+    for event in ("socket.bind", "socket.connect", "socket.sendto", "socket.sendmsg",
+                  "socket.getaddrinfo"):
+        assert event in sandbox_bootstrap._ALWAYS_BLOCKED, event
 
 
 def test_a_udp_bind_is_refused():
@@ -1268,6 +1312,42 @@ def test_exit_note_only_reads_the_final_exception_line():
     )
     assert sandbox._exit_note(1, chained) == "exited with code 1"
     assert sandbox._exit_note(1, "") == "exited with code 1"
+
+
+_HEADER = "Traceback (most recent call last):\n"
+_SHUTDOWN_NOISE = (
+    "<sys>:0: RuntimeWarning: coroutine 'main' was never awaited\n"
+    "RuntimeWarning: Enable tracemalloc to get the object allocation traceback\n"
+    "Exception ignored while calling deallocator <function BaseEventLoop.__del__>:\n"
+    + _HEADER +
+    '  File "base_events.py", line 761, in __del__\n'
+    "    self.close()\n"
+    "AttributeError: 'ProactorEventLoop' object has no attribute '_ssock'\n"
+)
+
+
+def test_exit_note_skips_shutdown_noise_after_the_uncaught_traceback():
+    """SP3 (asyncio blocked): a half-built object's ``__del__`` can print an
+    "Exception ignored" traceback (and warnings) AFTER the solution's own
+    uncaught one; the note still comes from the uncaught exception."""
+    blocked = "PermissionError: LeetCoach sandbox: socket.bind is blocked\n"
+    frames = '  File "solution.py", line 4, in <module>\n    print(asyncio.run(main()))\n'
+    assert sandbox._exit_note(1, _HEADER + frames + blocked + _SHUTDOWN_NOISE) == (
+        "blocked by sandbox (socket.bind)"
+    )
+    # M-2 still holds: a caught-and-replaced sandbox error is not blamed.
+    chained = (
+        _HEADER + frames + blocked + "\nDuring handling of the above exception, "
+        "another exception occurred:\n\n" + _HEADER + frames + "IndexError: mine\n"
+    )
+    assert sandbox._exit_note(1, chained + _SHUTDOWN_NOISE) == "exited with code 1"
+    # And a sandbox error inside an ignored __del__ never names the run.
+    ignored = (
+        "Exception ignored in: <function X.__del__>\n" + _HEADER + frames + blocked
+    )
+    assert sandbox._exit_note(1, _HEADER + frames + "ValueError: boom\n" + ignored) == (
+        "exited with code 1"
+    )
 
 
 @pytest.mark.parametrize(
