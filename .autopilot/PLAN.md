@@ -143,19 +143,20 @@ stress script, recorded in DECISIONS); grandchild-held pipe no longer loses stdo
 **Checkpoint:** Flask test-client tests for headers, Origin rejection, heartbeat, cancel, healthz,
 single-instance, `.env` edge cases, atomic writes under a held reader, non-ASCII slugs, save fallback; suite green.
 
-- [ ] Shared atomic-write helper (`fsutil.py`) used by storage / topic index / `.env`. B7 — topic index retries,
+- [x] Shared atomic-write helper (`fsutil.py`) used by storage / topic index / `.env`. B7 — topic index retries,
   cleans tmp, preserves a corrupt file as `.corrupt-<ts>` instead of overwriting.
-- [ ] B12 — `.env` upsert: `utf-8-sig`, UTF-16 tolerant read, replace all dup keys, abort on read error, atomic;
+- [x] B12 — `.env` upsert: `utf-8-sig`, UTF-16 tolerant read, replace all dup keys, abort on read error, atomic;
   `/run` accepts an optional per-run `model` validated against the allowlist (UI sends it).
-- [ ] B25 — NFKD slugs + hash fallback; save OSError → fallback `output/_unsorted/<hash>.md` + clear UI message;
+- [x] B25 — NFKD slugs + hash fallback; save OSError → fallback `output/_unsorted/<hash>.md` + clear UI message;
   Answer code+md pair written atomically.
-- [ ] B10 — library cache signature over all dir mtimes (or short TTL). B19 (server) — hide `.leetcoach/` and
+- [x] B10 — library cache signature over all dir mtimes (or short TTL). B19 (server) — hide `.leetcoach/` and
   `topic_index.json` from listing/search/delete; `DELETE` supports deleting a whole run (md + code siblings).
-- [ ] C1 — `frame-ancestors 'none'` + `X-Frame-Options: DENY`. C2 — reject non-loopback `Origin` /
+- [x] C1 — `frame-ancestors 'none'` + `X-Frame-Options: DENY`. C2 — reject non-loopback `Origin` /
   `Sec-Fetch-Site: cross-site` on unsafe methods (and on `GET /` auth probe path). C3/B14 — SSE `: ping` every
   ~15 s; `POST /run/cancel` frees the in-flight slot and kills the process.
-- [ ] D16/B11 — `/healthz`; single-instance reuse in `__main__` before port fallback.
-- [ ] Tests for all of the above; suite + ruff green.
+- [x] D16/B11 — `/healthz`; single-instance reuse in `__main__` before port fallback.
+- [x] Tests for all of the above; suite + ruff green.
+- Verified: 2026-10-08 orchestrator re-run at 5a20601: 909 passed/1 skipped, ruff clean, node --check OK, .env upsert repros preserve all other lines (tmp files), real .env untouched; review approved after 2 fix rounds (pinned model kept, cancel/commit race, cancellable verify, .env unclosed-quote data loss).
 
 ## SP5 — Front-end reliability, a11y & stream UX
 
