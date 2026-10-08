@@ -85,12 +85,30 @@ def test_posting_a_different_alias_still_switches_model(env, monkeypatch):
     assert rec.calls[0]["model"] == "haiku"
 
 
-def test_client_sends_model_only_after_the_picker_changed():
+def test_client_always_sends_the_active_picker_model():
     js = _app_js()
-    # the picker click marks the choice as this tab's own ...
-    assert re.search(r'group === "model"\)\s*\{[^}]*modelTouched = true', js)
-    # ... and only then does a run carry an explicit model
-    assert re.search(r"if \(modelTouched && model\) body\.model = model;", js)
+    # Every run carries the model the tab shows (B12): the server maps the alias
+    # that matches a pinned .env id back to that id (resolve_run_model, I1), so
+    # there is no need to withhold it until the picker is clicked.
+    assert re.search(r"if \(model\) body\.model = model;", js)
+    assert "modelTouched" not in js
+
+
+def test_stop_cancel_request_has_a_short_timeout():
+    """An unresponsive server must not leave Stop hanging: the cancel POST is
+    aborted after ~3 s and the stream is then aborted as before."""
+    js = _app_js()
+    m = re.search(r"function cancelRun\(runId\) \{(.*?)\n  \}\n", js, re.S)
+    assert m, "cancelRun not found"
+    body = m.group(1)
+    assert "new AbortController()" in body
+    assert re.search(r"signal:\s*\w+\.signal", body)
+    t = re.search(r"setTimeout\(.*?\},\s*(\w+)\)", body)
+    assert t, "no timeout on the cancel request"
+    arg = t.group(1)
+    ms = int(arg) if arg.isdigit() else int(re.search(rf"\b{arg}\s*=\s*(\d+)", js).group(1))
+    assert 1000 <= ms <= 5000
+    assert "clearTimeout" in body
 
 
 # --- M1: a cancel that arrives after the run committed to saving ---------------
