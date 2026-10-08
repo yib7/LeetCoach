@@ -304,3 +304,39 @@ def test_save_goes_through_the_atomic_helper(idx_path, monkeypatch):
     monkeypatch.setattr(fsutil, "atomic_write_text", spy)
     topic_index.save({"by_type": {}, "all": ["x"]})
     assert seen == [str(idx_path)]
+
+
+# --- SP4 review I2 / M9: undecodable index, failed corrupt copy ----------------
+
+def test_utf16_index_loads_empty_without_raising(idx_path):
+    idx_path.write_bytes(json.dumps({"all": ["bfs"]}).encode("utf-16"))
+    data = topic_index.load()
+    assert data["all"] == [] and data["by_type"] == {}
+
+
+def test_record_on_undecodable_index_preserves_it_and_starts_fresh(idx_path):
+    raw = json.dumps({"all": ["bfs"]}).encode("utf-16")
+    idx_path.write_bytes(raw)
+    topic_index.record("dp", ["memoization"])
+    corrupt = [p for p in idx_path.parent.iterdir() if ".corrupt-" in p.name]
+    assert len(corrupt) == 1
+    assert corrupt[0].read_bytes() == raw
+    assert "memoization" in topic_index.known_topics()
+    # and recording keeps working afterwards
+    topic_index.record("graphs", ["bfs_grid"])
+    assert "bfs_grid" in topic_index.known_topics()
+
+
+def test_record_skips_when_the_corrupt_copy_cannot_be_made(idx_path, monkeypatch, caplog):
+    idx_path.write_text("{definitely not json", encoding="utf-8")
+
+    def no_copy(src, dst, *a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(topic_index.shutil, "copy2", no_copy)
+    with caplog.at_level("WARNING", logger="topic_index"):
+        topic_index.record("dp", ["memoization"])
+    # the corrupt original is NOT overwritten when it could not be kept
+    assert idx_path.read_text(encoding="utf-8") == "{definitely not json"
+    assert [p for p in idx_path.parent.iterdir() if ".corrupt-" in p.name] == []
+    assert "skipping" in caplog.text.lower()

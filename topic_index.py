@@ -121,13 +121,19 @@ def _read_raw(p: Path):
     not be READ at all (an ``OSError`` other than "missing" - e.g. another
     process briefly holding it locked). That is NOT corruption: unlike a
     missing file or bad JSON, there is nothing wrong with what is on disk, so
-    the caller must not treat it as replaceable content."""
+    the caller must not treat it as replaceable content.
+
+    SP4 review I2: bytes that are not UTF-8 (a UTF-16 file, binary junk) are
+    corrupt content like bad JSON - never an exception. A UTF-8 BOM is
+    tolerated."""
     try:
-        raw = p.read_text(encoding="utf-8")
+        raw = p.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
         return None, False, False
     except OSError:
         return None, True, True
+    except ValueError:  # UnicodeDecodeError
+        return None, True, False
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, ValueError, RecursionError):
@@ -171,10 +177,11 @@ def _write_json(p: Path, obj) -> None:
     fsutil.atomic_write_text(p, json.dumps(obj, indent=2))
 
 
-def _preserve_corrupt(p: Path) -> None:
+def _preserve_corrupt(p: Path) -> bool:
     """B7: keep an unparseable index as ``<name>.corrupt-<timestamp>`` before
-    it is replaced, so a corrupt file is never silently overwritten.
-    Best-effort: never raises."""
+    it is replaced, so a corrupt file is never silently overwritten. Returns
+    whether the copy was made (SP4 review M9: if not, the caller must leave
+    the original alone). Never raises."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest = p.with_name(f"{p.name}.corrupt-{stamp}")
     n = 2
@@ -185,6 +192,8 @@ def _preserve_corrupt(p: Path) -> None:
         shutil.copy2(p, dest)
     except OSError:
         logger.warning("topic_index: could not preserve corrupt %s", p)
+        return False
+    return True
 
 
 BACKUP_SUFFIX = ".pre-v1.5.bak"
@@ -280,8 +289,16 @@ def record(problem_type: str, topics, path=None, *, language=None) -> dict:
             )
             return _clean_index({})
         lossy = existed and raw is None
-        if lossy:
-            _preserve_corrupt(p)  # B7: never overwrite a corrupt file unkept
+        if lossy and not _preserve_corrupt(p):
+            # B7 / SP4 review M9: never overwrite a corrupt file unkept. The
+            # copy failed (disk full, a locked folder), so drop this run's
+            # topics rather than destroy the only copy of the old index.
+            logger.warning(
+                "topic_index.record(): %s is unreadable and could not be "
+                "preserved - skipping this write so it is not overwritten",
+                p,
+            )
+            return _clean_index({})
         if raw is None:
             raw = {}
         raw.setdefault("by_type", {})
