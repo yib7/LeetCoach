@@ -558,3 +558,20 @@ def test_answer_pair_is_written_all_or_nothing(out_root, monkeypatch):
     folder = out_root / "answers" / "hash_map"
     leftovers = list(folder.iterdir()) if folder.exists() else []
     assert leftovers == []  # no orphaned .py without its .md
+
+
+# --- SP4 review M8: mostly non-ASCII titles get a hash suffix ------------------
+
+def test_slug_appends_hash_when_most_letters_have_no_ascii_form():
+    a = storage.slug("跳跃游戏 II")
+    b = storage.slug("买卖股票的最佳时机 II")
+    assert a != b  # both used to collapse to "ii"
+    assert a.startswith("ii_") and b.startswith("ii_")
+    assert len(a.split("_")[-1]) == 8
+    assert storage.slug("跳跃游戏 II") == a  # deterministic
+
+
+def test_slug_keeps_plain_form_when_most_letters_are_ascii():
+    assert storage.slug("Café Crème") == "cafe_creme"
+    assert storage.slug("Ｔｗｏ Sum") == "two_sum"  # full-width transliterates
+    assert storage.slug("Two Sum 二") == "two_sum"  # 1 of 7 letters lost

@@ -75,6 +75,13 @@ _MAX_SLUG = 80
 _WRITE_LOCK = threading.Lock()
 
 
+def _ascii_form(ch: str) -> str:
+    """The ASCII letters/digits ``ch`` transliterates to via NFKD (``é`` ->
+    ``e``, full-width ``Ｔ`` -> ``T``); ``""`` when there are none (CJK)."""
+    folded = unicodedata.normalize("NFKD", ch).encode("ascii", "ignore").decode("ascii")
+    return "".join(c for c in folded if c.isalnum())
+
+
 def slug(name: str) -> str:
     """Return a filesystem-safe, lowercase slug derived from ``name``.
 
@@ -94,7 +101,11 @@ def slug(name: str) -> str:
     * never empty — a title with letters but no ASCII transliteration (e.g. a
       Chinese title) yields ``untitled_<8-hex hash>`` so distinct titles no
       longer collide on one file (B25); pure punctuation yields the literal
-      ``"untitled"`` so a filename always exists.
+      ``"untitled"`` so a filename always exists;
+    * when MOST of the title's letters/digits have no ASCII transliteration
+      (``跳跃游戏 II``), the short hash is appended to whatever ASCII survived
+      (``ii_<8-hex>``), so two such titles sharing a Latin tail don't collide
+      either (SP4 review M8).
     """
     raw = (name or "").strip()
     ascii_text = (
@@ -105,14 +116,18 @@ def slug(name: str) -> str:
     # don't get names like ``_foo_`` or ``--bar``.
     s = re.sub(r"_+", "_", s)
     s = s.strip("_-")
+    alnum = [ch for ch in raw if ch.isalnum()]
+    lost = sum(1 for ch in alnum if not _ascii_form(ch))
+    digest = ""
+    if lost and lost * 2 > len(alnum):
+        digest = hashlib.sha1(
+            unicodedata.normalize("NFC", raw).encode("utf-8")
+        ).hexdigest()[:8]
     if not s:
-        if any(ch.isalnum() for ch in raw):
-            digest = hashlib.sha1(
-                unicodedata.normalize("NFC", raw).encode("utf-8")
-            ).hexdigest()[:8]
-            s = f"untitled_{digest}"
-        else:
-            s = "untitled"
+        s = f"untitled_{digest}" if digest else "untitled"
+    elif digest:
+        # Keep the hash when the cap trims: it is what tells the titles apart.
+        s = f"{s[:_MAX_SLUG - 9].rstrip('_-')}_{digest}"
     if len(s) > _MAX_SLUG:
         s = s[:_MAX_SLUG].rstrip("_-") or "untitled"
     # A bare Windows device name can't be a filename even with an extension;
