@@ -15,6 +15,9 @@ older ids merged into it (an un-numbered ``two_sum`` record folds into
 ``1-two_sum`` once a paste gives the number) and ``difficulty_source`` is
 ``"paste"`` or ``"doc"`` (a doc-header guess; a later pasted difficulty
 replaces it). Records are rewritten through :func:`fsutil.atomic_write_text`.
+SP7: :func:`grade_problem` moves ``review`` along the Leitner boxes (D4) and
+:func:`set_notes` replaces ``notes`` (D9), both under the same store lock as
+a run's upsert; :func:`review_summary` is the due queue.
 
 A **run-log entry** is ``{ts, problem_id, mode, language, tier, model,
 verdict, files, session_id, duration_s, pattern}``. The log is append-only:
@@ -51,7 +54,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import config
@@ -715,3 +718,189 @@ def path_index(*, root=None) -> dict[str, dict]:
         }
     _cache_put(_path_cache, key, (sig, out))
     return out
+
+
+# --- review queue (SP7 / D4) ------------------------------------------------------
+# Leitner boxes 1..5 with intervals [1, 3, 7, 14, 30] days. A self-grade after
+# a re-attempt moves the problem: ``solo`` (solved without help) -> next box
+# (capped at the last), ``hints`` -> same box, ``peeked`` (looked at the
+# solution / failed) -> box 1. The new due date is the LOCAL calendar day of
+# the grade plus the new box's interval. Days are local (the browser on
+# localhost shares the machine's clock), so 23:59 and 00:01 are different days.
+
+REVIEW_INTERVALS = (1, 3, 7, 14, 30)
+REVIEW_MAX_BOX = len(REVIEW_INTERVALS)
+GRADES = ("solo", "hints", "peeked")
+REVIEW_HISTORY_CAP = 200
+NOTES_CAP = 20_000
+
+
+def local_today(now: datetime | None = None) -> date:
+    """The machine-local calendar day of ``now`` (a naive datetime counts as
+    local already; an aware one is converted to the local zone)."""
+    if now is None:
+        return datetime.now().date()
+    if now.tzinfo is None:
+        return now.date()
+    return now.astimezone().date()
+
+
+def clamp_box(box) -> int:
+    """A stored box as a valid Leitner box (1..REVIEW_MAX_BOX). Anything that
+    is not an int (a hand-edited record) restarts at box 1."""
+    if isinstance(box, bool) or not isinstance(box, int):
+        return REVIEW_FIRST_BOX
+    return min(max(box, 1), REVIEW_MAX_BOX)
+
+
+def next_review(box, grade: str, today: date) -> tuple[int, date]:
+    """``(new box, due date)`` after ``grade`` on ``today`` (D4)."""
+    current = clamp_box(box)
+    if grade == "solo":
+        new = min(current + 1, REVIEW_MAX_BOX)
+    elif grade == "hints":
+        new = current
+    elif grade == "peeked":
+        new = REVIEW_FIRST_BOX
+    else:
+        raise ValueError(f"unknown grade {grade!r}; expected one of {GRADES}")
+    return new, today + timedelta(days=REVIEW_INTERVALS[new - 1])
+
+
+def parse_due(value) -> date | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _review_of(rec: dict) -> dict:
+    review = rec.get("review")
+    return review if isinstance(review, dict) else {}
+
+
+def _update_record(pid: str, mutate, *, root=None) -> dict | None:
+    """Load the record ``pid`` (an alias resolves to its record), apply
+    ``mutate(rec)`` and write it back - all under the store lock, so a grade
+    or a notes save never races a run's upsert. ``None`` if there is no such
+    record."""
+    if not valid_problem_id(pid):
+        return None
+    meta = meta_dir(root)
+    with _locked(meta):
+        current = load_problem(pid, root=root)
+        if current is None or not valid_problem_id(current.get("id")):
+            return None
+        path = _record_path(current["id"], root)
+        rec = _read_record(path)
+        if rec is None:
+            return None
+        mutate(rec)
+        fsutil.atomic_write_text(path, json.dumps(rec, ensure_ascii=False, indent=2) + "\n",
+                                 newline="\n")
+        return rec
+
+
+def grade_problem(pid: str, grade: str, *, attempt: dict | None = None,
+                  now: datetime | None = None, root=None) -> dict | None:
+    """Apply a self-grade to problem ``pid``; returns ``{"id", "review",
+    "previous"}`` or ``None`` when the record does not exist. Raises
+    ``ValueError`` for an unknown grade. ``attempt`` (optional, already
+    validated by the caller) is kept in the history entry."""
+    if grade not in GRADES:
+        raise ValueError(f"unknown grade {grade!r}; expected one of {GRADES}")
+    now = now or datetime.now().astimezone()
+    today = local_today(now)
+    out: dict = {}
+
+    def mutate(rec: dict) -> None:
+        review = dict(_review_of(rec))
+        previous = {"box": clamp_box(review.get("box")), "due": review.get("due")}
+        box, due = next_review(review.get("box"), grade, today)
+        entry = {
+            "ts": now.isoformat(timespec="seconds"),
+            "day": today.isoformat(),
+            "grade": grade,
+            "from_box": previous["box"],
+            "box": box,
+            "due": due.isoformat(),
+        }
+        if attempt:
+            entry["attempt"] = attempt
+        history = [h for h in review.get("history") or () if isinstance(h, dict)]
+        history.append(entry)
+        review.update({
+            "box": box,
+            "due": due.isoformat(),
+            "last_reviewed": entry["ts"],
+            "history": history[-REVIEW_HISTORY_CAP:],
+        })
+        rec["review"] = review
+        out.update(previous=previous, review=review)
+
+    rec = _update_record(pid, mutate, root=root)
+    if rec is None:
+        return None
+    return {"id": rec["id"], **out}
+
+
+def set_notes(pid: str, notes: str, *, now: datetime | None = None, root=None) -> dict | None:
+    """Replace problem ``pid``'s notes (D9); ``None`` when there is no such
+    record. The caller enforces :data:`NOTES_CAP`."""
+    now = now or datetime.now().astimezone()
+
+    def mutate(rec: dict) -> None:
+        rec["notes"] = notes
+        rec["notes_updated"] = now.isoformat(timespec="seconds")
+
+    return _update_record(pid, mutate, root=root)
+
+
+def review_summary(*, now: datetime | None = None, root=None) -> dict:
+    """The review queue for the Console panel and Stats (D4).
+
+    ``due``: every problem whose due day is today or earlier (a record with no
+    valid due day counts as due), oldest due first; ``counts``: how many are
+    due, how many grades were given today, and how many problems sit in each
+    box. ``next_due``: the earliest due day after today (or ``None``)."""
+    today = local_today(now)
+    due_items = []
+    by_box = {str(b): 0 for b in range(1, REVIEW_MAX_BOX + 1)}
+    reviewed_today = 0
+    upcoming: date | None = None
+    records = list_problems(root=root)
+    for rec in records:
+        review = _review_of(rec)
+        box = clamp_box(review.get("box"))
+        by_box[str(box)] += 1
+        for h in review.get("history") or ():
+            if isinstance(h, dict) and h.get("day") == today.isoformat():
+                reviewed_today += 1
+        due = parse_due(review.get("due"))
+        if due is not None and due > today:
+            upcoming = due if upcoming is None or due < upcoming else upcoming
+            continue
+        due_items.append({
+            "id": rec.get("id"),
+            "number": rec.get("number"),
+            "title": rec.get("title") or "",
+            "difficulty": rec.get("difficulty"),
+            "pattern": rec.get("pattern"),
+            "box": box,
+            "due": due.isoformat() if due else None,
+            "overdue_days": (today - due).days if due else 0,
+        })
+    due_items.sort(key=lambda i: (i["due"] or "", str(i["title"]).lower(), i["id"] or ""))
+    return {
+        "today": today.isoformat(),
+        "due": due_items,
+        "next_due": upcoming.isoformat() if upcoming else None,
+        "counts": {
+            "due": len(due_items),
+            "reviewed_today": reviewed_today,
+            "scheduled": len(records),
+            "by_box": by_box,
+        },
+    }

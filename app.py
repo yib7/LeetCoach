@@ -197,6 +197,33 @@ def _non_string_field_error(data: dict, fields) -> str | None:
     return None
 
 
+def _attempt_summary(value) -> tuple[dict | None, str | None]:
+    """SP7: the optional ``attempt`` summary a grade carries (what the last
+    "Test my code" run showed) -> ``(clean dict or None, error or None)``.
+    Only ``language`` (allowlisted) and small non-negative ``passed`` /
+    ``total`` counts are kept - nothing free-form reaches the record."""
+    if value is None:
+        return None, None
+    if not isinstance(value, dict):
+        return None, "Attempt must be an object."
+    out: dict = {}
+    language = value.get("language")
+    if language is not None:
+        if language not in LANGUAGES:
+            return None, "Unknown attempt language."
+        out["language"] = language
+    for key in ("passed", "total"):
+        n = value.get(key)
+        if n is None:
+            continue
+        if isinstance(n, bool) or not isinstance(n, int) or not 0 <= n <= 1000:
+            return None, f"Attempt {key} must be a small whole number."
+        out[key] = n
+    if "passed" in out and "total" in out and out["passed"] > out["total"]:
+        return None, "Attempt passed cannot exceed total."
+    return (out or None), None
+
+
 def _hostname(host: str) -> str:
     """The hostname part of a Host header value, port stripped, lowercased.
     Handles the bracketed IPv6 form ("[::1]:5000" -> "[::1]")."""
@@ -1111,6 +1138,55 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # An alias (an id merged into this record) resolves to the record.
         log = problem_store.runs_for(pid)
         return jsonify({**rec, "log": log})
+
+    @app.get("/review")
+    def review_queue():
+        # SP7 / D4: the Console "Due today" panel and the Stats review counts.
+        return jsonify(problem_store.review_summary())
+
+    @app.post("/problems/<pid>/grade")
+    def grade_problem(pid):
+        # SP7 / D4: a self-grade after a re-attempt moves the problem's
+        # Leitner box and due date (solo -> next box, hints -> same box,
+        # peeked -> box 1).
+        if not problem_store.valid_problem_id(pid):
+            return jsonify({"error": "Not found."}), 404
+        data, err = _json_object()
+        if err:
+            return err
+        grade = data.get("grade")
+        if grade not in problem_store.GRADES:
+            return jsonify({"error": "Grade must be one of: "
+                            + ", ".join(problem_store.GRADES) + "."}), 400
+        attempt, attempt_err = _attempt_summary(data.get("attempt"))
+        if attempt_err:
+            return jsonify({"error": attempt_err}), 400
+        result = problem_store.grade_problem(pid, grade, attempt=attempt)
+        if result is None:
+            return jsonify({"error": "Not found."}), 404
+        _invalidate_library_cache()
+        return jsonify(result)
+
+    @app.put("/problems/<pid>/notes")
+    def problem_notes(pid):
+        # SP7 / D9: the notes editor in the library viewer (debounced saves).
+        if not problem_store.valid_problem_id(pid):
+            return jsonify({"error": "Not found."}), 404
+        data, err = _json_object()
+        if err:
+            return err
+        notes = data.get("notes")
+        if not isinstance(notes, str):
+            return jsonify({"error": "Notes must be text."}), 400
+        notes = notes.replace("\r\n", "\n")
+        if len(notes) > problem_store.NOTES_CAP:
+            return jsonify({"error": f"Notes are too long (max {problem_store.NOTES_CAP} "
+                            "characters)."}), 400
+        rec = problem_store.set_notes(pid, notes)
+        if rec is None:
+            return jsonify({"error": "Not found."}), 404
+        return jsonify({"ok": True, "id": rec["id"], "notes_updated": rec.get("notes_updated"),
+                        "length": len(notes)})
 
     @app.get("/stats")
     def stats_route():
