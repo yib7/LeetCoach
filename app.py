@@ -1413,8 +1413,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 #    sandbox verdict reported in the stream, saved .md and done
                 #    payload; it stays None when a mode doesn't verify.
                 verification = None
+                # SP6 / D2: the number + difficulty parsed from the paste
+                # (locally) feed the doc contract's header lines.
+                paste_meta = problem_store.parse_problem(problem)
                 if mode == "answer":
-                    prompt = prompts.build_answer(problem, tier=tier, language=language)
+                    prompt = prompts.build_answer(
+                        problem, tier=tier, language=language, meta=paste_meta
+                    )
                     yield from _stream_and_accumulate(prompt)
                     body = out[0]
                     code = parsing.extract_code(body, language)
@@ -1461,6 +1466,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         problem,
                         language=language,
                         already_learned_topics=learned or None,
+                        meta=paste_meta,
                     )
                     yield from _stream_and_accumulate(prompt)
                     yield _sse_event("phase", {"phase": "saving"})  # SP5 D11
@@ -1480,6 +1486,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         tier=tier,
                         language=language,
                         already_learned_topics=learned or None,
+                        meta=paste_meta,
                     )
                     yield from _stream_and_accumulate(prompt)
                     body = out[0]

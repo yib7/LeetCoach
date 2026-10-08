@@ -238,7 +238,11 @@ def _runnable_python_fragment() -> str:
         "that text (do not prompt the user; just read from stdin);\n"
         "  - calls the solution and PRINTS the result to standard output in "
         "EXACTLY the problem's `Output:` format (e.g. `[0,1]`), matching its "
-        "spacing/brackets so it can be diffed against the expected output.\n"
+        "spacing/brackets so it can be diffed against the expected output;\n"
+        "  - prints values JSON-style, the way LeetCode shows them: "
+        "`print(json.dumps(result, separators=(',', ':')))` gives `[0,1]`, "
+        "`true` / `false`, `null` and double-quoted strings (not Python's "
+        "`[0, 1]`, `True` or `'abc'`).\n"
         "Use only the standard library for parsing (e.g. `ast.literal_eval`, "
         "`sys.stdin.read()`). The script must run as `python solution.py` with "
         "the sample input piped on stdin and print only the answer line(s)."
@@ -276,13 +280,167 @@ def _answer_fragment(tier: str, language: str, *, with_tradeoff: bool) -> str:
     return "\n\n".join(parts)
 
 
+# --- the study-doc contract (SP6 / D2) ----------------------------------------
+#
+# One fixed shape for every study doc, shared by all three modes so the
+# library reads consistently and the app can rely on it: the header lines, the
+# fixed H2 sections in order (a mode leaves out what it forbids), no questions
+# to the reader, and exactly one code block tagged ``<lang> solution`` (the one
+# the sandbox verifies and the client hides behind click-to-reveal in Guided).
+
+DOC_SECTIONS = (
+    "Problem in brief",
+    "Constraints → target complexity",
+    "How to recognize this pattern",
+    "Key insight",
+    "Approach",
+    "Solution",
+    "Complexity",
+    "Edge cases",
+    "Common mistakes",
+    "Related problems",
+    "Flashcards",
+)
+# Learning must not contain an end-to-end solution (B22/D2).
+_MODE_OMITS = {"learning": frozenset({"Solution", "Complexity"})}
+HINT_COUNT = 4
+DIFFICULTIES = ("Easy", "Medium", "Hard")
+
+
+def doc_sections(mode: str) -> tuple[str, ...]:
+    """The H2 section titles a ``mode`` doc must use, in order."""
+    omit = _MODE_OMITS.get(mode, frozenset())
+    return tuple(title for title in DOC_SECTIONS if title not in omit)
+
+
+def _meta_value(meta, key):
+    if meta is None:
+        return None
+    if isinstance(meta, dict):
+        return meta.get(key)
+    return getattr(meta, key, None)
+
+
+def _hint_ladder() -> str:
+    names = ", ".join(f"`### Hint {n}`" for n in range(1, HINT_COUNT + 1))
+    return (
+        f"Start ## Approach with exactly {HINT_COUNT} hint subsections titled "
+        f"{names} - a ladder from a gentle nudge toward the pattern (Hint 1) "
+        f"to nearly the whole algorithm (Hint {HINT_COUNT}). Each hint is one "
+        "short paragraph with no code; the app hides every hint until the "
+        "learner clicks it, so each must make sense on its own."
+    )
+
+
+def _approach_guide(mode: str) -> str:
+    if mode == "learning":
+        return (
+            _hint_ladder() + " Then explain the techniques the approach needs "
+            "and how they fit together - without assembling them into a "
+            "finished solution."
+        )
+    if mode == "guided":
+        return (
+            _hint_ladder() + " Then go from the brute force approach (what it "
+            "is, its time complexity, and why the constraints rule it out) to "
+            "the optimal approach, one step at a time."
+        )
+    return "Derive the solution step by step, from the first idea to the final algorithm."
+
+
+def _section_guides(mode: str, language: str) -> dict:
+    lang_name = _LANG_NAME[language]
+    return {
+        "Problem in brief": "two or three sentences restating the task in your own words.",
+        "Constraints → target complexity": (
+            "the constraints that matter and the time complexity they allow "
+            "(e.g. n up to 10^5 means O(n log n) or better)."
+        ),
+        "How to recognize this pattern": "the signals in the statement that point to the pattern.",
+        "Key insight": "the one idea that makes the problem tractable.",
+        "Approach": _approach_guide(mode),
+        "Solution": f"the single {lang_name} solution block (see the code rules below).",
+        "Complexity": "time and space complexity, each with a one-line justification.",
+        "Edge cases": "a bullet list of the inputs that break naive code.",
+        "Common mistakes": "a bullet list of the bugs learners typically write here.",
+        "Related problems": (
+            "3-5 related LeetCode problems as `<number>. <Title>`, each with "
+            "one line on what it shares with this one."
+        ),
+        "Flashcards": (
+            "3-5 bullets, each `- Q: <question> - A: <answer>`, for spaced "
+            "review (the only question-shaped text the note may contain)."
+        ),
+    }
+
+
+def _code_rules(mode: str, language: str) -> str:
+    if mode == "learning":
+        return (
+            "Code rules: you MUST NOT write an end-to-end solution in any "
+            "language - no code block tagged `solution`, and no snippet that "
+            "solves the whole problem. Code blocks only illustrate individual "
+            "idioms or data-structure operations (a few lines each), tagged "
+            f"with the plain language (```{language})."
+        )
+    return (
+        "Code rules: exactly one code block - the final solution, under "
+        f"## Solution - is tagged ```{language} solution (the language key, a "
+        "space, then the word solution). Tag every other code block (a brute "
+        f"force sketch, an idiom) with the plain language (```{language}) or "
+        "leave it untagged; never put a second solution block anywhere."
+    )
+
+
+def _doc_contract(mode: str, language: str, meta=None) -> str:
+    """The shared D2 output contract for a ``mode`` study doc.
+
+    ``meta`` (the parsed paste: ``number`` / ``difficulty``) only contributes
+    an int and an enum value - the pasted title itself never leaves the
+    nonce fence (B21)."""
+    number = _meta_value(meta, "number")
+    if isinstance(number, bool) or not isinstance(number, int) or not 0 < number < 100000:
+        number = None
+    difficulty = _meta_value(meta, "difficulty")
+    if difficulty not in DIFFICULTIES:
+        difficulty = None
+    labels = "; ".join(label for _, label in patterns.PATTERN_LABELS)
+    header = "Line 1: `# <number>. <Title>` - the problem's LeetCode number and title"
+    if number is not None:
+        header += f" (the paste gives the number, so write `# {number}. <Title>`)"
+    else:
+        header += " (leave out `<number>. ` if you do not know the number)"
+    pattern_line = (
+        "Line 2: `Pattern: <pattern> · Difficulty: <Easy|Medium|Hard>`, where "
+        f"<pattern> is exactly one label from this fixed list: {labels}."
+    )
+    if difficulty is not None:
+        pattern_line += f" The paste gives the difficulty: write `Difficulty: {difficulty}`."
+    guides = _section_guides(mode, language)
+    sections = "\n".join(f"  ## {title} - {guides[title]}" for title in doc_sections(mode))
+    return "\n".join([
+        "OUTPUT CONTRACT - format the note exactly like this:",
+        f"- {header}.",
+        f"- {pattern_line}",
+        "- Then these H2 sections, in this order, with exactly these titles "
+        "(no other H2 sections):",
+        sections,
+        f"- {_code_rules(mode, language)}",
+        "- Never ask the reader questions (no quizzes, no 'can you...?', no "
+        "closing question): state things. Flashcards are the only exception.",
+    ])
+
+
 # --- public builders -----------------------------------------------------
 
-def build_learning(problem: str, *, language: str, already_learned_topics=None) -> str:
+def build_learning(
+    problem: str, *, language: str, already_learned_topics=None, meta=None
+) -> str:
     """Build the Learning prompt (no tier).
 
     Teaches the tech stack; never asks for a final graded solution or Big-O line
-    (that is Answer's job), so the two modes stay distinct.
+    (that is Answer's job), so the two modes stay distinct. D2: the shared doc
+    contract without ## Solution / ## Complexity, plus the hint ladder.
     """
     _check_language(language)
     return "\n\n".join(
@@ -293,15 +451,16 @@ def build_learning(problem: str, *, language: str, already_learned_topics=None) 
             "Do not just hand over the final solution — focus on building "
             "understanding of the underlying techniques so the learner could solve "
             "it themselves.",
+            _doc_contract("learning", language, meta),
         ]
     )
 
 
-def build_answer(problem: str, *, tier: str, language: str) -> str:
+def build_answer(problem: str, *, tier: str, language: str, meta=None) -> str:
     """Build the Answer prompt for ``tier`` x ``language``.
 
     Always demands code + step-by-step reasoning + a Big-O line + the trade-off
-    vs the other tiers.
+    vs the other tiers, in the shared D2 doc shape.
     """
     _check_tier(tier)
     _check_language(language)
@@ -310,12 +469,13 @@ def build_answer(problem: str, *, tier: str, language: str) -> str:
             "Mode: Answer - solve this problem as an expert competitive programmer.",
             _problem_block(problem),
             _answer_fragment(tier, language, with_tradeoff=True),
+            _doc_contract("answer", language, meta),
         ]
     )
 
 
 def build_guided(
-    problem: str, *, tier: str, language: str, already_learned_topics=None
+    problem: str, *, tier: str, language: str, already_learned_topics=None, meta=None
 ) -> str:
     """Build the Guided-Learning prompt for ``tier`` x ``language``.
 
@@ -330,10 +490,15 @@ def build_guided(
             "Mode: Guided Learning - one guided session from problem to solution.",
             _problem_block(problem),
             "Work through this as ONE flowing document with these stages:",
-            "1) Restate the problem in your own words so the learner is oriented.",
-            "2) " + _teach_fragment(language, already_learned_topics),
-            "3) Reason step-by-step toward a solution.",
-            "4) " + _answer_fragment(tier, language, with_tradeoff=False),
+            "1) Restate the problem in your own words so the learner is oriented "
+            "(## Problem in brief).",
+            "2) " + _teach_fragment(language, already_learned_topics)
+            + " (## How to recognize this pattern and ## Key insight)",
+            "3) Reason step-by-step toward a solution (## Approach: the hints, "
+            "then brute force to optimal).",
+            "4) " + _answer_fragment(tier, language, with_tradeoff=False)
+            + "\n\n(## Solution and ## Complexity)",
+            _doc_contract("guided", language, meta),
         ]
     )
 
