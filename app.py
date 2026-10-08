@@ -33,6 +33,7 @@ import json
 import os
 import socket
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -108,6 +109,14 @@ CLASSIFIER_JOIN_TIMEOUT = 60.0
 # app itself writes (storage._LANG_EXT + .md, .txt fallback, topic_index.json)
 # is covered; anything else in the output dir is invisible to the read path.
 LIBRARY_EXTENSIONS = frozenset({".md", ".py", ".cpp", ".java", ".txt", ".json"})
+
+# B10: the longest a cached /library listing is served without a re-walk, even
+# when no directory mtime moved (an in-place edit of a file). Read at call time.
+LIBRARY_CACHE_TTL = 30.0
+
+# B19: the sibling extensions that make up one saved run (an Answer's notes +
+# code). ``DELETE /library/file?scope=run`` removes all of them together.
+RUN_SIBLING_EXTENSIONS = (".md", ".py", ".cpp", ".java", ".txt")
 
 # Quick Ask bounds: the question stays small (it's a syntax lookup, not an
 # essay), and the optional problem CONTEXT is capped server-side so a pasted
@@ -253,18 +262,60 @@ def _verify_code(code: str, problem: str, language: str):
         return None, f"⚠ not auto-verified (verifier error: {exc})"
 
 
+def _is_hidden(root: Path, path: Path) -> bool:
+    """B19: True for app metadata that is never part of the library - any
+    path with a dot-prefixed segment (``.leetcoach/``, temp files), the topic
+    index (``topic_index.json`` or wherever ``LEETCOACH_TOPIC_INDEX`` points
+    inside the output dir). ``path`` is resolved and inside ``root``."""
+    rel = path.relative_to(root)
+    if any(part.startswith(".") for part in rel.parts):
+        return True
+    if rel.as_posix() == "topic_index.json":
+        return True
+    try:
+        return path == config.topic_index_path().resolve()
+    except OSError:
+        return False
+
+
+def _library_signature(root: Path) -> tuple:
+    """B10: a cheap freshness signature for the listing - the mtime of the
+    root AND of every (non-hidden) directory under it. Adding, removing or
+    renaming a file anywhere bumps its parent directory's mtime, so a nested
+    change made outside the app (Explorer, git, a sync client) invalidates the
+    cache too, not just a top-level one."""
+    sig = []
+    stack = [root]
+    while stack:
+        folder = stack.pop()
+        try:
+            sig.append((str(folder), folder.stat().st_mtime_ns))
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.name.startswith("."):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+        except OSError:
+            sig.append((str(folder), None))
+    return tuple(sorted(sig, key=lambda item: item[0]))
+
+
 def _library_files(root: Path) -> list[dict]:
     """The library listing: every allowlisted file under ``root``, as
     ``{"path": <relative, forward slashes>, "size": <bytes>, "mtime": <epoch
     seconds>}`` dicts, sorted by path. ``mtime`` lets the frontend show real
     saved dates and derive the recent-runs list; it is an additive field, so
     older callers that read only ``path``/``size`` are unaffected. A
-    missing/empty root is an empty list, never an error."""
+    missing/empty root is an empty list, never an error. App metadata
+    (``.leetcoach/``, the topic index) is left out (B19)."""
     if not root.is_dir():
         return []
     files = []
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in LIBRARY_EXTENSIONS:
+            continue
+        if _is_hidden(root, path):
             continue
         try:
             stat = path.stat()
@@ -308,6 +359,8 @@ def _resolve_library_file(rel: str) -> Path | None:
     if resolved.suffix.lower() not in LIBRARY_EXTENSIONS:
         return None
     if not resolved.is_file():
+        return None
+    if _is_hidden(root, resolved):  # B19: app metadata is not a library file
         return None
     return resolved
 
@@ -392,9 +445,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     # per file) reran on every tab-open and post-run refresh. Cache the result
     # behind a cheap freshness signature — an app-owned version counter (bumped
     # whenever the app itself saves or deletes a library file) combined with the
-    # output-root mtime (catches a top-level change made outside the app). On a
-    # hit /library returns without touching the filesystem tree.
-    _lib_cache: dict = {"sig": None, "files": None}
+    # mtime of every directory in the tree (B10: catches a nested change made
+    # outside the app, not just a top-level one) — plus a short TTL so an
+    # in-place edit (which changes no directory mtime) still shows up.
+    _lib_cache: dict = {"sig": None, "files": None, "at": 0.0}
     _lib_version = [0]
     _lib_lock = threading.Lock()
 
@@ -404,15 +458,18 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     def _cached_library_files() -> list[dict]:
         root = config.output_dir().resolve()
-        try:
-            root_mtime = root.stat().st_mtime if root.is_dir() else None
-        except OSError:
-            root_mtime = None
+        dirs = _library_signature(root) if root.is_dir() else ()
         with _lib_lock:
-            sig = (_lib_version[0], root_mtime)
-            if _lib_cache["files"] is None or _lib_cache["sig"] != sig:
+            sig = (_lib_version[0], dirs)
+            now = time.monotonic()
+            if (
+                _lib_cache["files"] is None
+                or _lib_cache["sig"] != sig
+                or now - _lib_cache["at"] >= LIBRARY_CACHE_TTL
+            ):
                 _lib_cache["files"] = _library_files(root)
                 _lib_cache["sig"] = sig
+                _lib_cache["at"] = now
             return _lib_cache["files"]
 
     @app.before_request
@@ -521,17 +578,40 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # suffix / missing file is the SAME uniform 404 — a rejection never
         # leaks whether a target exists or where the root sits, matching the
         # GET /library/file no-leak design. There is deliberately no mass-delete.
+        #
+        # B19: ``scope=run`` deletes the whole saved run - the file plus its
+        # same-stem siblings in the same folder (an Answer's .md AND its code
+        # file), so a delete never orphans a .py. A different slot
+        # (``<stem>__2``) or tier is a different run and is left alone.
+        scope = request.args.get("scope", "file")
+        if scope not in ("file", "run"):
+            return jsonify({"error": "Unknown delete scope."}), 400
         resolved = _resolve_library_file(request.args.get("path", ""))
         if resolved is None:
             return jsonify({"error": "Not found."}), 404
-        try:
-            resolved.unlink()
-        except OSError:
-            # Vanished between the resolve and the unlink, or a permission/lock
-            # issue — never 500 the caller; the file is effectively gone.
-            return jsonify({"error": "Not found."}), 404
+        targets = [resolved]
+        if scope == "run":
+            for ext in RUN_SIBLING_EXTENSIONS:
+                sibling = resolved.with_suffix(ext)
+                if sibling == resolved:
+                    continue
+                rel_sibling = sibling.relative_to(config.output_dir().resolve()).as_posix()
+                if _resolve_library_file(rel_sibling) is not None:
+                    targets.append(sibling)
+        root = config.output_dir().resolve()
+        deleted = []
+        for target in targets:
+            try:
+                target.unlink()
+            except OSError:
+                # Vanished between the resolve and the unlink, or a
+                # permission/lock issue — never 500 the caller.
+                continue
+            deleted.append(target.relative_to(root).as_posix())
         _invalidate_library_cache()  # next /library reflects the removal
-        return jsonify({"deleted": True})
+        if not deleted:
+            return jsonify({"error": "Not found."}), 404
+        return jsonify({"deleted": True, "paths": deleted})
 
     @app.post("/run")
     def run():

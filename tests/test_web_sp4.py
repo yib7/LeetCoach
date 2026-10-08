@@ -134,3 +134,99 @@ def test_save_and_fallback_both_failing_is_a_terminal_error(env, monkeypatch):
     name, msg = parse_sse(body)[1][-1]
     assert name == "error"
     assert "could not be saved" in msg.lower()
+
+
+# --- B10: library cache sees nested external changes --------------------------
+
+def _bump_mtime(path):
+    import os
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+
+
+def test_library_cache_sees_a_nested_external_add_and_delete(env):
+    c = _client(Recorder())
+    nested = env / "answers" / "hash_map"
+    nested.mkdir(parents=True)
+    (nested / "a__normal.md").write_text("a", encoding="utf-8")
+    assert [f["path"] for f in c.get("/library").get_json()["files"]] == [
+        "answers/hash_map/a__normal.md"]
+
+    added = nested / "b__normal.md"
+    added.write_text("b", encoding="utf-8")
+    _bump_mtime(nested)  # coarse-clock safety; the ROOT mtime is unchanged
+    paths = [f["path"] for f in c.get("/library").get_json()["files"]]
+    assert "answers/hash_map/b__normal.md" in paths
+
+    added.unlink()
+    _bump_mtime(nested)
+    paths = [f["path"] for f in c.get("/library").get_json()["files"]]
+    assert "answers/hash_map/b__normal.md" not in paths
+
+
+def test_library_cache_expires_after_ttl(env, monkeypatch):
+    calls = []
+    real = app_module._library_files
+    monkeypatch.setattr(app_module, "_library_files", lambda root: calls.append(1) or real(root))
+    c = _client(Recorder())
+    c.get("/library")
+    c.get("/library")
+    assert len(calls) == 1
+    monkeypatch.setattr(app_module, "LIBRARY_CACHE_TTL", 0.0)
+    c.get("/library")
+    assert len(calls) == 2
+
+
+# --- B19: hidden metadata + whole-run delete ----------------------------------
+
+def test_library_hides_metadata_even_for_a_custom_topic_index_name(env, monkeypatch):
+    env.mkdir(parents=True, exist_ok=True)
+    custom = env / "my_topics.json"
+    custom.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("LEETCOACH_TOPIC_INDEX", str(custom))
+    (env / ".hidden.md").write_text("x", encoding="utf-8")
+    (env / "notes.md").write_text("x", encoding="utf-8")
+    c = _client(Recorder())
+    assert [f["path"] for f in c.get("/library").get_json()["files"]] == ["notes.md"]
+    assert c.get("/library/file?path=my_topics.json").status_code == 404
+    assert c.get("/library/file?path=.hidden.md").status_code == 404
+
+
+def _seed_run(root):
+    folder = root / "answers" / "hash_map"
+    folder.mkdir(parents=True)
+    names = ["two_sum__normal.md", "two_sum__normal.py", "two_sum__normal__2.md",
+             "two_sum__normal__2.py", "two_sum__basic.py", "two_sum__basic.md"]
+    for n in names:
+        (folder / n).write_text(n, encoding="utf-8")
+    return folder
+
+
+def test_delete_whole_run_removes_md_and_code_siblings_only(env):
+    folder = _seed_run(env)
+    c = _client(Recorder())
+    c.get("/library")  # warm the cache
+    resp = c.delete("/library/file?path=answers/hash_map/two_sum__normal.md&scope=run")
+    assert resp.status_code == 200
+    assert sorted(resp.get_json()["paths"]) == [
+        "answers/hash_map/two_sum__normal.md", "answers/hash_map/two_sum__normal.py"]
+    left = sorted(p.name for p in folder.iterdir())
+    assert left == ["two_sum__basic.md", "two_sum__basic.py",
+                    "two_sum__normal__2.md", "two_sum__normal__2.py"]
+    listed = [f["path"] for f in c.get("/library").get_json()["files"]]
+    assert "answers/hash_map/two_sum__normal.py" not in listed
+
+
+def test_delete_single_file_is_still_the_default(env):
+    folder = _seed_run(env)
+    resp = _client(Recorder()).delete("/library/file?path=answers/hash_map/two_sum__normal.md")
+    assert resp.status_code == 200
+    assert resp.get_json()["paths"] == ["answers/hash_map/two_sum__normal.md"]
+    assert (folder / "two_sum__normal.py").exists()
+
+
+def test_delete_with_unknown_scope_is_rejected(env):
+    _seed_run(env)
+    resp = _client(Recorder()).delete(
+        "/library/file?path=answers/hash_map/two_sum__normal.md&scope=everything")
+    assert resp.status_code == 400
