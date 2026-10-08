@@ -36,6 +36,7 @@ def recording_runner(lines=None):
             json.dumps({"type": "stream_event", "event": {
                 "type": "content_block_delta",
                 "delta": {"type": "text_delta", "text": "OK"}}}),
+            json.dumps({"type": "result", "subtype": "success", "result": "OK"}),
         ])
 
     return runner, calls
@@ -326,6 +327,8 @@ def test_session_id_ignores_non_string_values():
     runner, _ = recording_runner([
         json.dumps({"type": "system", "subtype": "init", "session_id": 42}),
         _delta("A"),
+        json.dumps({"type": "result", "subtype": "success", "result": "A",
+                    "session_id": 7}),
     ])
     r = claude_cli.run("hi", runner=runner, flags=ALL_FLAGS)
     list(r)

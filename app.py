@@ -9,7 +9,7 @@ Design mirrors the Xeno RAG pattern, in Flask flavour:
   while the real orchestration + save still runs end-to-end.
 * ``/run`` returns ``Response(stream_with_context(event_stream()),
   mimetype="text/event-stream")``. The generator yields ``data:`` text events
-  for each delta and a terminal ``event: done`` (or ``event: error``) so the
+  for each delta and a terminal ``event: done`` (or ``error`` / ``cancelled``) so the
   stream always closes cleanly — a last-resort ``except`` guarantees it.
 
 All three modes (Answer / Learning / Guided) are wired here. They share one
@@ -31,6 +31,9 @@ SSE event protocol (shared by every mode):
           "verification": str (Answer/Guided only — the sandbox verdict line),
           "model": str (when the CLI reported one) }
     event: error\ndata: "<message>"\n\n        # terminal failure (json string)
+    event: cancelled\ndata: "<message>"\n\n    # terminal: stopped via POST
+                                              # /run/cancel (SP5 fix B2) -
+                                              # not a failure, nothing saved
     : ping\n\n                                # heartbeat comment (C3)
 
 Clients must ignore event names they do not know (phase/meta are additive).
@@ -606,20 +609,35 @@ def _library_signature(root: Path) -> tuple:
 # SP5 B18: the sandbox verdict a saved doc recorded in its trailing
 # "**Verification:** <line>" (written by /run for Answer and Guided). Keyed by
 # path + (mtime_ns, size) so an unchanged file is read once per process.
-_VERIFICATION_LINE_RE = re.compile(r"^\*\*Verification:\*\*[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+# SP5 fix R2: only the block /run itself appends ("---", blank line,
+# "**Verification:** <line>") counts - a "**Verification:**" line the MODEL
+# wrote inside a doc (e.g. a Learning doc quoting the format) is not a verdict.
+_VERIFICATION_LINE_RE = re.compile(
+    r"(?:^|\n)---\n\n\*\*Verification:\*\*[ \t]*([^\n]+?)[ \t]*(?=\n|$)"
+)
+_FOLLOW_UP_RE = re.compile(r"^##[ \t]+Follow-up\b", re.MULTILINE | re.IGNORECASE)
 _VERDICT_READ_CAP = 1024 * 1024
 _verdict_cache: dict = {}
 _verdict_lock = threading.Lock()
 
 
 def verdict_from_text(text: str) -> str | None:
-    """``pass`` / ``fail`` / ``error`` / ``not_verified`` from the LAST
-    ``**Verification:**`` line in ``text``, or ``None`` when it has none
-    (Learning docs, legacy files). Mirrors :func:`_verification_line`."""
-    matches = _VERIFICATION_LINE_RE.findall(text or "")
-    if not matches:
+    """``pass`` / ``fail`` / ``error`` / ``not_verified`` from the app-written
+    ``---`` / ``**Verification:**`` block in ``text``, or ``None`` when it has
+    none (Learning docs, legacy files). Mirrors :func:`_verification_line`.
+
+    SP5 fix R2: anything under a ``## Follow-up`` heading that comes AFTER the
+    first verification block is a later addition to the saved run and never
+    changes its verdict; the last block before that point wins."""
+    text = (text or "").replace("\r\n", "\n")
+    first = _VERIFICATION_LINE_RE.search(text)
+    if first is None:
         return None
-    m = re.search(r"Sample tests (PASS|FAIL|ERROR)\b", matches[-1])
+    follow_up = _FOLLOW_UP_RE.search(text, first.end())
+    if follow_up is not None:
+        text = text[: follow_up.start()]
+    matches = _VERIFICATION_LINE_RE.findall(text)
+    m =re.search(r"Sample tests (PASS|FAIL|ERROR)\b", matches[-1])
     if m:
         return m.group(1).lower()
     return "not_verified"
@@ -675,7 +693,20 @@ def _library_files(root: Path) -> list[dict]:
             if verdict:
                 entry["verdict"] = verdict
         files.append(entry)
+    _prune_verdict_cache(root, files)
     return files
+
+
+def _prune_verdict_cache(root: Path, files: list[dict]) -> None:
+    """SP5 fix R7: forget cached verdicts of docs under ``root`` that are no
+    longer listed (deleted / renamed), so the cache cannot grow without bound
+    as runs come and go. Entries for other roots are left alone."""
+    listed = {str(root / f["path"]) for f in files}
+    prefix = str(root)
+    with _verdict_lock:
+        stale = [k for k in _verdict_cache if k.startswith(prefix) and k not in listed]
+        for key in stale:
+            del _verdict_cache[key]
 
 
 def _resolve_library_file(rel: str) -> Path | None:
@@ -792,7 +823,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     # only ever by its owner, so a finishing old run can't free a new one's key.
     _inflight_runs: dict = {}
     _runs: dict = {}
-    _asks: dict = {}  # B20: ask_id -> (call, cancelled Event) for /ask/cancel
+    _asks: dict = {}  # B20: ask_id -> [call or None, cancelled Event] for /ask/cancel
     _inflight_lock = threading.Lock()
 
     def _cancel_ask_call(call) -> None:
@@ -1404,8 +1435,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
                 if state.cancelled:
                     # B14: Stop -> POST /run/cancel. Whatever the killed call
-                    # raised (ClaudeCancelledError, _RunCancelled), say so.
-                    yield _sse_event("error", "Run cancelled.")
+                    # raised (ClaudeCancelledError, _RunCancelled), say so -
+                    # as its own terminal `cancelled` event (SP5 fix B2): a
+                    # user Stop is not a failure, and the page shows it as
+                    # the neutral "Stopped" state, not "Run failed".
+                    yield _sse_event("cancelled", "Run cancelled.")
                 else:
                     # Keep the full traceback in the server log (audit P2-8);
                     # the client still gets only the short message below.
@@ -1505,22 +1539,32 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             problem=problem[:QUICK_ASK_PROBLEM_CONTEXT_CAP],
         )
         cancelled = threading.Event()
+        # SP5 fix R1: register the ask BEFORE run_fn, so a Cancel (or the
+        # client timeout) that lands while the call is still starting finds
+        # it and sets the flag instead of 404-ing; the call itself is filled
+        # in (and cancelled, if the flag is already set) once run_fn returns.
+        entry = [None, cancelled]
+        if ask_id:
+            with _inflight_lock:
+                _asks[ask_id] = entry
         try:
-            call = run_fn(
-                prompt,
-                model=config.quick_ask_model(),
-                system_prompt=prompts.QUICK_ASK_SYSTEM_PROMPT,
-                persist_session=False,  # A7: utility call, never resumed
-            )
-            if ask_id:
-                with _inflight_lock:
-                    _asks[ask_id] = (call, cancelled)
             try:
+                call = run_fn(
+                    prompt,
+                    model=config.quick_ask_model(),
+                    system_prompt=prompts.QUICK_ASK_SYSTEM_PROMPT,
+                    persist_session=False,  # A7: utility call, never resumed
+                )
+                with _inflight_lock:
+                    entry[0] = call
+                if cancelled.is_set():
+                    _cancel_ask_call(call)
+                    return jsonify({"error": "Quick Ask cancelled."}), 409
                 answer = "".join(call).strip()
             finally:
                 if ask_id:
                     with _inflight_lock:
-                        if _asks.get(ask_id, (None,))[0] is call:
+                        if _asks.get(ask_id) is entry:
                             del _asks[ask_id]
         except Exception as exc:  # noqa: BLE001 - surface as a clean 502, log the rest
             if cancelled.is_set():
@@ -1547,11 +1591,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"error": "A valid ask_id is required."}), 400
         with _inflight_lock:
             entry = _asks.get(ask_id)
-        if entry is None:
-            return jsonify({"cancelled": False}), 404
-        call, flag = entry
-        flag.set()
-        _cancel_ask_call(call)
+            if entry is None:
+                return jsonify({"cancelled": False}), 404
+            entry[1].set()
+            call = entry[0]  # None while run_fn is still starting (R1)
+        if call is not None:
+            _cancel_ask_call(call)
         return jsonify({"cancelled": True})
 
     return app

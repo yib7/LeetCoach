@@ -219,3 +219,42 @@ def test_configure_points_everything_at_scratch(tmp_path, monkeypatch):
     assert os.environ["LEETCOACH_NO_BROWSER"] == "1"
     assert Path(os.environ["LEETCOACH_DOTENV_PATH"]).parent == tmp_path
     assert Path(os.environ["LEETCOACH_CLAUDE_BIN"]).name.startswith("fake_claude")
+
+
+def test_run_fake_does_not_reseed_under_a_running_instance(monkeypatch):
+    # SP5 fix R6: a second launch must not wipe the live scratch library.
+    run_fake = _load_run_fake()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("must not configure/seed while an instance is running")
+
+    monkeypatch.setattr(run_fake, "configure", boom)
+    monkeypatch.setattr(run_fake, "seed", boom)
+    assert run_fake.main([], probe=lambda port: f"http://127.0.0.1:{port}/") == 0
+
+
+def test_running_instance_accepts_only_leetcoach(monkeypatch):
+    run_fake = _load_run_fake()
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n):
+            return self.body
+
+    ok = run_fake.running_instance(5057, opener=lambda u, timeout: Resp(b'{"app": "leetcoach"}'))
+    assert ok == "http://127.0.0.1:5057/"
+    other = run_fake.running_instance(5057, opener=lambda u, timeout: Resp(b'{"app": "x"}'))
+    assert other is None
+
+    def refused(u, timeout):
+        raise OSError("refused")
+
+    assert run_fake.running_instance(5057, opener=refused) is None

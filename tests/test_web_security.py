@@ -275,7 +275,7 @@ def test_cancel_kills_the_claude_call_and_frees_the_slot(env):
     t.join(10)
     assert not t.is_alive()
     name, msg = parse_sse(out["body"])[1][-1]
-    assert name == "error" and "cancelled" in msg.lower()
+    assert name == "cancelled" and "cancelled" in msg.lower()  # SP5 fix B2
     assert not (env / "learning").exists()  # nothing saved for a cancelled run
 
 
@@ -303,7 +303,7 @@ def test_cancel_with_a_runner_that_ignores_it_still_saves_nothing(env):
     assert c.post("/run/cancel", json={"run_id": "r9"}).status_code == 200
     release.set()
     t.join(10)
-    assert parse_sse(out["body"])[1][-1][0] == "error"
+    assert parse_sse(out["body"])[1][-1][0] == "cancelled"  # SP5 fix B2
     assert not (env / "learning").exists()
 
 
@@ -333,7 +333,7 @@ def test_cancel_during_verification_saves_nothing(env, monkeypatch):
         release.set()
     t.join(10)
     name, msg = parse_sse(out["body"])[1][-1]
-    assert name == "error" and "cancelled" in msg.lower()
+    assert name == "cancelled" and "cancelled" in msg.lower()  # SP5 fix B2
     assert not (env / "answers").exists()
 
 

@@ -167,13 +167,17 @@ def test_cancel_before_commit_still_cancels(env, monkeypatch):
     assert resp.get_json() == {"cancelled": True}
     gate.set()
     t.join(10)
-    assert parse_sse(box["v"])[1][-1][0] == "error"
+    assert parse_sse(box["v"])[1][-1][0] == "cancelled"  # SP5 fix B2
     assert not (env / "learning").exists()
 
 
 def test_client_does_not_show_stopped_when_the_run_already_committed():
+    # SP5 fix R8: the decision lives in core.cancelOutcome (node-tested in
+    # tests/js/core.test.js); Stop must still route through it.
     js = _app_js()
-    assert "cancelled === false" in js
+    assert 'core.cancelOutcome(r.status, d) === "committed"' in js
+    core_js = (ROOT / "static" / "lib" / "core.js").read_text(encoding="utf-8")
+    assert "body.cancelled === false" in core_js
 
 
 # --- M2: verification is cancellable -------------------------------------------
@@ -202,7 +206,7 @@ def test_cancel_during_verification_stops_the_sandbox(env, monkeypatch):
     assert seen["stopped"] is True  # the sandbox was told to stop ...
     assert time.monotonic() - started < 4  # ... and did not run out its clock
     name, msg = parse_sse(box["v"])[1][-1]
-    assert name == "error" and "cancelled" in msg.lower()
+    assert name == "cancelled" and "cancelled" in msg.lower()
     assert not (env / "answers").exists()
 
 
