@@ -19,7 +19,9 @@ subscription, a sign-in or any usage:
         - a study run             -> a Markdown study doc. For Answer/Guided in
           Python it contains a runnable ```python solution``` block that reads
           stdin, so the app's sandbox verifies it against the pasted samples
-          (the Two Sum sample PASSes).
+          (the Two Sum sample PASSes). A Code Review ("Mode: Code Review")
+          critiques the fenced ATTEMPT in the review sections, quoting one
+          line of it and never writing a solution.
 
 Knobs (environment):
   FAKE_CLAUDE_DELAY   seconds between text deltas (default 0.15).
@@ -120,6 +122,15 @@ def _model_id(argv: list[str]) -> str:
 def _problem_text(prompt: str) -> str:
     m = re.search(
         r"^--- BEGIN PROBLEM[^\n]*? (\w+) ---\n(.*?)\n--- END PROBLEM \1 ---$",
+        prompt, re.S | re.M,
+    )
+    return m.group(2) if m else ""
+
+
+def _attempt_text(prompt: str) -> str:
+    """The learner's code in a Code Review prompt (the ATTEMPT fence)."""
+    m = re.search(
+        r"^--- BEGIN ATTEMPT[^\n]*? (\w+) ---\n(.*?)\n--- END ATTEMPT \1 ---$",
         prompt, re.S | re.M,
     )
     return m.group(2) if m else ""
@@ -273,8 +284,47 @@ def _header(problem: str) -> tuple[str, str]:
     return head, (d.group(1).capitalize() if d else "Easy")
 
 
-def _section_body(name: str, *, mode: str, fence: str, tier: str, problem: str) -> str:
+def _review_body(key: str, *, attempt: str) -> str | None:
+    """SP7 / D5: a Code Review critiques the learner's attempt - it quotes at
+    most a line and never contains a full solution."""
+    lines = [ln for ln in attempt.splitlines() if ln.strip()]
+    loops = [ln.strip() for ln in lines if re.match(r"\s*for\b", ln)]
+    nested = len(loops) >= 2
+    quote = loops[-1] if loops else (lines[0].strip() if lines else "")
+    if key == "verdict":
+        return ("Almost there: the idea is right, but the double loop is O(n^2) and can pair "
+                "an element with itself.\n" if nested else
+                "Looks correct on the samples; a few edge cases deserve a second look.\n")
+    if key == "bugs":
+        if not quote:
+            return "- No code to review.\n"
+        return (f"- `{quote}` - the inner loop also visits `i` itself, so a value equal to "
+                "half the target pairs with itself. Start it at `i + 1`.\n")
+    if key == "complexity":
+        return ("Your attempt: time O(n^2), space O(1). Target: time O(n), space O(n) with a "
+                "hash map of complements.\n" if nested else
+                "Your attempt: time O(n), space O(n) - already optimal.\n")
+    if key == "suggested":
+        return ("1. Start the inner index at `i + 1`.\n"
+                "2. Then replace the inner scan with a lookup of `target - x` in a dict of "
+                "values already seen.\n")
+    if key == "readability":
+        return "- Name the complement (`need = target - x`) so the intent reads at a glance.\n"
+    if key == "flashcards":
+        return ("- Q: Why must the second index start after the first? - A: so an element "
+                "never pairs with itself.\n"
+                "- Q: What turns the O(n^2) pair scan into O(n)? - A: a hash map from value "
+                "to index, checked before inserting.\n")
+    return None
+
+
+def _section_body(name: str, *, mode: str, fence: str, tier: str, problem: str,
+                  attempt: str = "") -> str:
     key = name.split()[0].lower()
+    if mode == "review":
+        body = _review_body(key, attempt=attempt)
+        if body is not None:
+            return body
     hints = "".join(f"### Hint {i}\n\n{text}\n\n" for i, text in enumerate(HINTS, 1))
     if key == "problem":
         return (
@@ -377,7 +427,9 @@ def study_doc(prompt: str) -> str:
     tier_m = re.search(r"at the \*\*(\w+)\*\* tier", prompt)
     tier = tier_m.group(1) if tier_m else "normal"
     mode = ("learning" if "Mode: Learning" in prompt
-            else "guided" if "Mode: Guided" in prompt else "answer")
+            else "guided" if "Mode: Guided" in prompt
+            else "review" if "Mode: Code Review" in prompt else "answer")
+    attempt = _attempt_text(prompt) if mode == "review" else ""
     head, difficulty = _header(problem)
     parts = [
         f"{head}\nPattern: Arrays & Hashing · Difficulty: {difficulty}\n\n",
@@ -387,7 +439,8 @@ def study_doc(prompt: str) -> str:
     for name in _sections(prompt):
         if mode == "learning" and name in ("Solution", "Complexity"):
             continue
-        body = _section_body(name, mode=mode, fence=fence, tier=tier, problem=problem)
+        body = _section_body(name, mode=mode, fence=fence, tier=tier, problem=problem,
+                             attempt=attempt)
         parts.append(f"## {name}\n\n{body}\n")
     return "".join(parts).rstrip("\n") + "\n"
 
