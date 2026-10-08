@@ -351,3 +351,44 @@ def test_seed_has_a_run_log_problem_records_and_legacy_files(tmp_path):
     assert guided
     text = (out / guided[0]).read_text(encoding="utf-8")
     assert "### Hint 1" in text and "## Solution" in text
+
+
+# ---- SP6 fix round: the fixed H3 after the hint ladder (I1), no solution in Learning (O4)
+
+def _h3_after_hint4(text):
+    tail = text.split("### Hint 4", 1)[1].split("\n## ", 1)[0]
+    return [line[4:].strip() for line in tail.splitlines() if line.startswith("### ")]
+
+
+@pytest.mark.parametrize("mode, heading", [("guided", "Walkthrough"), ("learning", "Techniques")])
+def test_fake_doc_has_the_fixed_heading_after_the_hints(flags, mode, heading):
+    assert _h3_after_hint4(_doc(flags, mode)) == [heading]
+
+
+def test_fake_nowalk_marker_drops_the_heading_after_the_hints(flags):
+    text = _doc(flags, "guided", TWO_SUM + "\nFAKE_NOWALK")
+    assert _h3_after_hint4(text) == []
+    approach = text.split("### Hint 4", 1)[1].split("\n## ", 1)[0]
+    assert "Brute force" in approach and "Optimal" in approach
+
+
+@pytest.mark.parametrize("language", ["python", "cpp", "java"])
+def test_fake_learning_doc_has_no_solution_shaped_code(flags, language):
+    text = _doc(flags, "learning", language=language)
+    assert "return [" not in text and "for i, x" not in text
+    assert "seen[target - x]" not in text
+
+
+def test_seed_has_a_no_walkthrough_guided_doc_and_no_guided_tier(tmp_path):
+    import problem_store
+
+    run_fake = _load_run_fake()
+    out = tmp_path / "output"
+    run_fake.seed(out)
+    text = (out / "guided" / "stack" / "20_valid_parentheses.md").read_text(encoding="utf-8")
+    assert "### Hint 4" in text and _h3_after_hint4(text) == []
+    for e in problem_store.read_runs(root=out):
+        if e["mode"] != "answer":
+            assert e["tier"] is None
+    learning = (out / "learning" / "hash_map_learning" / "1_two_sum.md").read_text("utf-8")
+    assert "return [" not in learning and "### Techniques" in learning

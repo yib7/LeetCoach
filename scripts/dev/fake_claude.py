@@ -35,6 +35,7 @@ In-band markers (put them in the pasted problem text - no restart needed):
   FAKE_CRASH  solution raises (verdict ERROR)
   FAKE_HANG   streams half the doc, then hangs until killed (try Stop)
   FAKE_CUT    streams half the doc, then exits 0 with no result event
+  FAKE_NOWALK Guided/Learning doc without the H3 that follows Hint 4
 In a Quick Ask question: FAKE_SLOW sleeps 75 s (tests the 60 s client timeout
 and Cancel), FAKE_FAIL returns an error result.
 
@@ -247,6 +248,17 @@ HINTS = (
 )
 
 
+# A generic map-membership idiom per language for Learning docs - an
+# illustration of one operation, never the problem's solution (O4).
+IDIOMS = {
+    "python": 'ages = {"ana": 31}\nprint("ana" in ages)  # True',
+    "cpp": 'std::unordered_map<std::string, int> ages{{"ana", 31}};\n'
+           'bool known = ages.count("ana") > 0;  // true',
+    "java": 'Map<String, Integer> ages = new HashMap<>();\nages.put("ana", 31);\n'
+            'boolean known = ages.containsKey("ana");  // true',
+}
+
+
 def _sections(prompt: str) -> list[str]:
     found = re.findall(r"^  ## (.+?) - ", prompt, re.M)
     return found or list(DEFAULT_SECTIONS)
@@ -282,6 +294,13 @@ def _section_body(name: str, *, mode: str, fence: str, tier: str, problem: str) 
             "checks whether the complement exists - a classic hash map signal.\n"
         )
     if key == "key":
+        if mode == "learning":
+            # SP6 fix O4: Learning never shows solution-shaped code.
+            return (
+                "Each value has exactly one partner, and the target fixes it. "
+                "A structure with constant-time membership turns the search "
+                "for that partner into a single lookup.\n"
+            )
         return (
             "For each value `x` the partner is `target - x`. Keep a map from "
             "value to index of everything seen so far.\n\n"
@@ -290,16 +309,19 @@ def _section_body(name: str, *, mode: str, fence: str, tier: str, problem: str) 
             "    seen[x] = i\n```\n"
         )
     if key == "approach":
+        # SP6 fix I1: a fixed H3 follows the hint ladder; FAKE_NOWALK leaves it
+        # out (the app must still end Hint 4 after its own paragraph).
+        no_walk = "FAKE_NOWALK" in problem
         if mode == "learning":
-            return hints + (
-                "### Using a dictionary idiomatically\n\n"
-                f"```{fence}\nseen = {{}}\nseen[7] = 1\nprint(9 - 2 in seen)  # True\n```\n\n"
-                "Lookups and inserts are O(1) on average. Storing *after* the "
-                "check avoids pairing an element with itself.\n"
+            return hints + ("" if no_walk else "### Techniques\n\n") + (
+                "**Constant-time membership.** A hash map tells whether a value "
+                "was already seen in O(1) on average:\n\n"
+                f"```{fence}\n{IDIOMS.get(fence, IDIOMS['python'])}\n```\n\n"
+                "Inserting and looking up are both O(1) on average; ordering is "
+                "not preserved.\n"
             )
         if mode == "guided":
-            return hints + (
-                "### From brute force to optimal\n\n"
+            return hints + ("" if no_walk else "### Walkthrough\n\n") + (
                 "**Brute force:** try every pair `(i, j)` - O(n^2) time, O(1) "
                 "space. With 10^4 elements that is 10^8 checks, too slow.\n\n"
                 "**Optimal:** one pass with a hash map of complements - O(n) "
