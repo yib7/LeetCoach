@@ -60,8 +60,9 @@ follow-up questions on a saved doc.
     `--system-prompt` persona, each only when the installed CLI lists it.
   - Every call runs in the neutral `LEETCOACH_CLAUDE_CWD`.
   - `--bare` is never passed, because it drops the subscription login.
-  - Study runs keep their session so follow-ups can resume it. The classifier, Quick Ask,
-    the follow-up fallback and the sign-in probe use `--no-session-persistence`.
+  - Study runs keep their session so follow-ups can resume it. The classifier, Quick Ask
+    and the follow-up fallback use `--no-session-persistence`. The sign-in probe is
+    `claude auth status`, which makes no model call and creates no session.
 - **Stats come from the run log (A8).** Libraries saved before the log still count, one
   activity per saved run at its own date, so streaks, the heatmap and the totals no longer
   undercount. The server now computes Stats (`GET /stats`).
