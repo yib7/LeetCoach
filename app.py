@@ -36,6 +36,7 @@ import re
 import socket
 import threading
 import time
+import urllib.request
 import uuid
 import webbrowser
 from pathlib import Path
@@ -91,6 +92,10 @@ STATIC = HERE / "static"
 # allowlist below keys off loopback hostnames, so no port is duplicated here).
 HOST = "127.0.0.1"
 PORT = 5000
+
+# Reported by GET /healthz (D16) so a second launch can recognise a running
+# LeetCoach. Matches the CHANGELOG's current release line.
+VERSION = "1.4.0"
 
 # Host-header allowlist (DNS-rebinding defense). Hostnames only, ANY port: a
 # rebinding attacker controls what IP their hostname resolves to, never the
@@ -744,6 +749,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             )
         return Response(html, mimetype="text/html")
 
+    @app.get("/healthz")
+    def healthz():
+        # D16: lets a second launch recognise a running LeetCoach (and not
+        # some other app) on the preferred port. No probe, no filesystem.
+        return jsonify({"app": "leetcoach", "version": VERSION})
+
     @app.post("/config/model")
     def config_model():
         # Persist the in-app model picker's choice as the default. The alias is
@@ -1307,11 +1318,63 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 app = create_app()
 
 
-if __name__ == "__main__":
+def _browser_url(host: str, port: int) -> str:
+    """The URL a browser should open for a server bound to ``host:port``.
+    A wildcard bind (0.0.0.0 / ::) is not browsable, so it maps to loopback;
+    an IPv6 literal is bracketed."""
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}/"
+
+
+def _default_opener(url: str, timeout: float):
+    # No proxies: a loopback probe must never be routed through HTTP_PROXY.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return opener.open(url, timeout=timeout)
+
+
+def _existing_instance_url(host: str, port: int, *, timeout: float = 1.0, opener=None):
+    """D16/B11: the URL of a LeetCoach already serving on ``host:port``, or
+    ``None``. Asks ``/healthz`` and accepts only LeetCoach's own answer, so a
+    different app on that port is never mistaken for it."""
+    url = _browser_url(host, port)
+    opener = opener or _default_opener
+    try:
+        with opener(url + "healthz", timeout=timeout) as resp:
+            data = json.loads(resp.read(4096).decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get("app") == "leetcoach":
+        return url
+    return None
+
+
+def _browser_enabled() -> bool:
+    return os.environ.get("LEETCOACH_NO_BROWSER", "").lower() not in {"1", "true", "yes"}
+
+
+def main(*, open_browser=webbrowser.open, serve=None) -> int:
+    """Launch LeetCoach (``python app.py`` / the desktop launcher).
+
+    D16/B11: if LeetCoach is already running on the preferred port, open the
+    browser there and exit - a second double-click must not start a second
+    server on the next free port sharing ``output/`` (the per-process locks
+    don't coordinate across processes). Only when nothing (or something other
+    than LeetCoach) holds the port does it fall back to a nearby free port.
+    ``open_browser`` / ``serve`` are injectable for tests.
+    """
     host = HOST
+    existing = _existing_instance_url(host, PORT)
+    if existing:
+        print(f"LeetCoach is already running at  {existing}  - opening it.")
+        if _browser_enabled():
+            open_browser(existing)
+        return 0
     # Fall back to a nearby free port instead of crashing when PORT is occupied
-    # (a stale instance, another app on 5000) — a double-click launch must never
-    # die on "address already in use".
+    # (another app on 5000) — a double-click launch must never die on "address
+    # already in use".
     port = _choose_port(PORT, host)
     # Migrate any pre-rename answer files (simple/complex -> basic/optimal) so an
     # existing library keeps working after the "Code Quality" rename. Idempotent
@@ -1323,36 +1386,41 @@ if __name__ == "__main__":
     except Exception as exc:  # noqa: BLE001 - a migration hiccup must not block launch
         print(f"WARNING: could not migrate old tier filenames ({exc}).")
     # Clear sandbox temp dirs a crashed/killed run left behind (B6).
-    _swept = _sweep_sandbox_temp()
-    if _swept:
-        print(f"Removed {_swept} stale sandbox temp dir(s).")
+    swept = _sweep_sandbox_temp()
+    if swept:
+        print(f"Removed {swept} stale sandbox temp dir(s).")
     # Surface the CLI sign-in state so a terminal launch is guided too (the
     # launcher script handles the interactive `claude auth login`; here we only
     # tell the user what to do).
     try:
         # Also primes the B1 cache, so the first page load is instant.
-        _auth = claude_cli.cached_auth_status()
+        auth = claude_cli.cached_auth_status()
     except Exception:  # noqa: BLE001 - the probe must never stop the app launching
-        _auth = claude_cli.AuthStatus(installed=False, logged_in=False)
-    if not _auth.installed:
+        auth = claude_cli.AuthStatus(installed=False, logged_in=False)
+    if not auth.installed:
         print(
             "WARNING: the `claude` CLI was not found on PATH. The page will load "
             "but runs will fail until Claude Code is installed (or set "
             "LEETCOACH_CLAUDE_BIN)."
         )
-    elif not _auth.logged_in:
+    elif not auth.logged_in:
         print(
             "WARNING: you are signed out of the `claude` CLI. Runs will fail until "
             "you sign in — run `claude auth login` in a terminal, then reload."
         )
-    # When bound to all interfaces, point the browser at loopback (0.0.0.0/:: is
-    # a bind address, not a browsable host).
-    browser_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-    url = f"http://{browser_host}:{port}/"
+    url = _browser_url(host, port)
     print(f"LeetCoach running at  {url}  (Ctrl-C to stop)")
     # Auto-open the browser shortly after the server starts accepting connections
-    # (the ~1s delay lets app.run bind first). Suppressed for headless/dev use
+    # (the ~1s delay lets the server bind first). Suppressed for headless/dev use
     # via LEETCOACH_NO_BROWSER.
-    if os.environ.get("LEETCOACH_NO_BROWSER", "").lower() not in {"1", "true", "yes"}:
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    app.run(host=host, port=port, debug=False, threaded=True)
+    if _browser_enabled():
+        threading.Timer(1.0, lambda: open_browser(url)).start()
+    if serve is None:
+        app.run(host=host, port=port, debug=False, threaded=True)
+    else:
+        serve(port)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
