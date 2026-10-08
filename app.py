@@ -1082,7 +1082,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.get("/library")
     def library():
-        # Read-only listing of the study library (SP10). Missing/empty output
+        # Listing of the study library (SP10). Missing/empty output
         # dir is an empty listing — the library just hasn't accumulated yet.
         # Served from the freshness-keyed cache (P2-6).
         return jsonify({"files": _cached_library_files()})
