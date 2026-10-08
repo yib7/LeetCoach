@@ -203,13 +203,14 @@ reveal browser-verified; suite green.
 (Python sandbox, samples + custom case) → self-grade → due date moves per Leitner; Code Review mode run saved;
 notes persist; flashcards review + TSV export download; suite + ruff green.
 
-- [ ] D3 — Re-attempt view (statement, code textarea w/ Tab support, language), `POST /attempt/test` (Python via
+- [x] D3 — Re-attempt view (statement, code textarea w/ Tab support, language), `POST /attempt/test` (Python via
   sandbox; others → clear "not supported yet"), give-up → reveal latest doc.
-- [ ] D4 — review scheduling + grading endpoint; Console "Due today (N)" panel; Stats shows review counts.
-- [ ] D5 — Code Review mode (prompt, second textarea, storage path, library/stats aware).
-- [ ] D9 — notes editor in library viewer for problem-linked docs (saved in the problem record).
-- [ ] D10 — flashcards parsed from `## Flashcards`; in-app flip review; `GET /flashcards.tsv` Anki export.
-- [ ] Tests for endpoints, scheduling math, parsing; suite + ruff green.
+- [x] D4 — review scheduling + grading endpoint; Console "Due today (N)" panel; Stats shows review counts.
+- [x] D5 — Code Review mode (prompt, second textarea, storage path, library/stats aware).
+- [x] D9 — notes editor in library viewer for problem-linked docs (saved in the problem record).
+- [x] D10 — flashcards parsed from `## Flashcards`; in-app flip review; `GET /flashcards.tsv` Anki export.
+- [x] Tests for endpoints, scheduling math, parsing; suite + ruff green.
+- Verified: 2026-10-08 orchestrator at 1cd1b10: 1265 passed/1 skipped, ruff clean, node 70/70. Browser on fake harness, all 15 checklist items: due panel (4), re-attempt view, Tab/Shift+Tab/Esc, starter confirm, Test my code 2/2 pass + custom case, crash shows stderr, Java not-supported, give-up reveal + Peeked suggest, solo grade box 2->3 due +7d, queue 3, Stats rv-today/box, Code Review run saved reviews/hash_map/1_two_sum__review__2.md + byMode, notes persist across reload + seeded 215 note + debounce flush on doc switch, flashcards modal flip/arrows/Esc focus return, whole-library deck, TSV attachment with #separator:tab. Review: 0 Critical, 2 Important (notes editors clobber, in-flight save loss) + 6 Minor + 2 orchestrator findings fixed (625f0c3..1cd1b10); re-verified in browser: shared notes state across views, delayed-save race keeps late text, grade buttons disabled after one grade (one history entry), Java message cleared on language switch.
 
 ## SP8 — Follow-up chat, docs, final verification
 
@@ -225,7 +226,7 @@ console errors; MILESTONES written; branch handed to human.
 
 ## Blocked (filled in during the run)
 
-- [2026-10-08] PAUSED (usage limit) after the SP7 implementation (dc75c33..ff36e3e; orchestrator re-ran 1243 passed/1 skipped, ruff clean, node 62/62). No SP7 box ticked yet. On resume: code review over dc75c33..HEAD, browser checklist in .superpowers/sdd/sp-7-report.md on the fake harness, fix round, tick; then SP8.
+- [2026-10-08] (resolved: resumed same day, SP7 ticked) PAUSED (usage limit) after the SP7 implementation (dc75c33..ff36e3e; orchestrator re-ran 1243 passed/1 skipped, ruff clean, node 62/62). No SP7 box ticked yet. On resume: code review over dc75c33..HEAD, browser checklist in .superpowers/sdd/sp-7-report.md on the fake harness, fix round, tick; then SP8.
 
 - [2026-09-29] MOVED TO CLOUD mid-SP3 (user request). SP3 commits: ce2bc68 (A5 bootstrap handshake), efd847e (C6 audit
   hook), f71e237 (SECURITY.md), 6f62aaa (B6 WIP, committed unreviewed; 682 passed + 1 skipped on Windows). On resume: finish or
