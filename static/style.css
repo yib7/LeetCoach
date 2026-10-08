@@ -169,6 +169,7 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .diff.med{color:var(--med)} .diff.med .d{background:var(--med)}
 .diff.hard{color:var(--hard)} .diff.hard .d{background:var(--hard)}
 .pcell{min-width:0}
+.pnum{font:600 11px var(--mono);color:var(--tx3);margin-right:6px;flex:none}
 .pcell .pn{font:600 13.5px var(--sans);color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pcell .pm{font:11px var(--mono);color:var(--tx4);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .trow>*{min-width:0}
@@ -228,8 +229,10 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .md .reveal[open]>summary::before{transform:rotate(45deg)}
 .md .reveal>summary:hover{background:var(--s3)}
 .md .reveal>summary:focus-visible{outline:none;box-shadow:var(--ring)}
-.md .reveal>summary>h2,.md .reveal>summary>h3{margin:0;padding:0;border:0}
-.md .reveal>summary>h2::before{display:none}
+.md .reveal-title{font:700 14px var(--sans);color:var(--tx)}
+.md .reveal-solution .reveal-title,.md .reveal-insight .reveal-title{font-size:16px}
+.md .reveal-heading.sr-only{margin:-1px;padding:0;border:0}
+.md .reveal-insight{margin-top:24px}
 .md .reveal-cue{margin-left:auto;font:600 11.5px var(--sans);color:var(--tx3)}
 .md .reveal[open] .reveal-cue{display:none}
 .md .reveal-body{padding:2px 16px 4px;border-top:1px solid var(--border-soft)}

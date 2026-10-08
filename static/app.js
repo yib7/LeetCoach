@@ -452,12 +452,15 @@
   }
 
   // SP6 / D2: click-to-reveal for the doc in #output - every "### Hint N"
-  // section, plus the ## Solution section of a Guided run. Which ones the
+  // section, plus the ## Solution section of a Guided run and the ## Key
+  // insight of a Guided / Learning one (core.revealsFor). Which ones the
   // learner opened survives the throttled re-renders of the same run.
-  var outputReveal = { solution: false, open: {} };
+  var outputReveal = { mode: "", open: {} };
   function revealOpts(state) {
+    var which = core.revealsFor(state.mode);
     return {
-      revealSolution: state.solution,
+      revealSolution: which.revealSolution,
+      revealInsight: which.revealInsight,
       open: state.open,
       onToggle: function (key, isOpen) { state.open[key] = isOpen; },
     };
@@ -641,7 +644,7 @@
     rhChips.textContent = "";
     rhChips.appendChild(chipEl(cap(meta.mode), "grn"));
     rhChips.appendChild(chipEl(langLabel(meta.language), "mono"));
-    if (meta.tier) rhChips.appendChild(chipEl(cap(meta.tier), ""));
+    if (meta.tier && core.tierApplies(meta.mode)) rhChips.appendChild(chipEl(cap(meta.tier), ""));
     var mc = chipEl(modelChipText(meta), "model" + (meta.modelId ? "" : " pending"));
     mc.id = "rh-model";
     mc.title = meta.modelId ? "Model: " + meta.modelId : "Requested model (waiting for the CLI to confirm)";
@@ -702,7 +705,7 @@
     setRunBtn(true);
     setStop(true);
     cancelScheduledRender();
-    outputReveal = { solution: meta.mode === "guided", open: {} };
+    outputReveal = { mode: meta.mode, open: {} };
     render("", false); // clears #output through the single assignment site
     startTimer();
     announce("Run started: " + cap(meta.mode) + ", " + langLabel(meta.language) + ".");
@@ -836,7 +839,7 @@
     if (meta.title) subParts.push(meta.title); // C10: captured at run start
     subParts.push(cap(meta.mode));
     subParts.push(langLabel(meta.language));
-    if (meta.tier) subParts.push(cap(meta.tier));
+    if (meta.tier && core.tierApplies(meta.mode)) subParts.push(cap(meta.tier)); // O2
     var sub = subParts.join(" · ");
     if (lastDuration) sub += " — completed in " + lastDuration;
     mid.appendChild(el("div", "s", sub));
@@ -1305,9 +1308,9 @@
   }
   function runAriaLabel(run) {
     var diff = core.diffInfo(run.difficulty);
-    return "Open " + run.problem + (diff ? " (" + diff.label + ")" : "") + " — " + run.mode +
+    return "Open " + run.problemLabel + (diff ? " (" + diff.label + ")" : "") + " — " + run.mode +
       (run.language !== "—" ? ", " + run.language : "") +
-      (run.tier ? ", " + cap(run.tier) : "") + ", " +
+      (run.tier && core.tierApplies(run.mode) ? ", " + cap(run.tier) : "") + ", " +
       core.verdictInfo(run.verdict).label + ", saved " + relTime(run.savedAt);
   }
 
@@ -1329,6 +1332,8 @@
       rec.appendChild(dd);
       var rt = el("span", "rt");
       var rn = el("span", "rn");
+      // SP6 fix O3: the number is its own badge, never part of the title.
+      if (run.number !== null) rn.appendChild(el("span", "pnum", "#" + run.number));
       var mt = midTrunc(run.problem, 6);
       rn.appendChild(el("span", "a", mt.a));
       if (mt.b) rn.appendChild(el("span", "b", mt.b));
@@ -1394,8 +1399,10 @@
       var pc = el("div", "pcell");
       // SP5 fix B5: long names/slugs ellipsize in their column (style.css);
       // the full text stays one hover away.
-      var pn = el("div", "pn", run.problem);
-      pn.title = run.problem;
+      var pn = el("div", "pn");
+      if (run.number !== null) pn.appendChild(el("span", "pnum", "#" + run.number)); // O3
+      pn.appendChild(document.createTextNode(run.problem));
+      pn.title = run.problemLabel;
       pc.appendChild(pn);
       var slug = run.stemRaw + (run.tier ? "__" + run.tier : "") + (run.slot ? "__" + run.slot : "");
       var pm = el("div", "pm", slug);
@@ -1668,8 +1675,11 @@
     var modeFolder = parts.length >= 3 ? parts[0] : "";
     var topicRaw = parts.length >= 3 ? parts[1].replace(/_learning$/, "") : "";
     var f = libByPath[path];
+    // SP6 fix O3: the problem record's title (number shown apart); a legacy
+    // "1_two_sum" name loses its leading number.
+    var pt = core.problemTitle({ title: f && f.title, number: f && f.number, stem: stem });
     return {
-      title: humanize(stem) || fname,
+      title: pt.label || fname,
       ext: ext,
       tier: tier,
       topic: humanize(topicRaw),
@@ -1690,7 +1700,7 @@
       if (meta.topic) vwSub.appendChild(chipEl(meta.topic, "mint"));
       if (meta.mode) vwSub.appendChild(chipEl(meta.mode, ""));
       if (meta.ext === "md") {
-        if (meta.tier) vwSub.appendChild(chipEl(cap(meta.tier), ""));
+        if (meta.tier && core.tierApplies(meta.mode)) vwSub.appendChild(chipEl(cap(meta.tier), ""));
       } else {
         var ll = langLabel(meta.ext);
         if (ll !== "—") vwSub.appendChild(chipEl(ll, ""));
@@ -1719,8 +1729,7 @@
     decorateCode(libViewerBody, false);
     if (meta.ext === "md") {
       // SP6 / D2: hints (and a Guided doc's solution) start hidden here too.
-      core.applyReveals(libViewerBody, document,
-        revealOpts({ solution: core.isGuidedPath(relPath), open: {} }));
+      core.applyReveals(libViewerBody, document, revealOpts({ mode: meta.mode, open: {} }));
     }
     libViewer.hidden = false;
     libViewer.scrollTop = 0; // C10: a newly opened file starts at its top
@@ -2037,12 +2046,12 @@
       run.files.forEach(function (f) { claimed[f.path] = true; });
       var names = run.files.map(function (f) { return f.path.split("/").pop(); }).join(" ");
       items.push({
-        title: run.problem || run.stemRaw || path,
+        title: run.problemLabel || run.stemRaw || path,
         hint: hintFor([run.mode, run.topic, run.language]),
         path: path,
         run: run,
         savedAt: run.savedAt || 0,
-        hay: [run.problem, run.topic, run.mode, run.language, run.stemRaw, run.langExt, names]
+        hay: [run.problemLabel, run.topic, run.mode, run.language, run.stemRaw, run.langExt, names]
           .join(" ").toLowerCase(),
       });
     });

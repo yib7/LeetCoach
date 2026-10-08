@@ -52,8 +52,9 @@ test("applyReveals wraps each hint and the Guided solution in a closed <details>
   var root = guidedDoc();
   var n = core.applyReveals(root, dom.document, { revealSolution: true });
   assert.strictEqual(n, 3);
-  assert.deepStrictEqual(tags(root), ["h1", "p", "h2", "details", "details", "h3", "p",
-    "details", "h2", "p", "hr", "p"]);
+  // each heading stays in place (visually hidden, SP6 fix M6) before its reveal
+  assert.deepStrictEqual(tags(root), ["h1", "p", "h2", "h3", "details", "h3", "details", "h4",
+    "p", "h3", "p", "h2", "details", "h2", "p", "hr", "p"]);
   var hints = root.children.filter(function (e) { return e.tagName === "DETAILS"; });
   var h1 = hints[0];
   assert.strictEqual(h1.className, "reveal reveal-hint");
@@ -61,14 +62,14 @@ test("applyReveals wraps each hint and the Guided solution in a closed <details>
   assert.ok(!h1.open);
   var summary = h1.children[0];
   assert.strictEqual(summary.tagName, "SUMMARY");
-  assert.strictEqual(summary.children[0].tagName, "H3");          // the heading moved in
+  assert.strictEqual(summary.children[0].tagName, "SPAN");        // text, not the heading
   assert.strictEqual(summary.children[0].textContent, "Hint 1");
   assert.strictEqual(summary.children[1].textContent, "Show hint");
   var body = h1.children[1];
   assert.strictEqual(body.className, "reveal-body");
   assert.strictEqual(body.textContent, "Think about complements.");
-  // Hint 2 keeps its h4 sub-heading; it ends at the next h3
-  assert.deepStrictEqual(tags(hints[1].children[1]), ["p", "h4", "p"]);
+  // SP6 fix I1: a hint ends at the next heading of any level (here an h4)
+  assert.deepStrictEqual(tags(hints[1].children[1]), ["p"]);
   // the solution section ends at the next h2 and never swallows the verdict
   var sol = hints[2];
   assert.strictEqual(sol.className, "reveal reveal-solution");
@@ -79,7 +80,7 @@ test("applyReveals wraps each hint and the Guided solution in a closed <details>
 test("applyReveals stops a section at a horizontal rule", function () {
   var root = dom.build([["h2", "Solution"], ["pre", "x"], ["hr", null], ["p", "**Verification:**"]]);
   core.applyReveals(root, dom.document, { revealSolution: true });
-  assert.deepStrictEqual(tags(root), ["details", "hr", "p"]);
+  assert.deepStrictEqual(tags(root), ["h2", "details", "hr", "p"]);
 });
 
 test("applyReveals leaves Answer/Learning solutions visible unless opted in", function () {
@@ -98,8 +99,7 @@ test("applyReveals keeps open state across re-renders and reports toggles", func
   var d = root.children.filter(function (e) { return e.tagName === "DETAILS"; });
   assert.ok(!d[0].open);
   assert.strictEqual(d[1].open, true);
-  d[0].open = true;
-  d[0].dispatch("toggle");
+  d[0].children[0].dispatch("click"); // SP6 fix M7: reported on the summary click
   assert.deepStrictEqual(toggled, [["hint-1", true]]);
 });
 
@@ -112,13 +112,13 @@ test("applyReveals never uses innerHTML and tolerates empty / plain containers",
   // a hint heading at the very end has an empty body
   var tail = dom.build([["h3", "Hint 1"]]);
   core.applyReveals(tail, dom.document, {});
-  assert.strictEqual(tail.children[0].children[1].childNodes.length, 0);
+  assert.strictEqual(tail.children[1].children[1].childNodes.length, 0);
 });
 
 test("model text stays text: a heading with markup-looking text is moved, not re-parsed", function () {
   var root = dom.build([["h3", "Hint 1 <img src=x onerror=alert(1)>"], ["p", "<b>x</b>"]]);
   core.applyReveals(root, dom.document, {});
-  var details = root.children[0];
+  var details = root.children[1];
   assert.strictEqual(details.children[0].children[0].textContent,
     "Hint 1 <img src=x onerror=alert(1)>");
   assert.strictEqual(details.children[1].textContent, "<b>x</b>");

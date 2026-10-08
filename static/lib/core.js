@@ -323,7 +323,7 @@
         run = {
           modeFolder: modeFolder, topicRaw: topicRaw, stemRaw: stem, slot: nm.slot,
           tier: "", langExt: "", savedAt: 0, mdPath: "", mdAt: 0, verdict: "",
-          difficulty: "", files: [],
+          difficulty: "", title: "", number: null, files: [],
         };
         map[key] = run;
         order.push(run);
@@ -341,15 +341,20 @@
       } else if (CODE_EXT[ext] && !run.langExt) run.langExt = ext;
       if (tier && !run.tier) run.tier = tier;
       if (f.difficulty && !run.difficulty) run.difficulty = String(f.difficulty);
+      if (f.title && !run.title) run.title = String(f.title);
+      if (typeof f.number === "number" && run.number === null) run.number = f.number;
     });
     return order.map(function (run) {
+      var pt = problemTitle({ title: run.title, number: run.number, stem: run.stemRaw });
       return {
         modeFolder: run.modeFolder,
         mode: modeLabel(run.modeFolder),
         topicRaw: run.topicRaw,
         topic: humanize(run.topicRaw),
         stemRaw: run.stemRaw,
-        problem: humanize(run.stemRaw),
+        problem: pt.title,
+        number: pt.number,
+        problemLabel: pt.label,
         tier: run.tier,
         slot: run.slot,
         difficulty: run.difficulty,
@@ -475,12 +480,27 @@
   // ---- click-to-reveal (SP6 / D2) ---------------------------------------------------
   // The doc contract puts a "### Hint 1..4" ladder under ## Approach (Guided and
   // Learning) and the one solution block under ## Solution. After a render, each
-  // hint section - and, in Guided docs, the Solution section - is wrapped in a
-  // closed <details> so the learner reveals it on purpose. The wrap only MOVES
-  // nodes the hardened markdown renderer already built; model text never goes
-  // through innerHTML here.
+  // hint section - and, in Guided docs, the Solution section; in Guided and
+  // Learning docs, the Key insight section (it gives Hint 1 away) - is wrapped
+  // in a closed <details> so the learner reveals it on purpose. The wrap only
+  // MOVES nodes the hardened markdown renderer already built; model text never
+  // goes through innerHTML here.
+  //
+  // Extents (SP6 fix I1): a hint owns the nodes up to the next heading of ANY
+  // level or <hr>. When nothing but an H1/H2/<hr>/the end follows it (the model
+  // skipped the fixed "### Walkthrough"/"### Techniques" heading), it owns only
+  // its first block, so Hint 4 never swallows the rest of ## Approach. An H2
+  // section (Solution, Key insight) runs to the next H1/H2 or <hr>.
+  //
+  // A11y (SP6 fix M6): the heading is not nested in <summary>; it stays in the
+  // document right before its <details>, visually hidden, so heading
+  // navigation still finds every hint, and the summary shows its text in a
+  // span.
   var HINT_RE = /^hint\s*(\d+)\b/i;
   var SOLUTION_RE = /^solution(?:\s*(?:[(:\-–—].*)?)?$/i;
+  var INSIGHT_RE = /^key\s+insights?\b/i;
+  var REVEAL_CUE = { hint: "Show hint", solution: "Show solution", insight: "Show key insight" };
+  var HIDDEN_HEADING = "reveal-heading";
   function revealKind(tag, text, opts) {
     var t = String(tag || "").toUpperCase();
     var s = String(text || "").trim();
@@ -491,12 +511,42 @@
     if (t === "H2" && opts && opts.revealSolution && SOLUTION_RE.test(s)) {
       return { key: "solution", kind: "solution", level: 2 };
     }
+    if (t === "H2" && opts && opts.revealInsight && INSIGHT_RE.test(s)) {
+      return { key: "insight", kind: "insight", level: 2 };
+    }
     return null;
+  }
+  // Which sections a doc of `mode` hides (hints are always hidden).
+  function revealsFor(mode) {
+    var m = String(mode || "").toLowerCase();
+    return { revealSolution: m === "guided", revealInsight: m === "guided" || m === "learning" };
   }
   function headingLevel(node) {
     if (!node || node.nodeType !== 1) return 0;
     var m = /^H([1-6])$/.exec(String(node.tagName || "").toUpperCase());
     return m ? +m[1] : 0;
+  }
+  function isRule(node) {
+    return !!node && node.nodeType === 1 && String(node.tagName).toUpperCase() === "HR";
+  }
+  function revealExtent(h, info) {
+    var extent = [];
+    var stop = null;
+    for (var n = h.nextSibling; n; n = n.nextSibling) {
+      var lv = headingLevel(n);
+      if (isRule(n) || (lv && (info.kind === "hint" || lv <= info.level))) { stop = n; break; }
+      extent.push(n);
+    }
+    if (info.kind === "hint" && !(stop && headingLevel(stop) >= 3)) {
+      // No sub-heading ends this hint: keep only its first block (plus any
+      // whitespace text before it); the rest is the section's own text.
+      var first = -1;
+      for (var i = 0; i < extent.length; i++) {
+        if (extent[i].nodeType === 1) { first = i; break; }
+      }
+      if (first !== -1) extent = extent.slice(0, first + 1);
+    }
+    return extent;
   }
   function applyReveals(container, doc, opts) {
     if (!container || !doc) return 0;
@@ -505,39 +555,41 @@
     var targets = [];
     Array.prototype.slice.call(container.childNodes).forEach(function (n) {
       if (n.nodeType !== 1) return;
+      if ((" " + (n.className || "") + " ").indexOf(" " + HIDDEN_HEADING + " ") !== -1) return;
       var info = revealKind(n.tagName, n.textContent, opts);
       if (info) targets.push({ node: n, info: info });
     });
     targets.forEach(function (t) {
       var h = t.node;
       if (h.parentNode !== container) return;
-      var extent = [];
-      for (var n = h.nextSibling; n; n = n.nextSibling) {
-        var lv = headingLevel(n);
-        if ((lv && lv <= t.info.level) ||
-            (n.nodeType === 1 && String(n.tagName).toUpperCase() === "HR")) break;
-        extent.push(n);
-      }
+      var extent = revealExtent(h, t.info);
       var details = doc.createElement("details");
       details.className = "reveal reveal-" + t.info.kind;
       details.setAttribute("data-reveal", t.info.key);
       var summary = doc.createElement("summary");
       summary.className = "reveal-sum";
-      var body = doc.createElement("div");
-      body.className = "reveal-body";
-      container.insertBefore(details, h);
-      summary.appendChild(h);
+      var label = doc.createElement("span");
+      label.className = "reveal-title";
+      label.textContent = h.textContent; // text only - never markup
+      summary.appendChild(label);
       var cue = doc.createElement("span");
       cue.className = "reveal-cue";
-      cue.textContent = t.info.kind === "hint" ? "Show hint" : "Show solution";
+      cue.textContent = REVEAL_CUE[t.info.kind];
       summary.appendChild(cue);
       details.appendChild(summary);
+      var body = doc.createElement("div");
+      body.className = "reveal-body";
       extent.forEach(function (x) { body.appendChild(x); });
       details.appendChild(body);
+      container.insertBefore(details, h.nextSibling);
+      h.className = ((h.className ? h.className + " " : "") + HIDDEN_HEADING + " sr-only");
       if (open[t.info.key]) details.open = true;
       if (typeof opts.onToggle === "function") {
-        details.addEventListener("toggle", function () {
-          opts.onToggle(t.info.key, !!details.open);
+        // SP6 fix M7: record the new state on the click itself (the native
+        // toggle event fires a frame later - a re-render in between would
+        // rebuild the reveal closed and flash it).
+        summary.addEventListener("click", function () {
+          opts.onToggle(t.info.key, !details.open);
         });
       }
     });
@@ -547,12 +599,33 @@
     return /^guided\//.test(String(p || ""));
   }
 
+  // ---- tier + display titles (SP6 fix O2 / O3) ------------------------------------
+  // The code-quality tier is an Answer concept: Guided and Learning docs never
+  // show (or log) one.
+  function tierApplies(mode) {
+    return String(mode || "").toLowerCase() === "answer";
+  }
+  // "1_two_sum" -> "1 Two Sum": a leading problem number on a derived (or
+  // legacy) title is split off and shown separately.
+  var NUM_PREFIX_RE = /^#?(\d{1,5})[.)]?\s+(?=\S)/;
+  function problemTitle(o) {
+    o = o || {};
+    var number = typeof o.number === "number" && o.number > 0 ? o.number : null;
+    var title = String(o.title || "").trim() || humanize(o.stem);
+    var m = NUM_PREFIX_RE.exec(title);
+    if (m) {
+      title = title.slice(m[0].length);
+      if (number === null) number = +m[1];
+    }
+    return { title: title, number: number, label: number !== null ? "#" + number + " · " + title : title };
+  }
+
   // ---- summary actions (D7) -----------------------------------------------------
   function summaryActions(meta) {
     meta = meta || {};
     var acts = [];
     if (meta.mdPath) acts.push({ id: "open", label: "Open in Library", path: meta.mdPath });
-    if (meta.mode && meta.mode !== "learning" && meta.tier !== "optimal") {
+    if (tierApplies(meta.mode) && meta.tier !== "optimal") {
       acts.push({ id: "optimal", label: "Re-run as Optimal", patch: { tier: "optimal" } });
     }
     otherLanguages(meta.language).forEach(function (l) {
@@ -670,7 +743,10 @@
     heatBucket: heatBucket,
     diffInfo: diffInfo,
     revealKind: revealKind,
+    revealsFor: revealsFor,
     applyReveals: applyReveals,
+    tierApplies: tierApplies,
+    problemTitle: problemTitle,
     isGuidedPath: isGuidedPath,
     summaryActions: summaryActions,
     modKey: modKey,
