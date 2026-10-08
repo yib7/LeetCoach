@@ -150,6 +150,10 @@ RUN_SIBLING_EXTENSIONS = (".md", ".py", ".cpp", ".java", ".txt")
 QUICK_ASK_MAX_QUESTION = 500
 QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
 
+# SP8 / D6: a follow-up question on a saved doc. Longer than a Quick Ask (it
+# can quote a line of the doc or some code) but still a question, not a paste.
+FOLLOWUP_MAX_QUESTION = 2000
+
 # SP7 fix 6: how long a new "Test my code" waits for a CANCELLED test to
 # release the one-at-a-time slot (the sandbox kills its child within a poll
 # tick; this only bounds a pathological cleanup).
@@ -918,6 +922,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     # learner opened another problem) still holds the slot while the sandbox
     # kills its child, so the next test waits briefly for it instead of 409.
     _attempt_running: dict = {"cancel": None}
+    # SP8 / D6: follow-ups have their own slot - one at a time per app,
+    # independent of /run (a follow-up may stream while a study run does).
+    _followups: dict = {}  # followup_id -> _RunState, for /followup/cancel
     _inflight_lock = threading.Lock()
 
     def _cancel_ask_call(call) -> None:
@@ -1982,6 +1989,218 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             call = entry[0]  # None while run_fn is still starting (R1)
         if call is not None:
             _cancel_ask_call(call)
+        return jsonify({"cancelled": True})
+
+    def _release_followup(followup_id: str, state: _RunState) -> None:
+        with _inflight_lock:
+            if _followups.get(followup_id) is state:
+                del _followups[followup_id]
+
+    @app.post("/followup")
+    def followup():
+        # SP8 / D6: a follow-up question on a saved doc, streamed as SSE. The
+        # study run's own session is resumed (`claude -p --resume <id>`, same
+        # isolation + neutral cwd) so Claude still has the whole conversation;
+        # without a usable session it falls back to a fresh isolated call with
+        # the doc as context. The answer is appended to the doc under
+        # "## Follow-up — <question>". Same event protocol as /run.
+        data, err = _json_object()
+        if err:
+            return err
+        type_err = _non_string_field_error(
+            data,
+            (("path", "Path"), ("question", "Question"), ("model", "Model"),
+             ("followup_id", "Follow-up id")),
+        )
+        if type_err:
+            return jsonify({"error": type_err}), 400
+        question = (data.get("question") or "").replace("\r\n", "\n").strip()
+        if not question:
+            return jsonify({"error": "A question is required."}), 400
+        if len(question) > FOLLOWUP_MAX_QUESTION:
+            return jsonify(
+                {"error": f"Question too long (max {FOLLOWUP_MAX_QUESTION} chars)."}
+            ), 400
+        model = (data.get("model") or "").strip().lower()
+        if model and model not in config.ALLOWED_MODEL_ALIASES:
+            return jsonify({"error": f"Unknown model {model!r}."}), 400
+        model = config.resolve_run_model(model)
+        followup_id = data.get("followup_id")
+        if followup_id is None:
+            followup_id = uuid.uuid4().hex
+        elif not _RUN_ID_RE.fullmatch(followup_id):
+            return jsonify({"error": "Invalid follow-up id."}), 400
+
+        # The library's containment gate (traversal, absolute paths, hidden
+        # .leetcoach/ metadata all 404), and only a Markdown doc takes one.
+        resolved = _resolve_library_file(data.get("path") or "")
+        if resolved is None or resolved.suffix.lower() != ".md":
+            return jsonify({"error": "Not found."}), 404
+        rel_path = resolved.relative_to(config.output_dir().resolve()).as_posix()
+        try:
+            doc_text = resolved.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return jsonify({"error": "Not found."}), 404
+        try:
+            logged = problem_store.session_for_doc(rel_path)
+        except Exception:  # noqa: BLE001 - no log: a legacy doc, use the fallback
+            app.logger.exception("could not read the run log for %s", rel_path)
+            logged = None
+        logged = logged or {}
+        session_id = logged.get("session_id")
+        if not (isinstance(session_id, str)
+                and claude_cli.SESSION_ID_RE.fullmatch(session_id)):
+            session_id = None
+
+        state = _RunState(("followup", followup_id))
+        with _inflight_lock:
+            if _followups:
+                return jsonify({"error": "A follow-up is already running."}), 409
+            _followups[followup_id] = state
+
+        run_meta: dict = {}
+        started = time.monotonic()
+
+        def _announce_model(call):
+            model_id = getattr(call, "model", None)
+            if isinstance(model_id, str) and model_id and "model" not in run_meta:
+                run_meta["model"] = model_id
+                yield _sse_event("meta", {"model": model_id})
+
+        def _stream(prompt, acc, *, resume):
+            """Stream one claude call's deltas (SSE text) into ``acc``."""
+            kwargs = {
+                "system_prompt": prompts.FOLLOWUP_SYSTEM_PROMPT,
+                # The resumed study session keeps the follow-up turn (a later
+                # follow-up sees it); the fresh fallback call is a utility call.
+                "persist_session": resume is not None,
+            }
+            if resume is not None:
+                kwargs["resume"] = resume
+            if model:
+                kwargs["model"] = model
+            state.check()
+            call = run_fn(prompt, **kwargs)
+            state.add_cancel_hook(lambda: _cancel_ask_call(call))
+            for delta in _iter_with_heartbeat(call):
+                yield from _announce_model(call)
+                if delta is _HEARTBEAT:
+                    yield SSE_PING
+                    continue
+                state.check()
+                if delta:
+                    acc.append(delta)
+                    yield _sse_text(delta)
+            yield from _announce_model(call)
+            state.check()
+
+        def event_stream():
+            try:
+                state.check()
+                acc: list = []
+                source = None
+                reason = None
+                if session_id is None:
+                    reason = "no_session"
+                else:
+                    yield _sse_event("phase", {"phase": "streaming", "source": "resume"})
+                    try:
+                        yield from _stream(prompts.build_followup(question), acc,
+                                           resume=session_id)
+                        source = "resume"
+                    except claude_cli.ClaudeUnavailableError as exc:
+                        # Fall back only when the resume failed BEFORE any text
+                        # (session not found, a nonzero exit, a CLI without
+                        # --resume). A sign-in / usage-limit failure would hit
+                        # the fresh call too, so it is reported as is.
+                        if (acc or state.cancelled
+                                or claude_cli.is_auth_or_limit_error(str(exc))):
+                            raise
+                        reason = ("unsupported"
+                                  if isinstance(exc, claude_cli.ResumeUnsupportedError)
+                                  else "resume_failed")
+                        app.logger.info("follow-up resume failed (%s); falling back", exc)
+                if source is None:
+                    yield _sse_event(
+                        "phase", {"phase": "streaming", "source": "fallback", "reason": reason}
+                    )
+                    acc = []
+                    yield from _stream(prompts.build_followup(question, doc=doc_text), acc,
+                                       resume=None)
+                    source = "fallback"
+                answer = "".join(acc).strip()
+                if not answer:
+                    raise RuntimeError("Claude returned an empty answer")
+                yield _sse_event("phase", {"phase": "saving"})
+                state.commit()  # cancel wins only before this point
+                try:
+                    heading = storage.append_followup(resolved, question, answer)
+                except FileNotFoundError:
+                    raise RuntimeError(
+                        "the doc was moved or deleted while Claude answered; nothing was saved"
+                    ) from None
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"could not add the answer to the doc ({exc.strerror or exc})"
+                    ) from exc
+                try:
+                    problem_store.record_followup(
+                        rel_path,
+                        problem_id=logged.get("problem_id"),
+                        resumed=source == "resume",
+                        session_id=session_id if source == "resume" else None,
+                        model=run_meta.get("model") or model or config.model(),
+                        duration_s=time.monotonic() - started,
+                    )
+                except Exception:  # noqa: BLE001 - the doc already holds the answer
+                    app.logger.exception("could not log the follow-up on %s", rel_path)
+                _invalidate_library_cache()
+                done = {"path": rel_path, "source": source, "resumed": source == "resume",
+                        "heading": heading}
+                if reason:
+                    done["reason"] = reason
+                if run_meta.get("model"):
+                    done["model"] = run_meta["model"]
+                yield _sse_event("done", done)
+            except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
+                if state.cancelled:
+                    yield _sse_event("cancelled", "Follow-up cancelled.")
+                else:
+                    app.logger.exception("follow-up failed on %s", rel_path)
+                    yield _sse_event("error", f"Follow-up failed: {exc}")
+            finally:
+                _release_followup(followup_id, state)
+
+        resp = Response(
+            stream_with_context(event_stream()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Followup-Id": followup_id,
+            },
+        )
+        resp.call_on_close(lambda: _release_followup(followup_id, state))
+        return resp
+
+    @app.post("/followup/cancel")
+    def cancel_followup():
+        # SP8 / D6: Stop / Esc on the follow-up box. Same contract as
+        # /run/cancel: 200 {"cancelled": true}; 200 {"cancelled": false} once
+        # the answer is being appended (too late); 404 unknown; 400 invalid.
+        data, err = _json_object()
+        if err:
+            return err
+        followup_id = data.get("followup_id")
+        if not isinstance(followup_id, str) or not _RUN_ID_RE.fullmatch(followup_id):
+            return jsonify({"error": "A valid followup_id is required."}), 400
+        with _inflight_lock:
+            state = _followups.get(followup_id)
+        if state is None:
+            return jsonify({"cancelled": False}), 404
+        if not state.cancel():
+            return jsonify({"cancelled": False})
+        _release_followup(followup_id, state)
         return jsonify({"cancelled": True})
 
     return app

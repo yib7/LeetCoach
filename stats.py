@@ -64,6 +64,8 @@ def _activities(entries, files):
     for e in entries:
         if not isinstance(e, dict):
             continue
+        if e.get("mode") == "followup":
+            continue  # SP8 / D6: a follow-up question is not a study run
         for f in e.get("files") or ():
             if isinstance(f, str):
                 logged_files.add(f)

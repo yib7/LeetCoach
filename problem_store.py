@@ -29,6 +29,12 @@ source of truth: a run's line is appended BEFORE its record is updated, and a
 failing record write never loses the line. A run that saved no files is not
 logged. ``tier`` is only kept for Answer runs (``null`` otherwise).
 
+SP8 / D6: a follow-up question answered on a saved doc is logged too, as
+``{ts, mode: "followup", problem_id, doc, resumed, session_id, model,
+duration_s}`` - it names the doc in ``doc`` (never ``files``) and is NOT a
+study run: :func:`read_runs` leaves follow-ups out unless asked, so Stats, run
+counts, the library's path index and :func:`session_for_doc` never see them.
+
 The parsed log and a light record index (id / number / title / difficulty -
 never the statement) are cached per library root and keyed on the files'
 ``(mtime, size)``, so an append made outside this process is picked up on
@@ -65,6 +71,7 @@ import storage
 META_DIR = ".leetcoach"
 PROBLEMS_DIR = "problems"
 RUNS_FILE = "runs.jsonl"
+FOLLOWUP_MODE = "followup"  # SP8 / D6: a follow-up log line, not a study run
 LOCK_FILE = ".lock"
 
 DIFFICULTIES = ("Easy", "Medium", "Hard")
@@ -366,26 +373,74 @@ def _parse_log(raw: bytes) -> list[dict]:
     return entries
 
 
-def read_runs(*, root=None) -> list[dict]:
+def is_followup(entry) -> bool:
+    """True for a D6 follow-up log line (not a saved study run)."""
+    return isinstance(entry, dict) and entry.get("mode") == FOLLOWUP_MODE
+
+
+def read_runs(*, root=None, include_followups: bool = False) -> list[dict]:
     """Every parsable run-log entry, oldest first. Torn / garbage lines and
     non-object lines are skipped; a missing log is an empty list. Cached on
-    the log's ``(mtime, size)`` - treat the returned dicts as read-only."""
+    the log's ``(mtime, size)`` - treat the returned dicts as read-only.
+
+    SP8 / D6: follow-up lines are left out unless ``include_followups`` - they
+    are not runs (Stats, run counts and the path index count study runs)."""
     path = meta_dir(root) / RUNS_FILE
     sig = _file_sig(path)
     if sig is None:
         return []
-    hit = _cache_get(_log_cache, str(path), sig)
-    if hit is not None:
-        return list(hit)
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return []
-    entries = _parse_log(raw)
-    # ``sig`` was taken before the read: a line appended meanwhile changes the
-    # key, so the next call re-reads rather than trusting this snapshot.
-    _cache_put(_log_cache, str(path), (sig, tuple(entries)))
-    return entries
+    entries = _cache_get(_log_cache, str(path), sig)
+    if entries is None:
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return []
+        entries = tuple(_parse_log(raw))
+        # ``sig`` was taken before the read: a line appended meanwhile changes
+        # the key, so the next call re-reads rather than trusting this snapshot.
+        _cache_put(_log_cache, str(path), (sig, entries))
+    if include_followups:
+        return list(entries)
+    return [e for e in entries if not is_followup(e)]
+
+
+def session_for_doc(rel_path: str, *, root=None) -> dict | None:
+    """SP8 / D6: the most recent study-run log entry whose ``files`` include
+    the library-relative ``rel_path`` (forward slashes), or ``None`` (a legacy
+    doc the log never saw). Its ``session_id`` may be missing or ``None``."""
+    found = None
+    for entry in read_runs(root=root):
+        files = entry.get("files")
+        if isinstance(files, list) and rel_path in files:
+            found = entry  # oldest first: the last match is the newest run
+    return found
+
+
+def record_followup(
+    rel_path: str,
+    *,
+    problem_id: str | None,
+    resumed: bool,
+    session_id: str | None,
+    model: str | None,
+    duration_s: float | None,
+    now: datetime | None = None,
+    root=None,
+) -> None:
+    """SP8 / D6: append one follow-up line to the run log (locked, fsynced).
+    The doc goes in ``doc``, never ``files``, so the path index and Stats'
+    legacy-file grouping are unaffected."""
+    now = now or datetime.now().astimezone()
+    append_run({
+        "ts": now.isoformat(timespec="seconds"),
+        "mode": FOLLOWUP_MODE,
+        "problem_id": problem_id or None,
+        "doc": rel_path,
+        "resumed": bool(resumed),
+        "session_id": session_id or None,
+        "model": model or None,
+        "duration_s": round(duration_s, 1) if duration_s is not None else None,
+    }, root=root)
 
 
 # --- problem records --------------------------------------------------------------

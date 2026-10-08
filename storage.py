@@ -11,6 +11,10 @@ Directory layout (from the plan):
       answers/<problem_type>/<problem>__<tier>.<ext>   (+ a sibling .md)
       reviews/<problem_type>/<problem>__review.md      (SP7 Code Review)
 
+A saved ``.md`` doc can later grow ``## Follow-up — <question>`` sections at
+its end (SP8 / D6, :func:`append_followup`), written in place under the same
+write lock and through the same atomic helper.
+
 The single most important property is **containment**: a hostile problem name
 like ``../../etc/passwd`` (or an absolute path, or one full of backslashes) must
 never let a write escape ``config.output_dir()``. We achieve that by running
@@ -309,6 +313,76 @@ def save_answer(
         folder, stem, [(ext, code), ("md", reasoning)]
     )
     return code_path, reasoning_path
+
+
+# --- follow-up answers appended to a saved doc (SP8 / D6) -----------------
+
+FOLLOWUP_HEADING = "## Follow-up — "
+FOLLOWUP_TITLE_CAP = 80
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]+")
+_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_TOP_HEADING = re.compile(r"^ {0,3}#{1,2}(?=[ \t]|$)")
+# The verdict regex (app.verdict_from_text) keys on this exact bold label; an
+# answer that quotes it is reworded so it can never read as a verdict block.
+_VERIFICATION_LABEL = re.compile(r"\*\*Verification:\*\*")
+
+
+def followup_title(question: str) -> str:
+    """The question as a one-line heading title: control characters and line
+    breaks become spaces, runs of whitespace collapse, leading ``#`` / ``>`` /
+    list markers are dropped (it must not read as more markup), and the result
+    is cut to :data:`FOLLOWUP_TITLE_CAP` characters with an ellipsis."""
+    text = _CONTROL.sub(" ", question or "")
+    text = " ".join(text.split())
+    text = re.sub(r"^[#>*+\-\s]+", "", text)
+    if not text:
+        text = "Question"
+    if len(text) > FOLLOWUP_TITLE_CAP:
+        text = text[: FOLLOWUP_TITLE_CAP - 1].rstrip() + "…"
+    return text
+
+
+def followup_body(answer: str) -> str:
+    """The answer as it goes under its heading. Outside code fences an H1/H2
+    the model wrote becomes an H3, so the follow-up stays ONE section of the
+    doc and can never open a new ``## Follow-up`` / ``## Flashcards`` section,
+    and a quoted ``**Verification:**`` label is reworded so it can never read
+    as the app's verdict block."""
+    out = []
+    fence = None
+    for line in (answer or "").replace("\r\n", "\n").strip("\n").split("\n"):
+        stripped = line.strip()
+        m = _FENCE_OPEN.match(line)
+        if fence is None and m:
+            fence = m.group(1)
+        elif fence is not None:
+            if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+                fence = None
+        else:
+            line = _TOP_HEADING.sub("###", line, count=1)
+            line = _VERIFICATION_LABEL.sub("**Verification**:", line)
+        out.append(line)
+    return "\n".join(out).rstrip()
+
+
+def followup_section(question: str, answer: str) -> str:
+    """The Markdown appended for one follow-up (no leading blank lines)."""
+    return f"{FOLLOWUP_HEADING}{followup_title(question)}\n\n{followup_body(answer)}\n"
+
+
+def append_followup(path, question: str, answer: str) -> str:
+    """Append a ``## Follow-up — <question>`` section to the saved doc at
+    ``path`` and return the heading line written. The read-modify-write runs
+    under the library write lock and lands through the atomic helper, so a
+    reader never sees half a doc and two follow-ups never lose each other.
+    Raises ``FileNotFoundError`` when the doc is gone (nothing is created)."""
+    target = Path(path)
+    section = followup_section(question, answer)
+    with _WRITE_LOCK:
+        text = target.read_text(encoding="utf-8")
+        text = text.replace("\r\n", "\n").rstrip("\n")
+        fsutil.atomic_write_text(target, text + "\n\n" + section)
+    return section.split("\n", 1)[0]
 
 
 # --- one-time tier rename migration --------------------------------------

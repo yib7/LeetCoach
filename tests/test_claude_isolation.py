@@ -275,6 +275,7 @@ def test_empty_tools_arg_survives_a_cmd_shim(tmp_path):
 @pytest.mark.parametrize("persona", [
     prompts.TUTOR_SYSTEM_PROMPT,
     prompts.QUICK_ASK_SYSTEM_PROMPT,
+    prompts.FOLLOWUP_SYSTEM_PROMPT,
     claude_cli.DEFAULT_SYSTEM_PROMPT,
 ])
 def test_personas_are_single_line_and_cmd_safe(persona):
