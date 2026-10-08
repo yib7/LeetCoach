@@ -43,3 +43,4 @@ session. Windows-first; 1356 pytest + 77 node tests, all mocking `claude`.
   force-added them for the cloud move; every later tick commit updates them) although `.autopilot/` is
   gitignored by project policy and the repo is public. To keep them off main: `git rm -r --cached .autopilot`
   (and `CLAUDE.md` if wanted) in one commit before merging.
+- cycle11 scratch swept — insights distilled (SECURITY.md, docs/ARCHITECTURE.md, CLAUDE.md, CHANGELOG); untracked SDD scratch deleted permanently.
