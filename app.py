@@ -464,20 +464,27 @@ def _verify_code(code: str, problem: str, language: str):
         return None, f"⚠ not auto-verified (verifier error: {exc})"
 
 
-def _is_hidden(root: Path, path: Path) -> bool:
+def _topic_index_resolved() -> Path | None:
+    try:
+        return config.topic_index_path().resolve()
+    except OSError:
+        return None
+
+
+def _is_hidden(root: Path, path: Path, topic_index_file: Path | None = None) -> bool:
     """B19: True for app metadata that is never part of the library - any
     path with a dot-prefixed segment (``.leetcoach/``, temp files), the topic
     index (``topic_index.json`` or wherever ``LEETCOACH_TOPIC_INDEX`` points
-    inside the output dir). ``path`` is resolved and inside ``root``."""
+    inside the output dir). ``path`` is inside ``root``; pass the resolved
+    topic-index path when checking many files (else it is looked up)."""
     rel = path.relative_to(root)
     if any(part.startswith(".") for part in rel.parts):
         return True
     if rel.as_posix() == "topic_index.json":
         return True
-    try:
-        return path == config.topic_index_path().resolve()
-    except OSError:
-        return False
+    if topic_index_file is None:
+        topic_index_file = _topic_index_resolved()
+    return path == topic_index_file
 
 
 def _library_signature(root: Path) -> tuple:
@@ -514,10 +521,11 @@ def _library_files(root: Path) -> list[dict]:
     if not root.is_dir():
         return []
     files = []
+    topic_index_file = _topic_index_resolved()
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in LIBRARY_EXTENSIONS:
             continue
-        if _is_hidden(root, path):
+        if _is_hidden(root, path, topic_index_file):
             continue
         try:
             stat = path.stat()
@@ -1225,7 +1233,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 # identical run to start again.
                 _release_run(run_id, state)
 
-        return Response(
+        resp = Response(
             stream_with_context(event_stream()),
             mimetype="text/event-stream",
             headers={
@@ -1234,6 +1242,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 "X-Run-Id": run_id,
             },
         )
+        # A client that leaves before the generator ever starts never reaches
+        # event_stream's finally; the response's close still frees the slot
+        # (idempotent with that finally, and only for this run's own key).
+        resp.call_on_close(lambda: _release_run(run_id, state))
+        return resp
 
     @app.post("/run/cancel")
     def cancel_run():

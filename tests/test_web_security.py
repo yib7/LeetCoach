@@ -353,3 +353,15 @@ def test_cancel_rejects_cross_origin(env):
     c = _client(Recorder())
     resp = c.post("/run/cancel", json={"run_id": "x"}, headers={"Origin": "http://evil.example"})
     assert resp.status_code == 403
+
+
+def test_a_response_closed_before_streaming_still_frees_its_slot(env):
+    from werkzeug.test import EnvironBuilder
+
+    application = app_module.create_app(run_fn=Recorder(), auth_probe=_authed)
+    environ = EnvironBuilder(path="/run", method="POST", json=RUN).get_environ()
+    body_iter = application(environ, lambda status, headers, exc_info=None: None)
+    body_iter.close()  # the client vanished before a single byte was sent
+    resp = application.test_client().post("/run", json=RUN)
+    assert resp.status_code == 200, "the abandoned run must not hold the slot"
+    resp.get_data()
