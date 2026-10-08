@@ -208,10 +208,19 @@ def collect(root: Path, files: list[dict], *, problem_id: str | None = None,
 
 # --- Anki TSV -------------------------------------------------------------------------
 
+# A field a spreadsheet would read as a formula (or DDE) gets a leading ``'``
+# so opening the export in Excel / Sheets never evaluates card text.
+_FORMULA_STARTS = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
 def tsv_field(value: str) -> str:
     """One TSV field: quoted (inner quotes doubled) when it holds a tab, a
-    line break or a double quote, or starts with ``#`` (a comment to Anki)."""
-    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    line break or a double quote, or starts with ``#`` (a comment to Anki).
+    A formula-like start (``= + - @``, tab, CR) is neutralized with ``'``."""
+    text = str(value or "")
+    if text.startswith(_FORMULA_STARTS):
+        text = "'" + text
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     if any(ch in text for ch in ("\t", "\n", '"')) or text.startswith("#"):
         return '"' + text.replace('"', '""') + '"'
     return text
