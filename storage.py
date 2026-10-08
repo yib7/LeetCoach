@@ -27,8 +27,10 @@ together, staying on one shared stem.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
+import unicodedata
 from pathlib import Path
 
 import config
@@ -87,15 +89,30 @@ def slug(name: str) -> str:
       path limit;
     * Windows reserved device names (``con`` / ``nul`` / ``com1`` ...) are
       suffixed so the slug is always a legal filename on Windows;
-    * never empty — all-garbage input yields the literal ``"untitled"`` so a
-      filename always exists.
+    * non-ASCII letters are transliterated through NFKD first (B25), so
+      ``Café`` -> ``cafe`` and full-width ``Ｔｗｏ`` -> ``two``;
+    * never empty — a title with letters but no ASCII transliteration (e.g. a
+      Chinese title) yields ``untitled_<8-hex hash>`` so distinct titles no
+      longer collide on one file (B25); pure punctuation yields the literal
+      ``"untitled"`` so a filename always exists.
     """
-    s = (name or "").strip().lower()
-    s = _UNSAFE.sub("_", s)
+    raw = (name or "").strip()
+    ascii_text = (
+        unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+    )
+    s = _UNSAFE.sub("_", ascii_text.lower())
     # Collapse any accidental runs and trim separator chars off the ends so we
     # don't get names like ``_foo_`` or ``--bar``.
     s = re.sub(r"_+", "_", s)
-    s = s.strip("_-") or "untitled"
+    s = s.strip("_-")
+    if not s:
+        if any(ch.isalnum() for ch in raw):
+            digest = hashlib.sha1(
+                unicodedata.normalize("NFC", raw).encode("utf-8")
+            ).hexdigest()[:8]
+            s = f"untitled_{digest}"
+        else:
+            s = "untitled"
     if len(s) > _MAX_SLUG:
         s = s[:_MAX_SLUG].rstrip("_-") or "untitled"
     # A bare Windows device name can't be a filename even with an extension;
@@ -178,7 +195,29 @@ def _write_entry(folder: Path, stem: str, files: list[tuple[str, str]]) -> list[
     """
     with _WRITE_LOCK:
         paths = _resolve_slot(folder, stem, files)
-        return [_write(path, body) for path, (_, body) in zip(paths, files)]
+        if len(paths) == 1:
+            return [_write(paths[0], files[0][1])]
+        # B25: an Answer's code + notes pair lands together or not at all -
+        # never an orphaned code file without its reasoning.
+        fsutil.atomic_write_many([(path, body) for path, (_, body) in zip(paths, files)])
+        return [str(path) for path in paths]
+
+
+UNSORTED_DIR = "_unsorted"
+
+
+def save_unsorted(body: str) -> str:
+    """Last-resort save (B25): write ``body`` to
+    ``output/_unsorted/<content hash>.md`` and return the path.
+
+    The web layer calls this when the normal save raises ``OSError`` (a path
+    past the OS limit, a locked or unwritable folder), so a fully streamed
+    answer is never thrown away. The name is a hash of the content, so the
+    same body always lands on the same file.
+    """
+    folder = config.output_dir() / UNSORTED_DIR
+    digest = hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
+    return _write_entry(folder, digest, [("md", body)])[0]
 
 
 def save_learning(problem: str, problem_type: str, body: str) -> str:

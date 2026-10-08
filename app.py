@@ -674,7 +674,31 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             except Exception:  # noqa: BLE001 - recording is best-effort
                 app.logger.exception("could not record topics")
 
+        def _save_with_fallback(save, fallback_body):
+            """Run the mode's ``save()`` (returns the saved paths) and return
+            ``(paths, warning)``. B25: if it raises ``OSError`` (a path past
+            the OS limit, a locked or unwritable folder, a full disk), the
+            fully streamed doc is written to ``output/_unsorted/<hash>.md``
+            instead of being thrown away, and ``warning`` tells the user where
+            it went. If even that fails the run ends in an error that says so."""
+            try:
+                return save(), None
+            except OSError as exc:
+                app.logger.exception("save failed (mode=%s); using the fallback", mode)
+                try:
+                    path = storage.save_unsorted(fallback_body)
+                except OSError as exc2:
+                    raise RuntimeError(
+                        f"the answer could not be saved ({exc}); the fallback save "
+                        f"failed too ({exc2}). Copy it from the page before leaving."
+                    ) from exc2
+                return [path], (
+                    f"Could not save to the usual library folder ({exc}). "
+                    f"Saved to {path} instead."
+                )
+
         def event_stream():
+            save_warning = None
             try:
                 # 1) classify on a background thread (audit6 P2-4). The short
                 #    classification round-trip used to complete BEFORE the first
@@ -750,17 +774,24 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     )
 
                     cls = _classification()  # join before the save needs its result
-                    code_path, reasoning_path = storage.save_answer(
-                        problem,
-                        cls.problem_type,
-                        tier=tier,
-                        language=language,
-                        code=code,
-                        reasoning=reasoning,
-                    )
-                    # B24: code_path is None when no code block was extracted
-                    # (an empty code file would otherwise land in the library).
-                    paths = [p for p in (code_path, reasoning_path) if p]
+
+                    def _save_answer():
+                        code_path, reasoning_path = storage.save_answer(
+                            problem,
+                            cls.problem_type,
+                            tier=tier,
+                            language=language,
+                            code=code,
+                            reasoning=reasoning,
+                        )
+                        # B24: code_path is None when no code block was
+                        # extracted (an empty code file would otherwise land
+                        # in the library).
+                        return [p for p in (code_path, reasoning_path) if p]
+
+                    # The reasoning .md already carries the code block, so it
+                    # alone is the fallback copy.
+                    paths, save_warning = _save_with_fallback(_save_answer, reasoning)
                 elif mode == "learning":
                     # SP5: feed already-learned topics so Claude skips/cross-links
                     # covered tech, then record this run's topics afterward.
@@ -774,7 +805,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     )
                     yield from _stream_and_accumulate(prompt)
                     cls = _classification()  # join before the save needs its result
-                    paths = [storage.save_learning(problem, cls.problem_type, out[0])]
+                    paths, save_warning = _save_with_fallback(
+                        lambda: [storage.save_learning(problem, cls.problem_type, out[0])],
+                        out[0],
+                    )
                     _record_topics(cls)
                 else:  # mode == "guided" (validation guarantees a valid tier)
                     # B22: Guided teaches the stack too - skip what is known,
@@ -801,7 +835,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         + _verification_detail(result)
                     )
                     cls = _classification()  # join before the save needs its result
-                    paths = [storage.save_guided(problem, cls.problem_type, saved)]
+                    paths, save_warning = _save_with_fallback(
+                        lambda: [storage.save_guided(problem, cls.problem_type, saved)],
+                        saved,
+                    )
                     _record_topics(cls)
 
                 # A new artifact just landed under output/ — drop the library
@@ -818,6 +855,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 }
                 if verification is not None:
                     done_payload["verification"] = verification
+                if save_warning:
+                    done_payload["save_warning"] = save_warning
                 yield _sse_event("done", done_payload)
             except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
                 # Keep the full traceback in the server log (audit P2-8); the
