@@ -92,3 +92,45 @@ def test_config_model_reports_an_unreadable_env_without_wiping_it(env, tmp_path)
     resp = application.test_client().post("/config/model", json={"model": "haiku"})
     assert resp.status_code == 500
     assert envfile.read_bytes() == original
+
+
+# --- B25: a save OSError falls back to output/_unsorted -----------------------
+
+def _boom(*args, **kwargs):
+    raise OSError(36, "File name too long")
+
+
+@pytest.mark.parametrize("mode,saver", [
+    ("learning", "save_learning"),
+    ("guided", "save_guided"),
+    ("answer", "save_answer"),
+])
+def test_save_oserror_falls_back_to_unsorted_with_a_clear_message(env, monkeypatch, mode, saver):
+    import storage
+
+    monkeypatch.setattr(storage, saver, _boom)
+    payload = {**RUN, "mode": mode, "tier": "normal"}
+    body = _client(Recorder()).post("/run", json=payload).get_data(as_text=True)
+    name, done = parse_sse(body)[1][-1]
+    assert name == "done"
+    assert len(done["paths"]) == 1
+    saved = done["paths"][0]
+    assert "_unsorted" in saved and saved.endswith(".md")
+    from pathlib import Path
+    text = Path(saved).read_text(encoding="utf-8")
+    assert "Use a hash map." in text           # the streamed answer is kept
+    if mode == "answer":
+        assert "```python solution" in text    # the code travels inside the .md
+    assert "File name too long" in done["save_warning"]
+    assert "_unsorted" in done["save_warning"]
+
+
+def test_save_and_fallback_both_failing_is_a_terminal_error(env, monkeypatch):
+    import storage
+
+    monkeypatch.setattr(storage, "save_learning", _boom)
+    monkeypatch.setattr(storage, "save_unsorted", _boom)
+    body = _client(Recorder()).post("/run", json=RUN).get_data(as_text=True)
+    name, msg = parse_sse(body)[1][-1]
+    assert name == "error"
+    assert "could not be saved" in msg.lower()

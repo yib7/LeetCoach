@@ -613,7 +613,9 @@
     check.innerHTML = CHECK_SVG;
     top.appendChild(check);
     var mid = document.createElement("div");
-    mid.appendChild(el("div", "t", "Saved to your study library"));
+    mid.appendChild(el("div", "t", payload.save_warning
+      ? "Saved to a fallback location"
+      : "Saved to your study library"));
     var subParts = [];
     var title = firstLine(problemEl.value);
     if (title) subParts.push(title);
@@ -629,6 +631,14 @@
     summaryEl.appendChild(top);
 
     var body = el("div", "sum-body");
+    if (payload.save_warning) {
+      // B25: the normal save failed (long path, locked folder, full disk) and
+      // the doc went to output/_unsorted/ instead. Say so plainly.
+      var rw = el("div", "meta-row");
+      rw.appendChild(el("span", "meta-label", "Note"));
+      rw.appendChild(chipEl(payload.save_warning, "amber"));
+      body.appendChild(rw);
+    }
     if (payload.problem_type) {
       var r1 = el("div", "meta-row");
       r1.appendChild(el("span", "meta-label", "Type"));

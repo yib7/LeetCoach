@@ -501,3 +501,60 @@ def test_migrate_second_run_finds_nothing(out_root):
     second = storage.migrate_tier_suffixes(out_root)
     assert len(first) == 1
     assert second == []  # already migrated; a repeat launch does nothing
+
+
+# --- B25: non-ASCII titles, save fallback, atomic Answer pair --------------
+
+def test_slug_transliterates_accents_via_nfkd():
+    assert storage.slug("Café Crème") == "cafe_creme"
+    assert storage.slug("Ｔｗｏ Sum") == "two_sum"  # full-width letters
+
+
+def test_slug_hash_fallback_for_titles_with_no_ascii_letters():
+    a = storage.slug("两数之和")      # "two sum" in Chinese
+    b = storage.slug("三数之和")      # "three sum"
+    assert a != b                                      # no more shared "untitled"
+    assert a.startswith("untitled_") and b.startswith("untitled_")
+    assert a == storage.slug("两数之和")  # deterministic
+    assert storage._UNSAFE.sub("", a) == a              # still a safe token
+    assert a == storage.slug(a)                         # idempotent
+
+
+def test_slug_pure_punctuation_still_untitled():
+    assert storage.slug("!!!") == "untitled"
+    assert storage.slug("") == "untitled"
+
+
+def test_non_ascii_problems_save_to_distinct_files(out_root):
+    p1 = storage.save_learning("两数之和\n...", "hash_map", "A")
+    p2 = storage.save_learning("三数之和\n...", "hash_map", "B")
+    assert Path(p1).name != Path(p2).name
+    assert "__2" not in Path(p2).name
+
+
+def test_save_unsorted_writes_hash_named_fallback(out_root):
+    path = Path(storage.save_unsorted("# Doc\n\nbody"))
+    assert path.parent == out_root / "_unsorted"
+    assert path.suffix == ".md"
+    assert path.read_text(encoding="utf-8") == "# Doc\n\nbody"
+    again = Path(storage.save_unsorted("# Doc\n\nbody"))
+    assert again == path  # same content, same name (idempotent)
+
+
+def test_answer_pair_is_written_all_or_nothing(out_root, monkeypatch):
+    import fsutil
+
+    real_replace = os.replace
+
+    def fail_md(src, dst):
+        if os.fspath(dst).endswith(".md"):
+            raise OSError(28, "disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(fsutil, "_replace", fail_md)
+    with pytest.raises(OSError):
+        storage.save_answer("Two Sum", "hash_map", tier="normal", language="python",
+                            code="print(1)", reasoning="notes")
+    folder = out_root / "answers" / "hash_map"
+    leftovers = list(folder.iterdir()) if folder.exists() else []
+    assert leftovers == []  # no orphaned .py without its .md

@@ -182,6 +182,7 @@ kbd{font:600 11px var(--mono);color:var(--tx2);background:var(--s2);border:1px s
 .chip.mint{color:var(--mint);background:var(--mint-weak);border-color:var(--mint-line)}
 .chip.cyan{color:var(--cyan);background:var(--cyan-weak);border-color:var(--cyan-line)}
 .chip.grn{color:var(--grn-2);background:var(--grn-weak);border-color:var(--grn-line)}
+.chip.amber{color:var(--amber);background:var(--amber-weak);border-color:var(--amber-line);white-space:normal}
 .tb{display:inline-grid;place-items:center;width:30px;height:19px;border-radius:5px;font:700 9.5px var(--mono);text-transform:uppercase;border:1px solid}
 .tb.py{color:var(--mint);background:var(--mint-weak);border-color:var(--mint-line)}
 .tb.cpp{color:#c39bff;background:rgba(163,131,255,.13);border-color:rgba(163,131,255,.34)}
