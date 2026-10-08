@@ -372,7 +372,8 @@ def stream(text: str, model: str, *, delay: float, stop_after: float | None = No
 
 
 def run_print(argv: list[str]) -> int:
-    raw = sys.stdin.buffer.read().decode("utf-8", "replace")
+    # The app writes stdin in text mode, which turns LF into CRLF on Windows.
+    raw = sys.stdin.buffer.read().decode("utf-8", "replace").replace("\r\n", "\n")
     system = _arg_after(argv, "--system-prompt")
     prompt = (system + "\n\n" + raw) if system else raw
     model = _model_id(argv)
