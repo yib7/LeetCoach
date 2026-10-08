@@ -731,8 +731,13 @@
   // The doc "Give up / show solution" reveals: the newest logged Answer or
   // Guided doc (they carry a solution), else the newest doc of any mode,
   // else the record's last listed .md.
+  // SP8 fix M7: every candidate in that order (newest first within each
+  // group, no duplicates), so a caller can fall back to the next one when a
+  // doc was deleted. ``existing`` (optional: a path -> file map such as the
+  // library listing, or an array of paths) drops docs that are no longer in
+  // the library; the run log is append-only and still names deleted runs.
   var SOLUTION_MODES = { answer: 1, guided: 1 };
-  function latestDocFor(record) {
+  function docCandidatesFor(record, existing) {
     record = record || {};
     var log = (record.log || []).slice();
     log.sort(function (a, b) { return String(a.ts || "").localeCompare(String(b.ts || "")); });
@@ -743,17 +748,32 @@
       }
       return "";
     }
-    var best = "";
-    var any = "";
+    var solutions = [];
+    var others = [];
     log.forEach(function (e) {
       var md = mdOf(e);
       if (!md) return;
-      any = md;
-      if (SOLUTION_MODES[String(e.mode || "")]) best = md;
+      (SOLUTION_MODES[String(e.mode || "")] ? solutions : others).push(md);
     });
-    if (best || any) return best || any;
-    var runs = (record.runs || []).filter(function (p) { return /\.md$/i.test(String(p)); });
-    return runs.length ? String(runs[runs.length - 1]) : "";
+    var runs = (record.runs || []).filter(function (p) { return /\.md$/i.test(String(p)); })
+      .map(String);
+    var ordered = solutions.reverse().concat(others.reverse(), runs.reverse());
+    var has = null;
+    if (Array.isArray(existing)) {
+      has = {};
+      existing.forEach(function (p) { has[String(p && p.path !== undefined ? p.path : p)] = 1; });
+    } else if (existing && typeof existing === "object") {
+      has = existing;
+    }
+    var seen = {};
+    return ordered.filter(function (p) {
+      if (seen[p]) return false;
+      seen[p] = 1;
+      return !has || Object.prototype.hasOwnProperty.call(has, p);
+    });
+  }
+  function latestDocFor(record, existing) {
+    return docCandidatesFor(record, existing)[0] || "";
   }
 
   // "Test my code" per-case / overall status -> label + style.
@@ -1027,6 +1047,7 @@
     dueLabel: dueLabel,
     plural: plural,
     latestDocFor: latestDocFor,
+    docCandidatesFor: docCandidatesFor,
     caseInfo: caseInfo,
     starterCode: starterCode,
     indentText: indentText,

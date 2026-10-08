@@ -812,6 +812,17 @@ def _prune_verdict_cache(root: Path, files: list[dict]) -> None:
             del _verdict_cache[key]
 
 
+def _existing_runs(runs) -> list[str]:
+    """SP8 fix M7: the paths of a problem record's ``runs`` that are still
+    library files. The record on disk is never pruned (a delete in Explorer
+    or a restored file is reflected either way); the response just stops
+    pointing at docs that are gone, so counts and "show the solution" agree
+    with the library."""
+    if not isinstance(runs, list):
+        return []
+    return [p for p in runs if isinstance(p, str) and _resolve_library_file(p) is not None]
+
+
 def _resolve_library_file(rel: str) -> Path | None:
     """Resolve a request's ``path`` param against the output root, or ``None``.
 
@@ -1155,6 +1166,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # statement; GET /problems/<id> has the full record.
         # SP6 fix O1: ``runs`` (the record's library paths) is included;
         # ``run_count`` counts saved runs from the log, ``file_count`` files.
+        # SP8 fix M7: ``runs`` / ``file_count`` list only files that still
+        # exist; ``run_count`` keeps counting the append-only log (A8).
         counts: dict = {}
         for entry in problem_store.read_runs():
             pid = entry.get("problem_id")
@@ -1163,7 +1176,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         listing = []
         for rec in problem_store.list_problems():
             item = {k: rec.get(k) for k in PROBLEM_SUMMARY_FIELDS}
-            runs = rec.get("runs") if isinstance(rec.get("runs"), list) else []
+            runs = _existing_runs(rec.get("runs"))
             aliases = rec.get("aliases") if isinstance(rec.get("aliases"), list) else []
             item["runs"] = runs
             item["aliases"] = aliases
@@ -1179,7 +1192,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"error": "Not found."}), 404
         # An alias (an id merged into this record) resolves to the record.
         log = problem_store.runs_for(pid)
-        return jsonify({**rec, "log": log})
+        # SP8 fix M7: a deleted doc drops out of ``runs`` (the log keeps it).
+        return jsonify({**rec, "runs": _existing_runs(rec.get("runs")), "log": log})
 
     @app.get("/review")
     def review_queue():
