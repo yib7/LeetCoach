@@ -47,3 +47,35 @@ def test_tsv_export_keeps_its_header_and_neutralizes_cells():
     assert head == "#separator:tab\n#html:false\n#columns:Front\tBack\tTags\n"
     rows = list(csv.reader(io.StringIO(body), delimiter="\t"))
     assert rows == [["'=2+3", "'-1", "leetcoach math 1-x"]]
+
+
+# --- 9: stderr without the sandbox run-dir path ----------------------------------------
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ('  File "C:\\Users\\Jo Smith\\AppData\\Local\\Temp\\leetcoach_run_0knjqxj5\\solution.py", '
+     'line 2', '  File "solution.py", line 2'),
+    ('  File "/tmp/leetcoach_run_ab_12/solution.py", line 7, in <module>',
+     '  File "solution.py", line 7, in <module>'),
+    ("can't open file 'C:\\Temp\\leetcoach_run_x1\\solution.py'", "can't open file 'solution.py'"),
+    ("a/b and C:\\T\\leetcoach_run_q\\solution.py", "a/b and solution.py"),
+    ("ValueError: boom", "ValueError: boom"),
+])
+def test_strip_run_dir(raw, expected):
+    assert practice.strip_run_dir(raw) == expected
+
+
+def test_run_cases_strips_the_run_dir_from_stderr_and_notes():
+    trace = ('Traceback (most recent call last):\n'
+             '  File "C:\\Temp\\leetcoach_run_0knjqxj5\\solution.py", line 2, in <module>\n'
+             "ValueError: boom")
+
+    def verify(code, stdin, expected, **kw):
+        return SimpleNamespace(status="error", note="exited with code 1",
+                               detail=[{"stdout": "", "stderr": trace, "returncode": 1}])
+
+    out = practice.run_cases("x", [practice.Case("sample", 1, "a\n", "b")], timeout=1,
+                             verify=verify)
+    assert out["cases"][0]["stderr"] == (
+        'Traceback (most recent call last):\n'
+        '  File "solution.py", line 2, in <module>\nValueError: boom')

@@ -16,6 +16,7 @@ runs; C++ / Java answer "not supported yet". Nothing here is saved.
 """
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 
@@ -29,6 +30,14 @@ MAX_SAMPLES = 10
 ECHO_CAP = 8 * 1024           # characters of input/expected/output echoed back
 
 STATUSES = ("pass", "fail", "error", "ran", "not_verified")
+
+# The sandbox runs each case in ``<tempdir>/leetcoach_run_<random>/solution.py``;
+# a traceback naming that path is noise to the learner (and leaks the temp
+# dir), so the echoed stderr shows just ``solution.py``. A path is an optional
+# drive, then slash-separated components (spaces allowed, no quote / colon).
+_RUN_DIR_RE = re.compile(
+    r"(?:[A-Za-z]:)?[\\/](?:[^\\/:\"'\n]*[\\/])*?"
+    + re.escape(sandbox._RUN_DIR_PREFIX) + r"\w+[\\/]")
 
 
 class CaseError(ValueError):
@@ -81,6 +90,12 @@ def sample_cases(statement: str) -> list[Case]:
     return [Case("sample", i, s.stdin, s.expected_stdout) for i, s in enumerate(samples, 1)]
 
 
+def strip_run_dir(text: str) -> str:
+    """``text`` with every sandbox run-dir prefix removed
+    (``File "C:\\...\\leetcoach_run_x\\solution.py"`` -> ``File "solution.py"``)."""
+    return _RUN_DIR_RE.sub("", text or "")
+
+
 def _clip(text) -> str:
     text = "" if text is None else str(text)
     return text if len(text) <= ECHO_CAP else text[:ECHO_CAP] + "\n… (truncated)"
@@ -110,7 +125,7 @@ def run_cases(code: str, cases: list[Case], *, problem_text: str = "",
         r = verify(code, case.stdin, case.expected or "", timeout=timeout,
                    problem_text=problem_text, cancel=cancel)
         status = getattr(r, "status", "error")
-        note = getattr(r, "note", "") or ""
+        note = strip_run_dir(getattr(r, "note", "") or "")
         if status == "not_verified":
             stopped_note = note or "the sandbox could not run the code"
             break
@@ -125,7 +140,7 @@ def run_cases(code: str, cases: list[Case], *, problem_text: str = "",
             "input": _clip(case.stdin.rstrip("\n")),
             "expected": None if case.expected is None else _clip(case.expected),
             "got": _clip(detail.get("stdout", "")),
-            "stderr": _clip(detail.get("stderr", "")),
+            "stderr": _clip(strip_run_dir(detail.get("stderr", ""))),
             "returncode": detail.get("returncode"),
         })
     compared = [r for r in results if r["expected"] is not None or r["status"] == "error"]

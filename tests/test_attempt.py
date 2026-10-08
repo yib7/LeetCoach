@@ -123,6 +123,9 @@ def test_erroring_code_reports_the_crash(client, root):
     case = data["cases"][0]
     assert case["status"] == "error"
     assert "ValueError" in case["stderr"] and "boom" in case["stderr"]
+    # SP7 fix 9: the traceback names solution.py, not the throwaway run dir
+    assert 'File "solution.py"' in case["stderr"]
+    assert "leetcoach_run_" not in case["stderr"]
     assert case["returncode"] not in (0, None)
     assert "exited with code" in case["note"]
 
