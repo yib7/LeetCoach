@@ -6,7 +6,12 @@ reset to this template with the rest of `.autopilot/` — whatever isn't picked 
 the tree.
 
 ## Inbox (unsorted ideas)
-- 
+- Feed `/attempt/test` results into the Code Review prompt (review runs are never sandbox-verified).
+- Sandbox: a safe asyncio allowance on Windows (loopback socketpair) without reopening the bypasses found in SP3.
+- Attempt/Test my code for C++/Java (ties to D14).
+- Re-attempt view nav entry (today it opens only from Due today or the library viewer).
+- Library listing shows Language '—' for Code Review docs (no code file); store the language in the record.
+- Remind users on first 1.5 launch that pre-SP7 problems all start overdue (Leitner box 1).
 
 ## Next cycle (promoted, ready to brainstorm)
 - D8 progress-by-pattern view (weakest patterns + "try next"), needs the SP2 fixed pattern list.

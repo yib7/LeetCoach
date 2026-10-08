@@ -218,11 +218,12 @@ notes persist; flashcards review + TSV export download; suite + ruff green.
 accurate; full suite + ruff green from committed HEAD; browser walkthrough of every new feature with zero
 console errors; MILESTONES written; branch handed to human.
 
-- [ ] D6 — `POST /followup` SSE with `--resume <session_id>` + fallback; append to doc; UI box in viewer.
-- [ ] C13 — docs drift fixed (auth claims, ARCHITECTURE routes/config, Quick Ask model tag from config, stale
+- [x] D6 — `POST /followup` SSE with `--resume <session_id>` + fallback; append to doc; UI box in viewer.
+- [x] C13 — docs drift fixed (auth claims, ARCHITECTURE routes/config, Quick Ask model tag from config, stale
   comments); README features + settings table; CHANGELOG `[1.5.0]`; SECURITY.md sandbox/isolation notes.
-- [ ] Final: full suite + ruff + ps1 parse + node tests; browser walkthrough; `requesting-code-review` over the
+- [x] Final: full suite + ruff + ps1 parse + node tests; browser walkthrough; `requesting-code-review` over the
   whole branch diff and fix findings; `finishing-a-development-branch` (merge = human gate).
+- Verified: 2026-10-08 orchestrator at 7818106: 1356 passed/1 skipped, ruff clean, node 77/77, ps1 parse 0 errors (3 files), SP3 stress 700MB x20 contained 20/20 with 0 leftover run dirs. Browser on fake harness: follow-up resumed + FAKE_NORESUME fallback + Stop (nothing appended) + verdict unchanged + Ctrl+Enter scoped to the box; full walkthrough (Guided run stream/save, Quick Ask with config tag, Stats, review queue, flashcards) with zero console errors after the favicon fix; follow-up keeps the doc's date in Recent runs; Give up skips a deleted doc. Final whole-branch review: 0 Critical, I1 + M1-M7 fixed (3c42bc6..7818106); docs routes table == app.url_map (test-enforced). Merge to main = human gate.
 
 ## Blocked (filled in during the run)
 
