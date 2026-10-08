@@ -1,4 +1,4 @@
-"""Prompt construction for the three study modes.
+"""Prompt construction for the four study modes, Quick Ask and follow-ups.
 
 Public builders
 ---------------
@@ -18,6 +18,9 @@ Public builders
   (answered by Haiku). Any problem in the composer is passed as *context only* so
   the guardrail can recognise — and refuse with one fixed redirect sentence —
   questions that are really asking for the current problem's solution.
+* :func:`build_followup` — SP8 / D6; a follow-up question on a saved doc. When
+  the run's session is resumed only the (fenced) question is sent; the
+  fallback also sends the doc, fenced and capped at :data:`FOLLOWUP_DOC_CAP`.
 
 Design: the modes share small reusable *fragments* so wording can't drift
 between them — notably the language stdlib hint, the Big-O instruction, and the
