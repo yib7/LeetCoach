@@ -2,9 +2,11 @@
 
 These knobs are the only machine-specific settings the app needs:
 
-- ``LEETCOACH_MODEL``       — Claude model id passed to ``claude --model`` (default
-                              ``claude-opus-4-8``; override with a smaller/faster
-                              alias like ``sonnet`` to save your subscription budget).
+- ``LEETCOACH_MODEL``       — Claude model alias/id passed to ``claude --model``
+                              (default ``opus``, an alias the CLI resolves to the
+                              latest Opus; override with ``fable`` for the most
+                              capable model, or a smaller/faster alias like
+                              ``sonnet`` to save your subscription budget).
 - ``LEETCOACH_CLASSIFIER_MODEL`` — model for the short classification call (default
                               ``haiku`` — classifying a problem is trivial, so the
                               cheapest model saves budget on every run).
@@ -41,7 +43,9 @@ import os
 from pathlib import Path
 
 # Defaults live here so they are documented in one place and referenced by name.
-DEFAULT_MODEL = "claude-opus-4-8"
+# An alias (not a pinned id): the CLI resolves it to the newest Opus, so the
+# default keeps tracking new releases with nothing to maintain here.
+DEFAULT_MODEL = "opus"
 DEFAULT_CLASSIFIER_MODEL = "haiku"  # classification is trivial; cheapest model wins
 DEFAULT_QUICK_ASK_MODEL = "haiku"  # a syntax lookup is trivial; cheapest model wins
 DEFAULT_CLAUDE_BIN = "claude"
@@ -73,14 +77,37 @@ def model() -> str:
 # maintain as new versions ship. Anything reaching `--model` is allowlisted to
 # one of these; an explicit id like ``claude-opus-5`` is still settable by hand
 # in ``.env``.
-ALLOWED_MODEL_ALIASES = ("opus", "sonnet", "haiku")
+ALLOWED_MODEL_ALIASES = ("fable", "opus", "sonnet", "haiku")
+
+# The newest model behind each alias, as of the last review. DISPLAY ONLY (the
+# picker's button tooltips): the alias, never this id, is what reaches
+# ``claude --model``, so the app keeps tracking the CLI's latest models even if
+# this table goes stale. Bump it when a new generation ships.
+LATEST_MODEL_IDS = {
+    "fable": "claude-fable-5-1",
+    "opus": "claude-opus-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "haiku": "claude-haiku-5-5",
+}
+
+
+def model_label(alias: str) -> str:
+    """Human label for an alias from :data:`LATEST_MODEL_IDS`, e.g. ``Opus 5.5``.
+
+    Display only. Falls back to the capitalised alias if it has no entry.
+    """
+    model_id = LATEST_MODEL_IDS.get(alias)
+    if not model_id:
+        return alias.capitalize()
+    parts = model_id.split("-")  # claude-opus-5-5 -> ["claude", "opus", "5", "5"]
+    return f"{parts[1].capitalize()} {'.'.join(parts[2:])}"
 
 
 def model_alias() -> str:
     """The picker alias that best matches the currently configured model.
 
     Maps the active :func:`model` id to one of :data:`ALLOWED_MODEL_ALIASES` by
-    substring (so the default ``claude-opus-4-8`` highlights ``opus``). Returns
+    substring (so both the default ``opus`` alias and a pinned ``claude-opus-5-5`` highlight ``opus``). Returns
     ``""`` when the configured model matches no alias — the picker then shows no
     selection rather than a wrong one.
     """

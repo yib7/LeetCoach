@@ -115,7 +115,7 @@ def test_default_model_used_when_none_given(monkeypatch):
     list(claude_cli.run("hi", runner=runner))
 
     argv = calls[0]["argv"]
-    assert "claude-opus-4-8" in argv
+    assert "opus" in argv  # the default is the `opus` alias (tracks the latest Opus)
 
 
 # --- (b) stream-json -> text-delta assembly ------------------------------

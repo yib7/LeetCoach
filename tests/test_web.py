@@ -785,12 +785,23 @@ def test_index_injects_signed_in_and_model_flags(client):
     html = c.get("/").get_data(as_text=True)
     assert 'data-claude-available="true"' in html
     assert 'data-claude-logged-in="true"' in html
-    # default model (claude-opus-4-8) maps to the picker's "opus"
+    # default model (the `opus` alias) maps to the picker's "opus"
     assert 'data-claude-model="opus"' in html
     # no unreplaced placeholders leak to the page
     assert "__CLAUDE_AVAILABLE__" not in html
     assert "__CLAUDE_LOGGED_IN__" not in html
     assert "__CLAUDE_MODEL__" not in html
+
+
+def test_index_picker_offers_fable_and_shows_latest_versions(client):
+    c, _ = client
+    html = c.get("/").get_data(as_text=True)
+    for alias in ("fable", "opus", "sonnet", "haiku"):
+        assert f'data-val="{alias}"' in html
+    # display-only version labels come from config.LATEST_MODEL_IDS
+    assert 'title="Fable 5.1' in html
+    assert 'title="Opus 5.5"' in html
+    assert "__MODEL_LABEL_" not in html
 
 
 def test_index_signed_out_flag_is_false():
@@ -816,6 +827,14 @@ def test_config_model_persists_and_takes_effect(client):
     # ... and live in the process so the next run uses it with no restart
     import config
     assert config.model() == "sonnet"
+
+
+def test_config_model_accepts_fable(client):
+    c, tmp_path = client
+    resp = c.post("/config/model", json={"model": "fable"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "model": "fable"}
+    assert "LEETCOACH_MODEL=fable" in (tmp_path / ".env").read_text(encoding="utf-8")
 
 
 def test_config_model_rejects_unknown_alias(client):

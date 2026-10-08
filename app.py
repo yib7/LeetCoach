@@ -450,6 +450,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         html = html.replace("__CLAUDE_AVAILABLE__", "true" if installed else "false")
         html = html.replace("__CLAUDE_LOGGED_IN__", "true" if logged_in else "false")
         html = html.replace("__CLAUDE_MODEL__", config.model_alias())
+        # Display-only version labels for the picker tooltips (the alias, not
+        # this label, is what reaches `--model`).
+        for alias in config.ALLOWED_MODEL_ALIASES:
+            html = html.replace(
+                f"__MODEL_LABEL_{alias.upper()}__", config.model_label(alias)
+            )
         return Response(html, mimetype="text/html")
 
     @app.post("/config/model")
