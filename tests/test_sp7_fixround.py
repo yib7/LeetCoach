@@ -172,3 +172,89 @@ def test_a_running_uncancelled_test_still_gives_409(application, root, monkeypat
     assert time.monotonic() - t0 < 1  # no waiting on a run nobody cancelled
     release.set()
     t.join(10)
+
+
+# --- 7: merging an un-numbered record into a numbered one ------------------------------
+
+def _write(root, pid, **fields):
+    folder = root / ".leetcoach" / "problems"
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = {"id": pid, "number": None, "title": "Two Sum", "difficulty": None,
+           "pattern": "hash_map", "statement": "", "created": "2026-01-01T00:00:00",
+           "updated": "2026-01-01T00:00:00", "notes": "",
+           "review": {"box": 1, "due": "2026-01-02", "history": []},
+           "runs": [], "aliases": []}
+    rec.update(fields)
+    (folder / f"{pid}.json").write_text(json.dumps(rec), "utf-8")
+
+
+def _read(root, pid):
+    return json.loads((root / ".leetcoach/problems" / f"{pid}.json").read_text("utf-8"))
+
+
+def _merge(root):
+    """A numbered paste folds the un-numbered ``two_sum`` into ``1-two_sum``."""
+    pid = _seed(root)
+    assert pid == "1-two_sum"
+    assert not (root / ".leetcoach/problems/two_sum.json").exists()
+    return _read(root, pid)
+
+
+def _h(day, grade, box):
+    return {"ts": f"{day}T09:00:00", "day": day, "grade": grade, "from_box": 1, "box": box,
+            "due": day}
+
+
+def test_merge_keeps_the_more_recently_reviewed_schedule(root):
+    _write(root, "two_sum", review={
+        "box": 4, "due": "2026-03-01", "last_reviewed": "2026-02-15T09:00:00",
+        "history": [_h("2026-02-01", "solo", 3), _h("2026-02-15", "solo", 4)]})
+    _write(root, "1-two_sum", number=1, review={
+        "box": 2, "due": "2026-02-10", "last_reviewed": "2026-02-07T09:00:00",
+        "history": [_h("2026-02-07", "solo", 2)]})
+    rec = _merge(root)
+    assert rec["review"]["box"] == 4 and rec["review"]["due"] == "2026-03-01"
+    assert rec["review"]["last_reviewed"] == "2026-02-15T09:00:00"
+    assert [h["day"] for h in rec["review"]["history"]] == [
+        "2026-02-01", "2026-02-07", "2026-02-15"]
+
+
+def test_merge_keeps_the_numbered_schedule_when_it_is_newer(root):
+    _write(root, "two_sum", review={"box": 1, "due": "2026-01-02", "history": []})
+    _write(root, "1-two_sum", number=1, review={
+        "box": 3, "due": "2026-02-20", "last_reviewed": "2026-02-13T09:00:00",
+        "history": [_h("2026-02-13", "solo", 3)]})
+    rec = _merge(root)
+    assert (rec["review"]["box"], rec["review"]["due"]) == (3, "2026-02-20")
+    assert len(rec["review"]["history"]) == 1
+
+
+def test_merge_history_is_deduplicated_and_capped(root, monkeypatch):
+    monkeypatch.setattr(ps, "REVIEW_HISTORY_CAP", 3)
+    shared = _h("2026-02-01", "solo", 2)
+    _write(root, "two_sum", review={
+        "box": 2, "due": "2026-02-04", "last_reviewed": "2026-02-03T09:00:00",
+        "history": [shared, _h("2026-02-02", "hints", 2), _h("2026-02-03", "hints", 2)]})
+    _write(root, "1-two_sum", number=1, review={
+        "box": 1, "due": "2026-01-31", "last_reviewed": "2026-02-01T09:00:00",
+        "history": [_h("2026-01-30", "peeked", 1), shared]})
+    rec = _merge(root)
+    assert [h["day"] for h in rec["review"]["history"]] == [
+        "2026-02-01", "2026-02-02", "2026-02-03"]
+
+
+def test_merged_notes_are_capped_with_a_marker(root):
+    _write(root, "two_sum", notes="a" * 15_000)
+    _write(root, "1-two_sum", number=1, notes="b" * 15_000)
+    rec = _merge(root)
+    assert len(rec["notes"]) == ps.NOTES_CAP
+    assert rec["notes"].startswith("a" * 100)
+    assert rec["notes"].endswith(ps.MERGED_NOTES_MARKER)
+    # a later notes save of the capped text still fits the endpoint's cap
+    assert ps.set_notes("1-two_sum", rec["notes"], root=root) is not None
+
+
+def test_short_merged_notes_are_joined_unchanged(root):
+    _write(root, "two_sum", notes="first")
+    _write(root, "1-two_sum", number=1, notes="second")
+    assert _merge(root)["notes"] == "first\n\nsecond"

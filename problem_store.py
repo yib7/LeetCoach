@@ -518,6 +518,39 @@ def _source(rec: dict) -> str | None:
     return rec.get("difficulty_source") or "doc"
 
 
+def _cap_notes(notes: str) -> str:
+    """Merged notes within :data:`NOTES_CAP` (SP7 fix 7): the joined text is
+    cut with a visible marker, so a later notes save does not fail the cap."""
+    if len(notes) <= NOTES_CAP:
+        return notes
+    return notes[:NOTES_CAP - len(MERGED_NOTES_MARKER)] + MERGED_NOTES_MARKER
+
+
+def _merged_review(target: dict, old: dict) -> dict:
+    """The review schedule of a merged record (SP7 fix 7): the box and due
+    day of whichever side was graded last (the target's on a tie or when
+    neither was), with both histories joined in time order, de-duplicated
+    and capped."""
+    def last(review: dict) -> str:
+        value = review.get("last_reviewed")
+        return value if isinstance(value, str) else ""
+
+    base = dict(old if last(old) > last(target) else target)
+    if not base:
+        base = {"box": REVIEW_FIRST_BOX, "due": None}
+    history, seen = [], set()
+    for h in list(target.get("history") or ()) + list(old.get("history") or ()):
+        if not isinstance(h, dict):
+            continue
+        key = json.dumps(h, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            history.append(h)
+    history.sort(key=lambda h: str(h.get("ts") or ""))
+    base["history"] = history[-REVIEW_HISTORY_CAP:]
+    return base
+
+
 def _merged(target: dict | None, old: dict, pid: str, number: int | None) -> dict:
     """``old`` (an un-numbered record) folded into ``target`` (or into a new
     record ``pid`` when there is none yet)."""
@@ -537,7 +570,8 @@ def _merged(target: dict | None, old: dict, pid: str, number: int | None) -> dic
     if len(old.get("statement") or "") > len(rec.get("statement") or ""):
         rec["statement"] = old["statement"]
     notes = [n for n in (old.get("notes"), rec.get("notes")) if isinstance(n, str) and n]
-    rec["notes"] = "\n\n".join(notes)
+    rec["notes"] = _cap_notes("\n\n".join(notes))
+    rec["review"] = _merged_review(_review_of(rec), _review_of(old))
     if (not rec.get("pattern") or rec.get("pattern") == patterns.FALLBACK) and old.get("pattern"):
         rec["pattern"] = old["pattern"]
     if old.get("difficulty") and (
@@ -733,6 +767,8 @@ REVIEW_MAX_BOX = len(REVIEW_INTERVALS)
 GRADES = ("solo", "hints", "peeked")
 REVIEW_HISTORY_CAP = 200
 NOTES_CAP = 20_000
+# Ends notes cut to NOTES_CAP when two records merge (SP7 fix 7).
+MERGED_NOTES_MARKER = "\n\n[... notes truncated at 20,000 characters when two records merged]"
 
 
 def local_today(now: datetime | None = None) -> date:
