@@ -62,6 +62,7 @@ import classifier
 import claude_cli
 import config
 import parsing
+import practice
 import problem_store
 import prompts
 import sandbox
@@ -902,6 +903,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     _inflight_runs: dict = {}
     _runs: dict = {}
     _asks: dict = {}  # B20: ask_id -> [call or None, cancelled Event] for /ask/cancel
+    _attempts: dict = {}  # SP7: test_id -> cancel Event for /attempt/cancel
+    _attempt_slot = threading.Lock()  # SP7: one "Test my code" run at a time
     _inflight_lock = threading.Lock()
 
     def _cancel_ask_call(call) -> None:
@@ -1187,6 +1190,86 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"error": "Not found."}), 404
         return jsonify({"ok": True, "id": rec["id"], "notes_updated": rec.get("notes_updated"),
                         "length": len(notes)})
+
+    @app.post("/attempt/test")
+    def attempt_test():
+        # SP7 / D3: "Test my code" in the re-attempt view. Python only, run
+        # through the hardened sandbox against the saved statement's samples
+        # plus the learner's own cases. Plain JSON; one test run at a time
+        # (the sandbox is CPU-heavy); POST /attempt/cancel {test_id} stops it.
+        data, err = _json_object()
+        if err:
+            return err
+        type_err = _non_string_field_error(
+            data, (("problem_id", "Problem id"), ("code", "Code"),
+                   ("language", "Language"), ("test_id", "Test id")))
+        if type_err:
+            return jsonify({"error": type_err}), 400
+        pid = data.get("problem_id") or ""
+        if not problem_store.valid_problem_id(pid):
+            return jsonify({"error": "A valid problem_id is required."}), 400
+        test_id = data.get("test_id")
+        if test_id is not None and not _RUN_ID_RE.fullmatch(test_id):
+            return jsonify({"error": "Invalid test id."}), 400
+        language = (data.get("language") or "").strip().lower()
+        if language not in LANGUAGES:
+            return jsonify({"error": f"Unknown language {language!r}."}), 400
+        code = (data.get("code") or "").replace("\r\n", "\n")
+        if len(code) > practice.CODE_CAP:
+            return jsonify({"error": f"Code is too long (max {practice.CODE_CAP} "
+                            "characters)."}), 400
+        include_samples = data.get("include_samples", True)
+        if not isinstance(include_samples, bool):
+            return jsonify({"error": "include_samples must be true or false."}), 400
+        try:
+            custom = practice.parse_custom_cases(data.get("cases"))
+        except practice.CaseError as exc:
+            return jsonify({"error": str(exc)}), 400
+        rec = problem_store.load_problem(pid)
+        if rec is None:
+            return jsonify({"error": "Not found."}), 404
+        if language != "python":
+            return jsonify({"supported": False, "status": "not_supported",
+                            "message": practice.unsupported_message(language)})
+        if not code.strip():
+            return jsonify({"error": "Write some code first."}), 400
+        statement = rec.get("statement") or ""
+        cases = (practice.sample_cases(statement) if include_samples else []) + custom
+        if not cases:
+            return jsonify({"error": "No test cases: the saved statement has no sample "
+                            "Input/Output - add a case of your own."}), 400
+        if not _attempt_slot.acquire(blocking=False):
+            return jsonify({"error": "A test run is already in progress."}), 409
+        cancel = threading.Event()
+        try:
+            if test_id:
+                with _inflight_lock:
+                    _attempts[test_id] = cancel
+            result = practice.run_cases(code, cases, problem_text=statement, cancel=cancel)
+        finally:
+            if test_id:
+                with _inflight_lock:
+                    if _attempts.get(test_id) is cancel:
+                        del _attempts[test_id]
+            _attempt_slot.release()
+        if cancel.is_set():
+            result["cancelled"] = True
+        return jsonify({"supported": True, "problem_id": rec.get("id"), **result})
+
+    @app.post("/attempt/cancel")
+    def attempt_cancel():
+        data, err = _json_object()
+        if err:
+            return err
+        test_id = data.get("test_id")
+        if not isinstance(test_id, str) or not _RUN_ID_RE.fullmatch(test_id):
+            return jsonify({"error": "A valid test_id is required."}), 400
+        with _inflight_lock:
+            event = _attempts.get(test_id)
+        if event is None:
+            return jsonify({"cancelled": False}), 404
+        event.set()  # the sandbox kills the running case within a poll tick
+        return jsonify({"cancelled": True})
 
     @app.get("/stats")
     def stats_route():
