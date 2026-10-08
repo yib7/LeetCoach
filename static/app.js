@@ -2,32 +2,40 @@
  *
  * POSTs the run form to /run and consumes the SSE response with fetch +
  * ReadableStream (POST body is cleanest this way — no EventSource GET dance).
- * Text deltas append live; the accumulated markdown is re-rendered with the
- * vendored `marked`, code blocks are syntax-highlighted with the vendored
- * `highlight.js` and wrapped in chrome. A terminal `done` event shows the
- * saved-summary card; `error`/abort surface a failure while KEEPING the partial
- * output. No runtime CDN dependency.
+ * Text deltas accumulate and the markdown is re-rendered (throttled) with the
+ * vendored `marked`; closed code blocks are syntax-highlighted with the
+ * vendored `highlight.js` and wrapped in chrome. A terminal `done` event shows
+ * the saved-summary card; `error`/abort surface a failure while KEEPING the
+ * partial output. No runtime CDN dependency. Pure helpers live in
+ * static/lib/core.js (window.LeetCoachCore) so node can unit-test them.
  *
  * SSE invariants (do NOT "improve"):
- *  - #output is the SINGLE node whose innerHTML is replaced once per frame,
- *    and its innerHTML is assigned ONLY inside render().
- *  - Streaming chrome (state pill / chips / live timer / Stop / caret) lives on
- *    SIBLING nodes around #output and is written with direct textContent/class
- *    writes — render() never touches it.
- *  - Code-block chrome + hljs are per-frame post-render passes over #output.
- *    Copy is handled by ONE delegated click listener added once at init.
- *  - /run request body is { problem, mode, language, tier, model?, run_id? };
- *    Stop also POSTs /run/cancel { run_id }.
+ *  - #output is the SINGLE node whose innerHTML is replaced per render, and
+ *    its innerHTML is assigned ONLY inside render(). Renders are throttled to
+ *    RENDER_INTERVAL_MS (B16) and deferred while the reader has text selected.
+ *  - Streaming chrome (state pill / chips / live timer / Stop / caret / phase
+ *    note) lives on SIBLING nodes around #output and is written with direct
+ *    textContent/class writes — render() never touches it.
+ *  - Code-block chrome + hljs are post-render passes over #output. Copy is
+ *    handled by ONE delegated click listener per container, added once.
+ *  - /run request body is { problem, mode, language, tier, model?, run_id };
+ *    Stop POSTs /run/cancel { run_id }. Events: text deltas, `phase`, `meta`
+ *    ({model}), terminal `done` / `error`; unknown names are ignored.
+ *  - B13: every async callback of a run checks it is still `currentRun`
+ *    before touching the UI, so a finishing old run can never clobber a new
+ *    run's Stop button, flags or output.
+ *  - Model/user text reaches the DOM only via el()/textContent (or the
+ *    hardened marked renderer); innerHTML takes trusted literals only.
  */
 (function () {
   "use strict";
 
+  var core = window.LeetCoachCore;
   var $ = function (id) { return document.getElementById(id); };
 
   // ---- static SVG snippets (trusted literals, no user data) ---------------
   var COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>';
   var CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M5 13l4 4L19 7"/></svg>';
-  var CHECK_TABLE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M5 13l4 4L19 7"/></svg>';
   var FOLDER_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2h9A1.5 1.5 0 0 1 21 8.5V18a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18Z"/></svg>';
   var ERR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 4 3 19h18Z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>';
 
@@ -38,10 +46,14 @@
     "not use the same element twice.\n\nExample:\nInput: nums = [2,7,11,15], " +
     "target = 9\nOutput: [0,1]\n\nConstraints:\n2 <= nums.length <= 10^4";
 
-  var CODE_EXT = { py: 1, cpp: 1, cc: 1, cxx: 1, c: 1, java: 1, cs: 1, js: 1, ts: 1, go: 1, rs: 1, rb: 1, kt: 1, swift: 1 };
   var HLJS_LANG = { py: "python", cpp: "cpp", java: "java", json: "json" };
+  var RENDER_INTERVAL_MS = 150;   // B16 stream render throttle
+  var QA_TIMEOUT_MS = 60000;      // B20 Quick Ask client timeout
+  var CANCEL_TIMEOUT_MS = 3000;   // SP4: an unresponsive server can't hang Stop
 
   // ---- core element handles ----------------------------------------------
+  var appEl = $("app");
+  var contentEl = $("content");
   var problemEl = $("problem");
   var editorEl = $("editor");
   var runBtn = $("run");
@@ -52,10 +64,11 @@
   var newRunBtn = $("new-run");
   var outputEl = $("output");
   var claudeWarning = $("claude-warning");
+  var jumpPill = $("jump-latest");
+  var runStatus = $("run-status");
+  var toastEl = $("toast");
 
-  var viewConsole = $("view-console");
-  var viewLibrary = $("view-library");
-  var viewStats = $("view-stats");
+  var views = { console: $("view-console"), library: $("view-library"), stats: $("view-stats") };
 
   // session lifecycle containers (all live inside #session as siblings)
   var sessionState = document.querySelector("[data-session-state]");
@@ -63,24 +76,23 @@
   var runhead = document.querySelector(".runhead");
   var outwrap = document.querySelector(".outwrap");
   var streamFoot = document.querySelector(".stream-foot");
+  var streamNote = streamFoot ? streamFoot.querySelector(".stream-note") : null;
   var summaryEl = document.querySelector(".summary");
   var errbox = document.querySelector(".errbox");
   var stopmark = document.querySelector(".stopmark");
 
   // run-header children (cached once; runhead is never re-created)
-  var pulseEl = runhead ? runhead.querySelector(".pulse") : null;
-  var rhLabel = runhead ? runhead.querySelector(".rh-label") : null;
-  var rhChips = runhead ? runhead.querySelector(".rh-chips") : null;
-  var timerEl = runhead ? runhead.querySelector(".timer") : null;
+  var pulseEl = runhead.querySelector(".pulse");
+  var rhLabel = runhead.querySelector(".rh-label");
+  var rhChips = runhead.querySelector(".rh-chips");
+  var timerEl = runhead.querySelector(".timer");
+  var stopLbl = stopBtn ? stopBtn.querySelector(".stop-lbl") : null;
 
   // derived-data surfaces
   var topicsEl = $("topics");
   var recentsEl = $("recents");
   var recentTable = $("recent-table");
   var recentCount = document.querySelector("[data-recent-count]");
-
-  // segmented controls
-  var tierGroup = document.querySelector('.tgroup[data-seg="tier"]');
 
   // library two-pane
   var libTree = $("library-tree");
@@ -91,49 +103,12 @@
   var libViewerDelete = $("library-viewer-delete");
   var currentViewPath = null; // the library file currently open in the viewer
 
-  // ---- marked XSS hardening (KEEP EXACTLY) --------------------------------
+  // ---- marked XSS hardening (policy lives in core.hardenedRenderer) -------
   // Defense-in-depth: Claude's output is untrusted markdown rendered via
-  // innerHTML. marked v12 dropped `sanitize`, so neutralize raw HTML at the
-  // renderer level (escaped, visible as text) and drop non-http(s) links.
+  // innerHTML. Raw HTML is escaped, links must be http(s), images must be
+  // inline data:image/ URIs (no network fetch — offline promise).
   if (window.marked && typeof marked.use === "function") {
-    marked.use({
-      renderer: {
-        html: function (token) {
-          var raw = typeof token === "string" ? token : (token && token.text) || "";
-          return escapeHtml(raw);
-        },
-        link: function (href, title, text) {
-          var h = String(href || "");
-          if (!/^https?:/i.test(h)) return text || escapeHtml(h);
-          var attr = escapeHtml(h).replace(/"/g, "&quot;");
-          return '<a href="' + attr + '" rel="noopener" target="_blank">' +
-            (text || escapeHtml(h)) + "</a>";
-        },
-        // LeetCoach is a local, offline tool with NO legitimate remote-image
-        // use case. A network-loading <img> the browser auto-fetches on render
-        // is a data-egress / tracking channel reachable via prompt-injected
-        // problem text through Claude (incl. Haiku Quick Ask), and breaks the
-        // "Local & offline" promise. So allow ONLY inline data:image/... sources
-        // (SVG loaded via <img> can't run script and makes no request); render
-        // ANY other src — http(s), protocol-relative //, javascript:, relative,
-        // empty — as the alt text, never an <img>. marked v12 passes positional
-        // (href, title, text) like `link` above and pre-escapes `text` (alt),
-        // so it is emitted as-is exactly as `link` emits its `text`.
-        image: function (href, title, text) {
-          var h = String(href || "");
-          if (!/^data:image\//i.test(h)) return text || "";
-          var attr = escapeHtml(h).replace(/"/g, "&quot;");
-          return '<img src="' + attr + '" alt="' + (text || "") + '">';
-        },
-      },
-    });
-  }
-
-  function escapeHtml(s) {
-    return String(s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+    marked.use({ renderer: core.hardenedRenderer() });
   }
 
   // ---- tiny DOM helpers ---------------------------------------------------
@@ -146,88 +121,94 @@
   function chipEl(text, variant) {
     return el("span", "chip" + (variant ? " " + variant : ""), text);
   }
-  function cap(s) {
-    s = String(s || "");
-    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
-  }
-  function humanize(s) {
-    s = String(s || "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
-    if (!s) return "";
-    return s.split(" ").map(function (w) {
-      return w.charAt(0).toUpperCase() + w.slice(1);
-    }).join(" ");
-  }
-  function extOf(path) {
-    var f = String(path);
-    var slash = Math.max(f.lastIndexOf("/"), f.lastIndexOf("\\"));
-    var name = slash === -1 ? f : f.slice(slash + 1);
-    var dot = name.lastIndexOf(".");
-    return dot === -1 ? "" : name.slice(dot + 1).toLowerCase();
-  }
-  function firstLine(text) {
-    var lines = String(text || "").split("\n");
-    for (var i = 0; i < lines.length; i++) {
-      var t = lines[i].trim();
-      if (t) return t.length > 60 ? t.slice(0, 60) + "…" : t;
-    }
-    return "";
-  }
-  // Middle-truncate: `.a` ellipsizes (flex-shrink), `.b` is a pinned tail so the
-  // meaningful end (extension) always stays visible.
-  function midTrunc(str, tail) {
-    tail = tail || 6;
-    str = String(str);
-    if (str.length <= tail + 3) return { a: str, b: "" };
-    return { a: str.slice(0, str.length - tail), b: str.slice(str.length - tail) };
-  }
-  function typeBadge(ext) {
-    // Type class (tb md/py/cpp/java) is styled entirely in style.css.
-    return el("span", "tb " + (ext || ""), ext || "?");
-  }
-  function modeLabel(folder) {
-    var m = { answers: "Answer", answer: "Answer", learning: "Learning", guided: "Guided" };
-    return m[folder] || humanize(folder);
-  }
-  function langLabel(ext) {
-    // Accepts both a file extension (py/cpp/java — deriveRuns) and the run's
-    // wire language value (python/cpp/java — the summary meta); cpp/java are
-    // identical across both, only "python" vs "py" needs the extra key.
-    var m = { py: "Python", python: "Python", cpp: "C++", java: "Java" };
-    return m[ext] || "—";
-  }
-  function relTime(mtime) {
-    if (!mtime) return "";
-    var d = Date.now() / 1000 - mtime;
-    if (d < 45) return "now";
-    if (d < 3600) return Math.max(1, Math.round(d / 60)) + "m";
-    if (d < 86400) return Math.round(d / 3600) + "h";
-    if (d < 7 * 86400) return Math.round(d / 86400) + "d";
-    try {
-      return new Date(mtime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    } catch (e) { return ""; }
-  }
+  var cap = core.cap;
+  var humanize = core.humanize;
+  var extOf = core.extOf;
+  var midTrunc = core.midTrunc;
+  var modeLabel = core.modeLabel;
+  var langLabel = core.langLabel;
+  function relTime(mtime) { return core.relTime(mtime); }
   function savedDate(mtime) {
     try {
       return new Date(mtime * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
     } catch (e) { return ""; }
   }
   function bySavedDesc(a, b) { return (b.savedAt || 0) - (a.savedAt || 0); }
+  function typeBadge(ext) {
+    return el("span", "tb " + (ext || ""), ext || "?");
+  }
+  function sleep(ms, signal) {
+    return new Promise(function (resolve, reject) {
+      var t = setTimeout(resolve, ms);
+      if (signal) {
+        signal.addEventListener("abort", function () {
+          clearTimeout(t);
+          var err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        }, { once: true });
+      }
+    });
+  }
+  function postJson(url, body, extra) {
+    var opts = {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    };
+    if (extra) Object.keys(extra).forEach(function (k) { opts[k] = extra[k]; });
+    return fetch(url, opts);
+  }
+
+  // ---- preferences (B15): localStorage, every access guarded --------------
+  var prefs = core.makePrefs(function () { return window.localStorage; });
+
+  // ---- platform glyphs (C10): ⌘ on Apple, Ctrl elsewhere ------------------
+  var MOD = core.modKey(
+    (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || ""
+  );
+  document.querySelectorAll("kbd[data-mod]").forEach(function (k) { k.textContent = MOD; });
+  (function () {
+    var sb = $("tb-search");
+    if (sb) sb.title = "Search your library (" + MOD + " + K)";
+  })();
+
+  // ---- status: screen-reader live region + visible toasts -----------------
+  function announce(msg) {
+    if (!runStatus) return;
+    runStatus.textContent = "";
+    // A fresh text node after a tick so a repeated message is re-announced.
+    setTimeout(function () { runStatus.textContent = msg; }, 30);
+  }
+  var toastTimer = null;
+  function notify(msg, kind) {
+    if (!toastEl) return;
+    toastEl.textContent = msg;
+    toastEl.className = "toast" + (kind ? " " + kind : "");
+    toastEl.setAttribute("role", kind === "error" ? "alert" : "status");
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.hidden = true; }, kind === "error" ? 7000 : 4000);
+  }
+  if (toastEl) toastEl.addEventListener("click", function () { toastEl.hidden = true; });
 
   function copyText(text, btn) {
+    var lbl = btn.querySelector(".lbl");
+    if (lbl && !btn.getAttribute("data-label")) btn.setAttribute("data-label", lbl.textContent);
     function ok() {
       btn.classList.add("ok");
-      var lbl = btn.querySelector(".lbl");
-      var prev = lbl ? lbl.textContent : "";
       if (lbl) lbl.textContent = "Copied";
-      setTimeout(function () {
+      clearTimeout(btn._copyTimer);
+      btn._copyTimer = setTimeout(function () {
         btn.classList.remove("ok");
-        if (lbl) lbl.textContent = prev;
+        if (lbl) lbl.textContent = btn.getAttribute("data-label") || "Copy";
       }, 1400);
     }
+    function fail() { notify("Could not copy to the clipboard.", "error"); }
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(String(text)).then(ok, function () { /* noop */ });
+      navigator.clipboard.writeText(String(text)).then(ok, fail);
     } else {
-      ok();
+      fail();
     }
   }
 
@@ -252,68 +233,111 @@
         ? "claude CLI ready"
         : installed ? "claude CLI signed out" : "claude CLI not found";
     }
-    // Reveal the matching banner message and hide the section when all good.
     if (claudeWarning) {
       var missing = claudeWarning.querySelector('[data-banner="missing"]');
       var signedOut = claudeWarning.querySelector('[data-banner="signedout"]');
-      if (missing) missing.hidden = installed;                  // only when NOT installed
-      if (signedOut) signedOut.hidden = !(installed && !loggedIn); // installed but signed out
+      if (missing) missing.hidden = installed;
+      if (signedOut) signedOut.hidden = !(installed && !loggedIn);
       claudeWarning.hidden = ready;
     }
   })();
 
-  // ---- segmented controls -------------------------------------------------
+  // ---- segmented controls (aria-pressed, C9) ------------------------------
+  function segButtons(group) {
+    return document.querySelectorAll('.seg[data-seg="' + group + '"] .seg-btn');
+  }
   function activeVal(group) {
     var on = document.querySelector('.seg[data-seg="' + group + '"] .seg-btn.on');
     return on ? on.getAttribute("data-val") : "";
   }
-  function syncTier() {
-    if (tierGroup) tierGroup.classList.toggle("disabled", activeVal("mode") === "learning");
+  // Select `val` in `group`; returns false (nothing changed) for an unknown value.
+  function setSeg(group, val) {
+    var btns = segButtons(group);
+    var found = false;
+    btns.forEach(function (b) { if (b.getAttribute("data-val") === val) found = true; });
+    if (!found) return false;
+    btns.forEach(function (b) {
+      var on = b.getAttribute("data-val") === val;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    return true;
   }
-  // Persist the model choice as the default (server writes .env + updates env).
-  // Best-effort: on failure the run path still uses the server's current model.
-  function saveModel(alias) {
-    fetch("/config/model", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: alias }),
-    }).catch(function () {});
+  function clearSeg(group) {
+    segButtons(group).forEach(function (b) {
+      b.classList.remove("on");
+      b.setAttribute("aria-pressed", "false");
+    });
+  }
+  function syncTier() {
+    var learning = activeVal("mode") === "learning";
+    var tg = document.querySelector('.tgroup[data-seg="tier"]');
+    if (tg) {
+      tg.classList.toggle("disabled", learning);
+      tg.setAttribute("aria-disabled", learning ? "true" : "false");
+    }
+    segButtons("tier").forEach(function (b) { b.disabled = learning; });
+  }
+
+  // B12: persist the picker as the default. On failure the picker reverts to
+  // what the server still has, and the user is told (C10 visible failures).
+  function saveModel(alias, previous) {
+    function revert(reason) {
+      if (previous) setSeg("model", previous); else clearSeg("model");
+      notify("Could not save the model setting" + (reason ? " (" + reason + ")" : "") +
+        ". It is unchanged.", "error");
+    }
+    postJson("/config/model", { model: alias }).then(function (resp) {
+      if (resp.ok) return;
+      return resp.json().catch(function () { return {}; }).then(function (d) {
+        revert((d && d.error) || "HTTP " + resp.status);
+      });
+    }, function () { revert("network error"); });
   }
   document.querySelectorAll(".seg").forEach(function (seg) {
     seg.addEventListener("click", function (e) {
       var b = e.target.closest(".seg-btn");
-      if (!b || !seg.contains(b)) return;
-      seg.querySelectorAll(".seg-btn").forEach(function (x) { x.classList.remove("on"); });
-      b.classList.add("on");
+      if (!b || !seg.contains(b) || b.disabled) return;
       var group = seg.getAttribute("data-seg");
+      var previous = activeVal(group);
+      var val = b.getAttribute("data-val");
+      setSeg(group, val);
       if (group === "mode") syncTier();
-      if (group === "model") saveModel(b.getAttribute("data-val"));
+      if (group === "model") {
+        if (val !== previous) saveModel(val, previous);
+      } else {
+        prefs.set(group, val); // B15
+      }
     });
   });
   // Reflect the server's current default model in the picker on load.
   (function initModel() {
     var current = document.body.dataset.claudeModel || "";
-    if (!current) return; // custom/unknown id -> leave the picker unselected
-    var btn = document.querySelector(
-      '.seg[data-seg="model"] .seg-btn[data-val="' + current + '"]'
-    );
-    if (btn) {
-      btn.parentNode.querySelectorAll(".seg-btn").forEach(function (x) {
-        x.classList.remove("on");
-      });
-      btn.classList.add("on");
-    }
+    if (current) setSeg("model", current); // custom/unknown id -> unselected
   })();
+  // B15: restore mode / language / tier from the last session.
+  ["mode", "lang", "tier"].forEach(function (g) {
+    var v = prefs.get(g, "");
+    if (v) setSeg(g, v);
+  });
   syncTier();
 
-  // ---- Console <-> Library tabs ------------------------------------------
+  // ---- views (per-view scroll, C10) ---------------------------------------
+  var currentView = "console";
+  var viewScroll = { console: 0, library: 0, stats: 0 };
   function switchView(view) {
-    if (viewConsole) viewConsole.hidden = view !== "console";
-    if (viewLibrary) viewLibrary.hidden = view !== "library";
-    if (viewStats) viewStats.hidden = view !== "stats";
+    if (!views[view]) return;
+    if (view !== currentView && contentEl) viewScroll[currentView] = contentEl.scrollTop;
+    var changed = view !== currentView;
+    currentView = view;
+    Object.keys(views).forEach(function (k) { if (views[k]) views[k].hidden = k !== view; });
     document.querySelectorAll("[data-view]").forEach(function (a) {
-      a.classList.toggle("on", a.getAttribute("data-view") === view);
+      var on = a.getAttribute("data-view") === view;
+      a.classList.toggle("on", on);
+      if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     });
+    if (changed && contentEl) contentEl.scrollTop = viewScroll[view] || 0;
+    closeDrawer(false);
     if (view === "library") loadLibrary(); // re-fetch on open: fresh after runs
     if (view === "stats") refreshStats();  // recompute from the already-loaded runs
   }
@@ -324,11 +348,17 @@
     });
   });
 
-  // ---- filter pills -------------------------------------------------------
+  // ---- filter pills (aria-pressed) -----------------------------------------
   function activatePill(pill) {
     var group = pill.parentNode;
-    if (group) group.querySelectorAll(".fp").forEach(function (x) { x.classList.remove("on"); });
+    if (group) {
+      group.querySelectorAll(".fp").forEach(function (x) {
+        x.classList.remove("on");
+        x.setAttribute("aria-pressed", "false");
+      });
+    }
     pill.classList.add("on");
+    pill.setAttribute("aria-pressed", "true");
   }
   document.querySelectorAll("[data-lib-filter]").forEach(function (pill) {
     pill.addEventListener("click", function () { activatePill(pill); applyLibFilter(); });
@@ -337,27 +367,51 @@
     pill.addEventListener("click", function () { activatePill(pill); applyRecentFilter(); });
   });
 
-  // ---- composer tools -----------------------------------------------------
+  // ---- composer tools + draft persistence (B15) ----------------------------
+  var draftTimer = null;
+  function saveDraftNow() {
+    clearTimeout(draftTimer);
+    draftTimer = null;
+    prefs.set("draft", problemEl.value);
+  }
+  function setProblem(text) {
+    problemEl.value = text;
+    saveDraftNow();
+  }
+  problemEl.addEventListener("input", function () {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraftNow, 400);
+  });
+  (function restoreDraft() {
+    var d = prefs.get("draft", "");
+    if (d && !problemEl.value) problemEl.value = d;
+  })();
+  window.addEventListener("pagehide", function () { if (draftTimer) saveDraftNow(); });
+
   if (pasteBtn) {
     pasteBtn.addEventListener("click", function () {
+      var blocked = "Clipboard access is blocked here — click the box and paste with " + MOD + "+V.";
       if (!navigator.clipboard || !navigator.clipboard.readText) {
-        console.warn("Clipboard read is not available in this browser.");
+        notify(blocked, "error");
+        problemEl.focus();
         return;
       }
       navigator.clipboard.readText().then(function (text) {
-        problemEl.value = text;
+        if (!text) { notify("The clipboard is empty.", "error"); return; }
+        setProblem(text);
         problemEl.focus();
         flashEditor();
       }, function () {
-        console.warn("Could not read the clipboard (permission denied?).");
+        notify(blocked, "error");
+        problemEl.focus();
       });
     });
   }
-  if (sampleBtn) sampleBtn.addEventListener("click", function () { problemEl.value = SAMPLE; problemEl.focus(); });
-  if (clearBtn) clearBtn.addEventListener("click", function () { problemEl.value = ""; problemEl.focus(); });
+  if (sampleBtn) sampleBtn.addEventListener("click", function () { setProblem(SAMPLE); problemEl.focus(); });
+  if (clearBtn) clearBtn.addEventListener("click", function () { setProblem(""); problemEl.focus(); });
   if (newRunBtn) newRunBtn.addEventListener("click", function () {
-    if (isStreaming) return;
-    problemEl.value = "";
+    if (isStreaming) { notify("A run is in progress — stop it first.", ""); return; }
+    setProblem("");
     enterIdle();
     switchView("console");
     problemEl.focus();
@@ -366,39 +420,79 @@
   // =========================================================================
   // Render pipeline — #output is the single re-rendered node.
   // =========================================================================
-  function render(md) {
-    if (window.marked) {
-      outputEl.innerHTML = marked.parse(md); // ONLY assignment site for #output
-      if (window.hljs) {
-        outputEl.querySelectorAll("pre code").forEach(function (block) {
-          try { hljs.highlightElement(block); } catch (e) { /* noop */ }
-        });
+  // B16: highlight output is cached by (language, code) so a closed block is
+  // highlighted once, not on every throttled render. hljs escapes its input;
+  // the cached markup is exactly what hljs.highlightElement would assign.
+  var hlCache = new Map();
+  function highlightCode(container, skipLast) {
+    if (!window.hljs) return;
+    var blocks = container.querySelectorAll("pre code");
+    blocks.forEach(function (code, i) {
+      if (skipLast && i === blocks.length - 1) return; // still streaming in
+      var m = /language-([\w+#-]+)/.exec(code.className || "");
+      var lang = m ? m[1] : "";
+      // Untagged / unknown languages render as plain text (no auto-detect).
+      if (!lang || !hljs.getLanguage(lang)) return;
+      var text = code.textContent;
+      var key = lang + "\u0000" + text;
+      var html = hlCache.get(key);
+      if (html == null) {
+        try {
+          html = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+        } catch (e) { return; }
+        if (hlCache.size > 300) hlCache.clear();
+        hlCache.set(key, html);
       }
-      decorateCode(outputEl, isStreaming);
-    } else {
-      outputEl.textContent = md;
-    }
-  }
-
-  // Coalesce streaming re-renders onto animation frames (re-parsing the full
-  // accumulated markdown every delta is O(n^2) jank). A direct render() still
-  // runs when the stream ends so the final content is always complete.
-  var renderPending = false;
-  var renderLatest = "";
-  function scheduleRender(md) {
-    renderLatest = md;
-    if (renderPending) return;
-    renderPending = true;
-    requestAnimationFrame(function () {
-      renderPending = false;
-      render(renderLatest);
+      code.innerHTML = html; // hljs-generated, escaped markup
+      code.classList.add("hljs");
     });
   }
 
+  function render(md, final) {
+    if (window.marked) {
+      outputEl.innerHTML = marked.parse(md); // ONLY assignment site for #output
+      var openLast = !final && core.hasOpenFence(md);
+      highlightCode(outputEl, openLast);
+      decorateCode(outputEl, openLast);
+    } else {
+      outputEl.textContent = md;
+    }
+    if (!final) followLiveEdge();
+  }
+
+  // B16: throttled renders (at most one per RENDER_INTERVAL_MS) that wait while
+  // the reader has a text selection inside #output (a re-render would wipe it).
+  var lastRenderAt = 0;
+  var renderTimer = null;
+  var renderDirty = false;
+  function selectionInOutput() {
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+    return outputEl.contains(sel.anchorNode) || outputEl.contains(sel.focusNode);
+  }
+  function scheduleRender() {
+    renderDirty = true;
+    if (renderTimer) return;
+    renderTimer = setTimeout(flushRender,
+      core.throttleDelay(lastRenderAt, performance.now(), RENDER_INTERVAL_MS));
+  }
+  function flushRender() {
+    renderTimer = null;
+    if (!renderDirty) return;
+    if (selectionInOutput()) { renderTimer = setTimeout(flushRender, 300); return; }
+    renderDirty = false;
+    lastRenderAt = performance.now();
+    render(acc, false);
+  }
+  function cancelScheduledRender() {
+    clearTimeout(renderTimer);
+    renderTimer = null;
+    renderDirty = false;
+  }
+
   // Post-render pass: wrap each <pre> in .code/.code-head chrome with a lang
-  // label + Copy button. Rebuilt every frame (innerHTML was replaced) — adds NO
-  // listeners (Copy is delegated on the container, once, at init).
-  function decorateCode(container, streaming) {
+  // label + Copy button. Adds NO listeners (Copy is delegated, once, at init).
+  function decorateCode(container, partialLast) {
     var pres = container.querySelectorAll("pre");
     pres.forEach(function (pre, i) {
       var parent = pre.parentNode;
@@ -410,15 +504,17 @@
         if (m) lang = m[1];
       }
       var wrap = document.createElement("div");
-      wrap.className = "code" + (streaming && i === pres.length - 1 ? " partial" : "");
+      wrap.className = "code" + (partialLast && i === pres.length - 1 ? " partial" : "");
       var head = document.createElement("div");
       head.className = "code-head";
       var langSpan = el("span", "code-lang");
-      langSpan.innerHTML = '<span class="d"></span>';
-      langSpan.appendChild(document.createTextNode(lang || "code"));
+      langSpan.appendChild(el("span", "d"));
+      langSpan.appendChild(document.createTextNode(lang || "text"));
       var copyBtn = el("button", "mini");
       copyBtn.type = "button";
       copyBtn.setAttribute("data-copy-code", "");
+      copyBtn.setAttribute("data-label", "Copy");
+      copyBtn.setAttribute("aria-label", "Copy code");
       copyBtn.innerHTML = COPY_SVG + '<span class="lbl">Copy</span>';
       head.appendChild(langSpan);
       head.appendChild(copyBtn);
@@ -428,8 +524,6 @@
     });
   }
 
-  // ONE delegated Copy listener per container (added once). Survives the
-  // per-frame innerHTML replacement of #output because it sits on the parent.
   function handleCopyCode(e) {
     var btn = e.target.closest("[data-copy-code]");
     if (!btn) return;
@@ -440,35 +534,55 @@
   outputEl.addEventListener("click", handleCopyCode);
   if (libViewerBody) libViewerBody.addEventListener("click", handleCopyCode);
 
+  // ---- D11: auto-follow the live edge + "Jump to latest" ------------------
+  var following = true;
+  function liveEdgeGapOk() {
+    if (!contentEl || !streamFoot) return true;
+    var edge = (streamFoot.hidden ? outwrap : streamFoot).getBoundingClientRect().bottom;
+    return core.nearEdge(edge, contentEl.getBoundingClientRect().bottom, 80);
+  }
+  function scrollToLiveEdge(smooth) {
+    if (!contentEl) return;
+    var target = streamFoot.hidden ? outwrap : streamFoot;
+    var delta = target.getBoundingClientRect().bottom - contentEl.getBoundingClientRect().bottom + 16;
+    if (delta > 0) {
+      if (smooth && contentEl.scrollBy) contentEl.scrollBy({ top: delta, behavior: "smooth" });
+      else contentEl.scrollTop += delta;
+    }
+  }
+  function followLiveEdge() {
+    if (isStreaming && following && currentView === "console") scrollToLiveEdge(false);
+  }
+  if (contentEl) {
+    contentEl.addEventListener("scroll", function () {
+      if (!isStreaming || currentView !== "console") return;
+      following = liveEdgeGapOk();
+      if (jumpPill) jumpPill.hidden = following;
+    }, { passive: true });
+  }
+  if (jumpPill) {
+    jumpPill.addEventListener("click", function () {
+      following = true;
+      jumpPill.hidden = true;
+      scrollToLiveEdge(true);
+    });
+  }
+
   // =========================================================================
   // Run lifecycle state machine (idle -> streaming -> done|error|stopped).
-  // Streaming chrome is written on the runhead / stream-foot SIBLINGS.
   // =========================================================================
   var isStreaming = false;
-  var acc = "";              // the accumulator: acc += delta; scheduleRender(acc)
-  var activeStop = null;     // set per-run; Stop button calls it
+  var currentRun = null;     // B13: the run that owns the UI (null = none)
+  var acc = "";              // the accumulator: acc += delta; scheduleRender()
   var timerId = null;
   var runStart = 0;
   var lastDuration = "";
 
-  function fmtClock(ms) {
-    var s = Math.floor(ms / 1000);
-    var m = Math.floor(s / 60);
-    var ss = s % 60;
-    return m + ":" + (ss < 10 ? "0" : "") + ss;
-  }
-  function fmtDuration(ms) {
-    var s = ms / 1000;
-    if (s < 60) return s.toFixed(1) + "s";
-    var m = Math.floor(s / 60);
-    var ss = Math.round(s % 60);
-    return m + ":" + (ss < 10 ? "0" : "") + ss;
-  }
   function startTimer() {
     runStart = performance.now();
     if (timerEl) timerEl.textContent = "0:00";
     timerId = setInterval(function () {
-      if (timerEl) timerEl.textContent = fmtClock(performance.now() - runStart);
+      if (timerEl) timerEl.textContent = core.fmtClock(performance.now() - runStart);
     }, 250);
   }
   function stopTimer() {
@@ -478,37 +592,54 @@
   function setRunBtn(running) {
     runBtn.disabled = running;
     runBtn.classList.toggle("running", running);
+    runBtn.setAttribute("aria-busy", running ? "true" : "false");
     runBtn.innerHTML = running
       ? '<span class="spin"></span> Running…'
       : 'Run <span class="g">&#9656;</span>';
   }
-  function setStop(on) {
+  function setStop(on, label) {
     if (!stopBtn) return;
     stopBtn.hidden = !on;
     stopBtn.disabled = !on;
+    if (stopLbl) stopLbl.textContent = label || "Stop";
   }
 
   function setRunhead(state, label) {
     runhead.className = "runhead " + state;
     if (rhLabel) rhLabel.textContent = label;
     if (!pulseEl) return;
-    if (state === "stream") {
-      pulseEl.className = "pulse";
-      pulseEl.style.cssText = "";
-    } else {
-      pulseEl.className = "dot" + (state === "error" ? " red" : "");
-      pulseEl.style.cssText = state === "stopped"
-        ? "background:var(--amber);box-shadow:0 0 0 3px var(--amber-weak)"
-        : "";
-    }
+    pulseEl.className = state === "stream" ? "pulse" : "dot" + (state === "error" ? " red" : state === "stopped" ? " amber" : "");
+  }
+  function setPhase(p) {
+    var t = core.phaseText(p);
+    if (rhLabel) rhLabel.textContent = t.label;
+    if (streamNote) streamNote.textContent = t.note;
+    if (p && p.phase !== "streaming") announce(t.label);
   }
 
+  function modelChipText(meta) {
+    if (meta.modelId) return core.modelLabel(meta.modelId);
+    return meta.modelAlias ? core.modelLabel(meta.modelAlias) : "Default model";
+  }
   function buildRunChips(meta) {
-    if (!rhChips) return;
-    rhChips.innerHTML = "";
+    rhChips.textContent = "";
     rhChips.appendChild(chipEl(cap(meta.mode), "grn"));
-    rhChips.appendChild(chipEl(meta.language, "mono"));
+    rhChips.appendChild(chipEl(langLabel(meta.language), "mono"));
     if (meta.tier) rhChips.appendChild(chipEl(cap(meta.tier), ""));
+    var mc = chipEl(modelChipText(meta), "model" + (meta.modelId ? "" : " pending"));
+    mc.id = "rh-model";
+    mc.title = meta.modelId ? "Model: " + meta.modelId : "Requested model (waiting for the CLI to confirm)";
+    rhChips.appendChild(mc);
+  }
+  function setRunModel(meta, modelId) {
+    if (!modelId || typeof modelId !== "string") return;
+    meta.modelId = modelId;
+    var mc = $("rh-model");
+    if (mc) {
+      mc.textContent = core.modelLabel(modelId);
+      mc.title = "Model: " + modelId;
+      mc.classList.remove("pending");
+    }
   }
 
   function hideTerminals() {
@@ -516,75 +647,95 @@
     errbox.hidden = true;
     stopmark.hidden = true;
   }
-
-  function enterIdle() {
+  function setSessionState(s) {
+    if (sessionState) sessionState.textContent = s;
+  }
+  function endStreamingChrome() {
     isStreaming = false;
     stopTimer();
+    streamFoot.hidden = true;
+    if (jumpPill) jumpPill.hidden = true;
+    outputEl.setAttribute("aria-busy", "false");
+    setStop(false);
+    setRunBtn(false);
+  }
+
+  function enterIdle() {
+    endStreamingChrome();
     consoleIdle.hidden = false;
     runhead.hidden = true;
     outwrap.hidden = true;
-    streamFoot.hidden = true;
     hideTerminals();
-    if (sessionState) sessionState.textContent = "idle";
-    setRunBtn(false);
-    setStop(false);
+    setSessionState("idle");
   }
 
   function enterStreaming(meta) {
     isStreaming = true;
+    following = true;
+    if (jumpPill) jumpPill.hidden = true;
     consoleIdle.hidden = true;
     hideTerminals();
-    setRunhead("stream", "Running");
+    setRunhead("stream", "Starting");
+    if (streamNote) streamNote.textContent = "starting…";
     buildRunChips(meta);
     runhead.hidden = false;
     outwrap.hidden = false;
     streamFoot.hidden = false;
-    if (sessionState) sessionState.textContent = "streaming";
+    outputEl.setAttribute("aria-busy", "true");
+    setSessionState("streaming");
     setRunBtn(true);
     setStop(true);
-    render(""); // clears #output through the single assignment site
+    cancelScheduledRender();
+    render("", false); // clears #output through the single assignment site
     startTimer();
+    announce("Run started: " + cap(meta.mode) + ", " + langLabel(meta.language) + ".");
   }
 
   function enterDone(payload, meta) {
-    isStreaming = false;
-    stopTimer();
-    lastDuration = fmtDuration(performance.now() - runStart);
+    endStreamingChrome();
+    lastDuration = core.fmtDuration(performance.now() - runStart);
     setRunhead("done", "Finished");
-    streamFoot.hidden = true;
-    setStop(false);
-    if (sessionState) sessionState.textContent = "done";
-    setRunBtn(false);
+    setSessionState("done");
     buildSummary(payload || {}, meta);
     summaryEl.hidden = false;
-    if (outwrap.hidden && acc) outwrap.hidden = false;
+    outwrap.hidden = !acc;
+    var n = (payload.paths || []).length;
+    var v = core.verdictFromLine(payload.verification);
+    announce("Run finished. Saved " + n + (n === 1 ? " file" : " files") + "." +
+      (v ? " " + core.verdictInfo(v).label + "." : ""));
     loadLibrary(); // refresh recents / table / topics / tree with the new files
   }
 
   function enterError(msg) {
-    isStreaming = false;
-    stopTimer();
+    endStreamingChrome();
     setRunhead("error", "Failed");
-    streamFoot.hidden = true;
-    setStop(false);
-    if (sessionState) sessionState.textContent = "error";
-    setRunBtn(false);
+    setSessionState("error");
     buildErrbox(msg);
     errbox.hidden = false;
     outwrap.hidden = !acc; // keep the partial output; hide an empty shell
+    announce("Run failed. " + (msg || ""));
   }
 
   function enterStopped() {
-    isStreaming = false;
-    stopTimer();
+    endStreamingChrome();
     setRunhead("stopped", "Stopped");
-    streamFoot.hidden = true;
-    setStop(false);
-    if (sessionState) sessionState.textContent = "stopped";
-    setRunBtn(false);
+    setSessionState("stopped");
     buildStopmark();
     stopmark.hidden = false;
     outwrap.hidden = !acc; // keep the partial output
+    announce("Run stopped.");
+  }
+
+  // B13: the single exit for a run. A run that no longer owns the UI (it was
+  // stopped and a new one started) changes nothing.
+  function finish(run, kind, data) {
+    if (currentRun !== run) return;
+    currentRun = null;
+    cancelScheduledRender();
+    render(acc, true); // final full render: last chunk never lost, highlights all
+    if (kind === "done") enterDone(data || {}, run.meta);
+    else if (kind === "stopped") enterStopped();
+    else enterError(data);
   }
 
   // ---- terminal-state card builders --------------------------------------
@@ -595,17 +746,46 @@
     var mt = midTrunc(path, 8);
     fp.appendChild(el("span", "a", mt.a));
     if (mt.b) fp.appendChild(el("span", "b", mt.b));
+    fp.title = path;
     row.appendChild(fp);
     var btn = el("button", "mini");
     btn.type = "button";
+    btn.setAttribute("aria-label", "Copy path " + path);
     btn.innerHTML = COPY_SVG + '<span class="lbl">Copy path</span>';
     btn.addEventListener("click", function () { copyText(path, btn); });
     row.appendChild(btn);
     return row;
   }
 
+  function verdictChipVariant(v) {
+    var cls = core.verdictInfo(v).cls;
+    return cls === "pass" ? "mint" : cls === "fail" ? "red" : cls === "warn" ? "amber" : "";
+  }
+
+  // D7: re-run the same problem (captured at run start) with a patch.
+  function rerun(meta, patch) {
+    if (isStreaming) return;
+    if (patch.mode) setSeg("mode", patch.mode);
+    if (patch.lang) setSeg("lang", patch.lang);
+    if (patch.tier) setSeg("tier", patch.tier);
+    ["mode", "lang", "tier"].forEach(function (g) { if (patch[g]) prefs.set(g, patch[g]); });
+    syncTier();
+    if (meta.problem) setProblem(meta.problem);
+    runNow();
+  }
+  function openSavedDoc(absPath) {
+    var go = function () {
+      var rel = core.libRelPath(absPath, libFiles);
+      if (!rel) { notify("That file is not in the library listing yet.", "error"); return; }
+      switchView("library");
+      openFile(rel);
+    };
+    if (core.libRelPath(absPath, libFiles)) go();
+    else loadLibrary().then(go);
+  }
+
   function buildSummary(payload, meta) {
-    summaryEl.innerHTML = "";
+    summaryEl.textContent = "";
     var paths = payload.paths || [];
     var topics = payload.topics || [];
 
@@ -618,8 +798,7 @@
       ? "Saved to a fallback location"
       : "Saved to your study library"));
     var subParts = [];
-    var title = firstLine(problemEl.value);
-    if (title) subParts.push(title);
+    if (meta.title) subParts.push(meta.title); // C10: captured at run start
     subParts.push(cap(meta.mode));
     subParts.push(langLabel(meta.language));
     if (meta.tier) subParts.push(cap(meta.tier));
@@ -632,43 +811,60 @@
     summaryEl.appendChild(top);
 
     var body = el("div", "sum-body");
+    function row(label) {
+      var r = el("div", "meta-row");
+      r.appendChild(el("span", "meta-label", label));
+      body.appendChild(r);
+      return r;
+    }
     if (payload.save_warning) {
-      // B25: the normal save failed (long path, locked folder, full disk) and
-      // the doc went to output/_unsorted/ instead. Say so plainly.
-      var rw = el("div", "meta-row");
-      rw.appendChild(el("span", "meta-label", "Note"));
-      rw.appendChild(chipEl(payload.save_warning, "amber"));
-      body.appendChild(rw);
+      // B25: the normal save failed and the doc went to output/_unsorted/.
+      row("Note").appendChild(chipEl(payload.save_warning, "amber"));
     }
-    if (payload.problem_type) {
-      var r1 = el("div", "meta-row");
-      r1.appendChild(el("span", "meta-label", "Type"));
-      r1.appendChild(chipEl(payload.problem_type, ""));
-      body.appendChild(r1);
-    }
+    if (payload.model) setRunModel(meta, payload.model);
+    row("Model").appendChild(chipEl(modelChipText(meta), "model"));
+    if (payload.problem_type) row("Type").appendChild(chipEl(payload.problem_type, ""));
     if (topics.length) {
-      var r2 = el("div", "meta-row");
-      r2.appendChild(el("span", "meta-label", "Topics"));
+      var r2 = row("Topics");
       topics.forEach(function (t) { r2.appendChild(chipEl(t, "grn")); });
-      body.appendChild(r2);
     }
     if (payload.verification) {
-      var r3 = el("div", "meta-row");
-      r3.appendChild(el("span", "meta-label", "Verify"));
-      var pass = /^\s*✓/.test(payload.verification); // "✓ ..."
-      r3.appendChild(chipEl(payload.verification, pass ? "mint" : ""));
-      body.appendChild(r3);
+      var v = core.verdictFromLine(payload.verification);
+      var vc = chipEl(payload.verification, verdictChipVariant(v));
+      vc.title = core.verdictInfo(v).label;
+      row("Verify").appendChild(vc);
     }
     if (paths.length) {
       var files = el("div", "files");
       paths.forEach(function (p) { files.appendChild(savedRow(p)); });
       body.appendChild(files);
     }
+    // D7: next steps.
+    var md = paths.filter(function (p) { return /\.md$/i.test(p); })[0] || "";
+    var acts = core.summaryActions({
+      mode: meta.mode, language: meta.language, tier: meta.tier, mdPath: md,
+    });
+    if (acts.length) {
+      var bar = el("div", "sum-actions");
+      bar.setAttribute("role", "group");
+      bar.setAttribute("aria-label", "Next steps");
+      acts.forEach(function (a) {
+        var b = el("button", "btn" + (a.id === "open" ? " green" : ""), a.label);
+        b.type = "button";
+        b.setAttribute("data-action", a.id);
+        b.addEventListener("click", function () {
+          if (a.id === "open") openSavedDoc(a.path);
+          else rerun(meta, a.patch);
+        });
+        bar.appendChild(b);
+      });
+      body.appendChild(bar);
+    }
     summaryEl.appendChild(body);
   }
 
   function buildErrbox(msg) {
-    errbox.innerHTML = "";
+    errbox.textContent = "";
     var ic = el("div", "ic");
     ic.innerHTML = ERR_SVG;
     errbox.appendChild(ic);
@@ -679,15 +875,10 @@
   }
 
   function buildStopmark() {
-    stopmark.innerHTML = "";
+    stopmark.textContent = "";
     stopmark.appendChild(el("span", "sq"));
     stopmark.appendChild(el("span", null, "Stopped"));
-    stopmark.appendChild(el("span", "s", "Partial output kept below."));
-  }
-
-  // ---- Stop button --------------------------------------------------------
-  if (stopBtn) {
-    stopBtn.addEventListener("click", function () { if (activeStop) activeStop(); });
+    stopmark.appendChild(el("span", "s", "Partial output kept below. Nothing was saved."));
   }
 
   // ---- SSE parser (KEEP EXACTLY) -----------------------------------------
@@ -730,14 +921,11 @@
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
   }
   // Best-effort server-side cancel (B14). keepalive lets it outlive a page
-  // unload; a failure is harmless (the server also notices the dropped stream).
-  // Resolves true only when the server answers 200 {"cancelled": false}: the
-  // run already committed to saving (SP4 review M1), so the caller should let
-  // it finish rather than abort and show "Stopped" for a run that was saved.
-  // An unresponsive server must not leave Stop hanging: the request is
-  // aborted after CANCEL_TIMEOUT_MS and resolves false (the caller then aborts
-  // the stream, which the server also treats as a cancel).
-  var CANCEL_TIMEOUT_MS = 3000;
+  // unload. Resolves true only when the server answers 200 {"cancelled": false}:
+  // the run already committed to saving (SP4 review M1), so the caller should
+  // let it finish rather than abort and show "Stopped" for a run that was saved.
+  // An unresponsive server must not leave Stop hanging: the request is aborted
+  // after CANCEL_TIMEOUT_MS and resolves false.
   function cancelRun(runId) {
     var timer = null;
     try {
@@ -761,132 +949,169 @@
     }
   }
 
+  // Stop: ask the server to cancel first; if it already committed to saving,
+  // keep reading so its `done` lands (M1). Otherwise abort the stream and hand
+  // the UI back at once (B13) — a re-run no longer waits on the old request.
+  function stopRun(run) {
+    if (!run || currentRun !== run || run.stopping) return;
+    run.stopping = true;
+    setStop(true, "Stopping…");
+    stopBtn.disabled = true;
+    cancelRun(run.id).then(function (committed) {
+      if (currentRun !== run) return;
+      if (committed) {
+        run.stopping = false;
+        setStop(false);
+        setPhase({ phase: "saving" });
+        notify("Too late to stop — the run is already saving.", "");
+        return;
+      }
+      run.stopped = true;
+      run.controller.abort();
+      finish(run, "stopped");
+    });
+  }
+  if (stopBtn) stopBtn.addEventListener("click", function () { stopRun(currentRun); });
+
+  // POST /run; a 409 right after Stop is the old run still tearing down on the
+  // server, so retry with backoff (B14) before giving up.
+  async function postRun(run, body) {
+    for (var attempt = 0; ; attempt++) {
+      var resp = await fetch("/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: run.controller.signal,
+      });
+      if (resp.status !== 409) return resp;
+      var delay = core.retryDelay(attempt);
+      if (delay < 0) return resp;
+      if (currentRun !== run) return resp;
+      setRunhead("stream", "Waiting");
+      if (streamNote) {
+        streamNote.textContent = "the previous identical run is still shutting down — retrying in " +
+          (delay / 1000).toFixed(1) + "s (" + (attempt + 1) + "/4)…";
+      }
+      await sleep(delay, run.controller.signal);
+    }
+  }
+
   async function runNow() {
     if (isStreaming) return; // guard double-run
 
     var problem = problemEl.value.trim();
     if (!problem) {
+      switchView("console");
       flashEditor();
       problemEl.focus();
+      notify("Paste a problem first.", "");
       return;
     }
+    if (currentView !== "console") switchView("console"); // C10
 
     var mode = activeVal("mode");
     var language = activeVal("lang");
-    var tierDisabled = mode === "learning";
-    var tier = tierDisabled ? "" : activeVal("tier");
-    // Wire contract: { problem, mode, language, tier, model? }. The picker's
-    // model is sent per run (B12), so the tab runs on the model it shows, not
-    // on a global default another tab may have changed. The server maps the
-    // alias that matches a pinned .env id (e.g. "sonnet" for
-    // claude-sonnet-4-5) back to that id (config.resolve_run_model, I1).
-    var body = { problem: problem, mode: mode, language: language, tier: tier };
+    var tier = mode === "learning" ? "" : activeVal("tier");
     var model = activeVal("model");
+    // Wire contract: { problem, mode, language, tier, model?, run_id }. The
+    // picker's model is sent per run (B12); the server maps the alias that
+    // matches a pinned .env id back to that id (config.resolve_run_model).
+    var body = { problem: problem, mode: mode, language: language, tier: tier };
     if (model) body.model = model;
-    // B14: name the run so Stop can cancel it server-side (frees the slot and
-    // kills the claude process at once, instead of a 409 on an immediate re-run).
-    var runId = newRunId();
-    body.run_id = runId;
-    var meta = { mode: mode, language: language, tier: tier };
-
-    acc = "";
-    enterStreaming(meta);
-
-    // Abort the in-flight /run if the user navigates away, so the server sees
-    // the drop and cancels the Claude subprocess (don't burn subscription use).
-    var controller = new AbortController();
-    function abortOnUnload() { controller.abort(); }
-    window.addEventListener("pagehide", abortOnUnload);
-    window.addEventListener("beforeunload", abortOnUnload);
-
-    var stoppedByUser = false;
-    activeStop = function () {
-      stoppedByUser = true;
-      cancelRun(runId).then(function (committed) {
-        if (committed) {
-          // Too late to stop: the run is saving. Keep reading so its `done`
-          // lands, instead of reporting "Stopped" for a saved run (M1).
-          stoppedByUser = false;
-          return;
-        }
-        controller.abort();
-      });
+    var run = {
+      id: newRunId(),
+      controller: new AbortController(),
+      stopping: false,
+      stopped: false,
+      meta: {
+        mode: mode, language: language, tier: tier,
+        modelAlias: model, modelId: "",
+        problem: problem, title: core.firstLine(problem), // C10: captured now
+      },
     };
+    body.run_id = run.id;
 
-    var terminal = false; // a terminal SSE event (done/error) already set state
+    currentRun = run;
+    acc = "";
+    enterStreaming(run.meta);
 
     try {
-      var resp = await fetch("/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-
+      var resp = await postRun(run, body);
+      if (currentRun !== run) return;
       if (!resp.ok) {
         var err = await resp.json().catch(function () { return {}; });
-        enterError(err.error || "Request rejected (" + resp.status + ").");
-        terminal = true;
+        var msg = err.error || "Request rejected (" + resp.status + ").";
+        if (resp.status === 409) {
+          msg = "An identical run is still finishing on the server. Wait a few seconds and press Run again.";
+        }
+        finish(run, "error", msg);
         return;
       }
 
       var reader = resp.body.getReader();
       var decoder = new TextDecoder();
       var feed = makeSseParser(function (ev) {
+        if (currentRun !== run) return;
         if (ev.type === "text") {
-          acc += ev.data;
-          scheduleRender(acc);
+          acc += typeof ev.data === "string" ? ev.data : String(ev.data);
+          scheduleRender();
+        } else if (ev.name === "phase") {
+          setPhase(ev.data || {});
+        } else if (ev.name === "meta") {
+          if (ev.data && ev.data.model) setRunModel(run.meta, ev.data.model);
         } else if (ev.name === "done") {
-          enterDone(ev.data || {}, meta);
-          terminal = true;
+          finish(run, "done", ev.data || {});
         } else if (ev.name === "error") {
-          enterError(typeof ev.data === "string" ? ev.data : "Run failed.");
-          terminal = true;
+          finish(run, "error", typeof ev.data === "string" ? ev.data : "Run failed.");
         }
       });
 
       while (true) {
         var r = await reader.read();
         if (r.done) break;
+        if (currentRun !== run) { try { reader.cancel(); } catch (e) { /* noop */ } break; }
         feed(decoder.decode(r.value, { stream: true }));
       }
+      // B17: the stream closed without a terminal event — never report that as
+      // a save. (A Stop that ended the stream gracefully was already handled.)
+      if (run.stopped) finish(run, "stopped");
+      else {
+        finish(run, "error",
+          "The stream ended unexpectedly before the run finished (the server closed the " +
+          "connection). Partial output is kept below; nothing was confirmed saved.");
+      }
     } catch (e) {
-      // AbortError = intentional cancel (Stop button or page unload).
       if (e && e.name === "AbortError") {
-        if (stoppedByUser) { enterStopped(); terminal = true; }
-      } else {
-        enterError("Network error: " + (e && e.message));
-        terminal = true;
+        // Stop (already settled by stopRun) or page unload: nothing to show.
+        if (run.stopped) finish(run, "stopped");
+        return;
       }
-    } finally {
-      window.removeEventListener("pagehide", abortOnUnload);
-      window.removeEventListener("beforeunload", abortOnUnload);
-      activeStop = null;
-      isStreaming = false;
-      // Final full render outside the rAF path so the last chunk is never lost
-      // and the last code block loses its `.partial` marker.
-      render(acc);
-      // Stream closed without a terminal event — settle to a sensible state
-      // instead of a stuck spinner. A user Stop can end the stream *gracefully*
-      // (reader resolves done rather than rejecting AbortError), so the catch
-      // above never fires; check stoppedByUser here so Stop still reads as
-      // "stopped", not a spurious "done".
-      if (!terminal) {
-        if (stoppedByUser) enterStopped();
-        else if (acc) enterDone({ paths: [], topics: [] }, meta);
-        else enterIdle();
-      }
-      setRunBtn(false);
-      setStop(false);
+      finish(run, "error", "Network error: " + ((e && e.message) || "the request failed") + ".");
     }
   }
-  runBtn.addEventListener("click", runNow);
+  runBtn.addEventListener("click", function () { runNow(); });
 
-  // ⌘/Ctrl + Enter anywhere runs (guarded against double-run). Suppressed while
-  // an overlay (the search palette or shortcuts modal) is open, so Ctrl/Cmd+Enter
-  // in the palette opens the result without ALSO kicking off a background run.
+  // Leaving the page mid-run: warn first (B15); when it really unloads,
+  // cancel server-side so the claude process stops (don't burn usage).
+  window.addEventListener("beforeunload", function (e) {
+    if (!isStreaming) return;
+    e.preventDefault();
+    e.returnValue = "";
+  });
+  window.addEventListener("pagehide", function () {
+    var run = currentRun;
+    if (run) {
+      cancelRun(run.id);
+      run.controller.abort();
+    }
+    if (qaInflight) cancelQuickAsk("unload");
+  });
+
+  // ⌘/Ctrl + Enter anywhere runs — switching to the Console first (C10).
+  // Suppressed while a dialog is open and for an IME-composition Enter (C9).
   document.addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && (e.key === "Enter" || e.keyCode === 13)) {
+      if (core.isComposingEnter(e)) return;
       if (document.querySelector(".overlay:not([hidden])")) return;
       e.preventDefault();
       if (!isStreaming) runNow();
@@ -894,108 +1119,123 @@
   });
 
   // =========================================================================
-  // Quick Ask — one-shot Haiku Q&A, fully independent of the run stream.
-  // Answers are ephemeral (each replaces the last); errors render as PLAIN
-  // TEXT via textContent, success through the same hardened marked pipeline
-  // as render().
+  // Quick Ask — one-shot Q&A, independent of the run stream. Cancellable,
+  // with a 60 s client timeout (B20). Errors render as PLAIN TEXT.
   // =========================================================================
   var qaInput = $("qa-input");
   var qaAskBtn = $("qa-ask");
   var qaAnswer = $("qa-answer");
+  var qaStatus = $("qa-status");
   var qaToggle = $("qa-toggle");
   var qaBody = $("qa-body");
   var qaPanel = $("quickask");
-  var qaBusy = false;
+  var qaInflight = null;
 
-  // Same one-time delegated Copy listener the other markdown surfaces get.
   if (qaAnswer) qaAnswer.addEventListener("click", handleCopyCode);
 
   function showQaAnswer(md) {
     qaAnswer.classList.remove("err");
     if (window.marked) {
       qaAnswer.innerHTML = marked.parse(md); // hardened renderer (see marked.use above)
-      if (window.hljs) {
-        qaAnswer.querySelectorAll("pre code").forEach(function (b) {
-          try { hljs.highlightElement(b); } catch (e) { /* noop */ }
-        });
-      }
+      highlightCode(qaAnswer, false);
       decorateCode(qaAnswer, false);
     } else {
       qaAnswer.textContent = md;
     }
     qaAnswer.hidden = false;
   }
-
   function showQaError(msg) {
     qaAnswer.classList.add("err");
     qaAnswer.textContent = msg; // server/network strings NEVER hit innerHTML
     qaAnswer.hidden = false;
   }
+  function setQaBusy(busy) {
+    qaAskBtn.textContent = busy ? "Cancel" : "Ask";
+    qaAskBtn.classList.toggle("green", !busy);
+    qaAskBtn.setAttribute("aria-label", busy ? "Cancel Quick Ask" : "Ask");
+    if (qaStatus) {
+      qaStatus.hidden = !busy;
+      qaStatus.textContent = busy ? "Asking… (Esc or Cancel to stop; gives up after 60 s)" : "";
+    }
+    if (qaPanel) qaPanel.setAttribute("aria-busy", busy ? "true" : "false");
+  }
+  function cancelQuickAsk(reason) {
+    var q = qaInflight;
+    if (!q) return;
+    q.reason = reason;
+    postJson("/ask/cancel", { ask_id: q.id }, { keepalive: true }).catch(function () {});
+    q.controller.abort();
+  }
 
   async function quickAsk() {
-    if (qaBusy) return; // one quick-ask in flight at a time
+    if (qaInflight) { cancelQuickAsk("cancel"); return; } // the button is Cancel while busy
     var question = qaInput.value.trim();
-    if (!question) return;
+    if (!question) { qaInput.focus(); return; }
 
-    qaBusy = true;
-    qaAskBtn.disabled = true;
-    qaAskBtn.textContent = "Asking…";
-
-    // Own controller — completely independent of the main run's abort state.
-    var controller = new AbortController();
-    function abortOnUnload() { controller.abort(); }
-    window.addEventListener("pagehide", abortOnUnload);
-    window.addEventListener("beforeunload", abortOnUnload);
+    var q = { id: newRunId(), controller: new AbortController(), reason: "" };
+    qaInflight = q;
+    setQaBusy(true);
+    var timer = setTimeout(function () { cancelQuickAsk("timeout"); }, QA_TIMEOUT_MS);
 
     try {
-      var resp = await fetch("/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: question,
-          language: activeVal("lang"),
-          problem: problemEl.value.trim(),
-        }),
-        signal: controller.signal,
-      });
+      var resp = await postJson("/ask", {
+        question: question,
+        language: activeVal("lang"),
+        problem: problemEl.value.trim(),
+        ask_id: q.id,
+      }, { signal: q.controller.signal });
       var data = await resp.json().catch(function () { return {}; });
-      if (resp.ok) {
-        showQaAnswer(String(data.answer || ""));
-      } else {
-        showQaError(data.error || "Request rejected (" + resp.status + ").");
-      }
+      if (q.reason) throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      if (resp.ok) showQaAnswer(String(data.answer || ""));
+      else showQaError(data.error || "Request rejected (" + resp.status + ").");
     } catch (e) {
-      if (!(e && e.name === "AbortError")) {
-        showQaError("Network error: " + (e && e.message));
+      if (e && e.name === "AbortError") {
+        if (q.reason === "timeout") {
+          showQaError("Quick Ask timed out after 60 s and was cancelled. Try again or shorten the question.");
+        } else if (q.reason === "cancel") {
+          showQaError("Quick Ask cancelled.");
+        }
+      } else {
+        showQaError("Network error: " + ((e && e.message) || "the request failed") + ".");
       }
     } finally {
-      window.removeEventListener("pagehide", abortOnUnload);
-      window.removeEventListener("beforeunload", abortOnUnload);
-      qaBusy = false;
-      qaAskBtn.disabled = false;
-      qaAskBtn.textContent = "Ask";
+      clearTimeout(timer);
+      if (qaInflight === q) qaInflight = null;
+      setQaBusy(false);
     }
   }
 
   if (qaAskBtn) qaAskBtn.addEventListener("click", quickAsk);
   if (qaInput) {
-    // Plain Enter asks; modified Enter falls through to the global ⌘/Ctrl+Enter
-    // run shortcut untouched.
+    // Plain Enter asks (not mid-IME-composition); modified Enter falls through
+    // to the global ⌘/Ctrl+Enter run shortcut; Esc cancels an ask in flight.
     qaInput.addEventListener("keydown", function (e) {
-      if ((e.key === "Enter" || e.keyCode === 13) && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      if (e.key === "Escape" && qaInflight) {
         e.preventDefault();
-        quickAsk();
+        e.stopPropagation();
+        cancelQuickAsk("cancel");
+        return;
+      }
+      if ((e.key === "Enter" || e.keyCode === 13) && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        if (core.isComposingEnter(e)) return;
+        e.preventDefault();
+        if (!qaInflight) quickAsk();
       }
     });
+  }
+  function setQaCollapsed(collapsed) {
+    qaBody.hidden = collapsed;
+    if (qaPanel) qaPanel.classList.toggle("collapsed", collapsed);
+    qaToggle.textContent = collapsed ? "Show" : "Hide";
+    qaToggle.setAttribute("aria-expanded", String(!collapsed));
   }
   if (qaToggle && qaBody) {
     qaToggle.addEventListener("click", function () {
       var collapsed = !qaBody.hidden;
-      qaBody.hidden = collapsed;
-      if (qaPanel) qaPanel.classList.toggle("collapsed", collapsed);
-      qaToggle.textContent = collapsed ? "Show" : "Hide";
-      qaToggle.setAttribute("aria-expanded", String(!collapsed));
+      setQaCollapsed(collapsed);
+      prefs.set("qaCollapsed", collapsed ? "1" : ""); // B15
     });
+    if (prefs.get("qaCollapsed", "") === "1") setQaCollapsed(true);
   }
 
   // =========================================================================
@@ -1004,59 +1244,7 @@
   var libFiles = [];
   var libByPath = {};
   var currentRuns = [];
-
-  // Group files into runs by (mode-folder, topic, stem-before "__").
-  function deriveRuns(files) {
-    var map = {};
-    var order = [];
-    files.forEach(function (f) {
-      var parts = f.path.split("/");
-      if (parts.length < 3) return; // only <mode>/<topic>/<file> entries are runs
-      var modeFolder = parts[0];
-      var topicSeg = parts[1];
-      var fname = parts[parts.length - 1];
-      var dot = fname.lastIndexOf(".");
-      var ext = dot === -1 ? "" : fname.slice(dot + 1).toLowerCase();
-      var base = dot === -1 ? fname : fname.slice(0, dot);
-      var us = base.indexOf("__");
-      var stem = us === -1 ? base : base.slice(0, us);
-      var tier = us === -1 ? "" : base.slice(us + 2);
-      // learning writes into "<type>_learning" — drop the mode artifact so a
-      // learning run's topic groups with the same topic in other modes.
-      var topicRaw = topicSeg.replace(/_learning$/, "");
-      var key = modeFolder + "|" + topicRaw + "|" + stem;
-      var run = map[key];
-      if (!run) {
-        run = {
-          modeFolder: modeFolder, topicRaw: topicRaw, stemRaw: stem,
-          tier: "", langExt: "", savedAt: 0, mdPath: "", files: [],
-        };
-        map[key] = run;
-        order.push(run);
-      }
-      run.files.push(f);
-      if (typeof f.mtime === "number" && f.mtime > run.savedAt) run.savedAt = f.mtime;
-      if (ext === "md") { if (!run.mdPath) run.mdPath = f.path; }
-      else if (CODE_EXT[ext] && !run.langExt) run.langExt = ext;
-      if (tier && !run.tier) run.tier = tier;
-    });
-    return order.map(function (run) {
-      return {
-        modeFolder: run.modeFolder,
-        mode: modeLabel(run.modeFolder),
-        topicRaw: run.topicRaw,
-        topic: humanize(run.topicRaw),
-        stemRaw: run.stemRaw,
-        problem: humanize(run.stemRaw),
-        tier: run.tier,
-        language: langLabel(run.langExt),
-        langExt: run.langExt,
-        savedAt: run.savedAt,
-        mdPath: run.mdPath,
-        files: run.files,
-      };
-    });
-  }
+  var libLoaded = false; // C10: no Stats empty-state flash before the first load
 
   function openRun(run) {
     var path = run.mdPath || (run.files[0] && run.files[0].path);
@@ -1064,28 +1252,37 @@
     switchView("library");
     openFile(path);
   }
+  function runAriaLabel(run) {
+    return "Open " + run.problem + " — " + run.mode +
+      (run.language !== "—" ? ", " + run.language : "") +
+      (run.tier ? ", " + cap(run.tier) : "") + ", " +
+      core.verdictInfo(run.verdict).label + ", saved " + relTime(run.savedAt);
+  }
 
   function renderRecents(runs) {
     if (!recentsEl) return;
-    recentsEl.innerHTML = "";
+    recentsEl.textContent = "";
     var top = runs.slice().sort(bySavedDesc).slice(0, 7);
     if (!top.length) {
       recentsEl.appendChild(el("div", "rm", "No saved runs yet."));
       return;
     }
     top.forEach(function (run) {
-      var rec = el("div", "rec");
-      var dd = el("span", "dd");
-      dd.style.background = "var(--tx4)"; // neutral — the app has no difficulty signal
+      var rec = el("button", "rec");
+      rec.type = "button";
+      rec.setAttribute("aria-label", runAriaLabel(run));
+      var info = core.verdictInfo(run.verdict);
+      var dd = el("span", "dd v-" + info.cls);
+      dd.setAttribute("aria-hidden", "true");
       rec.appendChild(dd);
-      var rt = el("div", "rt");
-      var rn = el("div", "rn");
+      var rt = el("span", "rt");
+      var rn = el("span", "rn");
       var mt = midTrunc(run.problem, 6);
       rn.appendChild(el("span", "a", mt.a));
       if (mt.b) rn.appendChild(el("span", "b", mt.b));
       rt.appendChild(rn);
       var sub = run.mode.toLowerCase() + " · " + (run.langExt || "—") + " · " + relTime(run.savedAt);
-      rt.appendChild(el("div", "rm", sub));
+      rt.appendChild(el("span", "rm", sub));
       rec.appendChild(rt);
       rec.addEventListener("click", function () { openRun(run); });
       recentsEl.appendChild(rec);
@@ -1096,14 +1293,23 @@
     if (recentCount) recentCount.textContent = n + " saved · output/";
   }
 
+  function statusCell(verdict) {
+    var info = core.verdictInfo(verdict);
+    var st = el("span", "tstatus v-" + info.cls);
+    st.title = info.label;
+    if (info.cls === "pass") st.innerHTML = CHECK_SVG;
+    else st.textContent = info.glyph;
+    st.appendChild(el("span", "sr-only", info.label));
+    return st;
+  }
+
   function renderRecentTable(runs) {
     if (!recentTable) return;
     recentTable.querySelectorAll(".trow").forEach(function (r) { r.remove(); });
     var sorted = runs.slice().sort(bySavedDesc);
     setRecentCount(sorted.length);
     if (!sorted.length) {
-      var empty = el("div", "trow");
-      empty.style.cursor = "default";
+      var empty = el("div", "trow empty");
       empty.appendChild(el("span", "diff", "—"));
       var pc0 = el("div", "pcell");
       pc0.appendChild(el("div", "pn", "No runs saved yet"));
@@ -1114,8 +1320,12 @@
     }
     sorted.forEach(function (run) {
       var row = el("div", "trow");
+      row.setAttribute("role", "button");
+      row.tabIndex = 0;
+      row.setAttribute("aria-label", runAriaLabel(run));
       row.setAttribute("data-mode", run.mode.toLowerCase());
-      row.appendChild(el("span", "diff", "—")); // neutral difficulty column
+      row.setAttribute("data-verdict", run.verdict || "none");
+      row.appendChild(el("span", "diff", "—")); // difficulty arrives with SP6 (D1)
       var pc = el("div", "pcell");
       pc.appendChild(el("div", "pn", run.problem));
       pc.appendChild(el("div", "pm", run.stemRaw + (run.tier ? "__" + run.tier : "")));
@@ -1124,10 +1334,11 @@
       row.appendChild(chipEl(run.mode, ""));
       row.appendChild(run.langExt ? typeBadge(run.langExt) : el("span", "tcell", "—"));
       row.appendChild(el("span", "tcell", relTime(run.savedAt)));
-      var st = el("span", "tstatus");
-      st.innerHTML = CHECK_TABLE_SVG;
-      row.appendChild(st);
+      row.appendChild(statusCell(run.verdict));
       row.addEventListener("click", function () { openRun(run); });
+      row.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openRun(run); }
+      });
       recentTable.appendChild(row);
     });
     applyRecentFilter();
@@ -1147,9 +1358,10 @@
     });
   }
 
+  // C9: topic chips are real buttons that open search prefilled with the topic.
   function renderTopics(runs) {
     if (!topicsEl) return;
-    topicsEl.innerHTML = "";
+    topicsEl.textContent = "";
     var sets = {};
     runs.forEach(function (run) {
       if (!run.topic) return;
@@ -1160,137 +1372,26 @@
     });
     list.sort(function (a, b) { return b.count - a.count || a.topic.localeCompare(b.topic); });
     if (!list.length) {
-      topicsEl.appendChild(el("span", "topic", "No topics yet"));
+      topicsEl.appendChild(el("span", "topic empty", "No topics yet"));
       return;
     }
     list.slice(0, 10).forEach(function (item) {
-      var chip = el("span", "topic");
+      var chip = el("button", "topic");
+      chip.type = "button";
+      chip.setAttribute("aria-label", "Search the library for " + item.topic +
+        " (" + item.count + (item.count === 1 ? " problem)" : " problems)"));
       chip.appendChild(document.createTextNode(item.topic + " "));
-      chip.appendChild(el("span", "c", String(item.count)));
+      var c = el("span", "c", String(item.count));
+      c.setAttribute("aria-hidden", "true");
+      chip.appendChild(c);
+      chip.addEventListener("click", function () { openSearch(item.topic); });
       topicsEl.appendChild(chip);
     });
   }
 
   // =========================================================================
-  // Stats (Cycle 10) — pure helpers + Stats view + Console streak badge.
-  // All derived client-side from currentRuns (grouped over /library mtimes).
-  // run.savedAt is Unix SECONDS (like every mtime here), so day-bucket via *1000.
+  // Stats — Stats view + Console streak badge, from currentRuns.
   // =========================================================================
-
-  // Local YYYY-MM-DD. NOT toISOString (that is UTC and would misbucket a run
-  // saved near local midnight into the wrong day / streak).
-  function dayKey(date) {
-    var y = date.getFullYear();
-    var m = date.getMonth() + 1;
-    var d = date.getDate();
-    return y + "-" + (m < 10 ? "0" : "") + m + "-" + (d < 10 ? "0" : "") + d;
-  }
-
-  // Parse a YYYY-MM-DD key back to a LOCAL-midnight Date (for day arithmetic).
-  function parseDayKey(k) {
-    var p = String(k).split("-");
-    return new Date(+p[0], (+p[1]) - 1, +p[2]);
-  }
-
-  // Pure: derive every stat from a runs array. `now` is injectable (tests).
-  function computeStats(runs, now) {
-    now = now || new Date();
-    runs = runs || [];
-
-    var probSet = {};
-    var byMode = {};
-    var byLanguage = {};
-    var byTopic = {};
-    var dayCounts = {}; // 'YYYY-MM-DD' -> runs that day
-
-    runs.forEach(function (run) {
-      var title = run.problem || run.stemRaw || "";
-      if (title) probSet[title] = true;
-
-      var mode = run.mode || "Other";
-      byMode[mode] = (byMode[mode] || 0) + 1;
-
-      var lang = (run.language && run.language !== "—") ? run.language : "Unknown";
-      byLanguage[lang] = (byLanguage[lang] || 0) + 1;
-
-      var topic = run.topic || "Uncategorized";
-      byTopic[topic] = (byTopic[topic] || 0) + 1;
-
-      if (typeof run.savedAt === "number" && run.savedAt > 0) {
-        var k = dayKey(new Date(run.savedAt * 1000));
-        dayCounts[k] = (dayCounts[k] || 0) + 1;
-      }
-    });
-
-    var today = dayCounts[dayKey(now)] || 0;
-
-    // last 7 local days (today + the 6 prior)
-    var thisWeek = 0;
-    for (var i = 0; i < 7; i++) {
-      var wd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
-      thisWeek += dayCounts[dayKey(wd)] || 0;
-    }
-
-    // current streak: consecutive active days ending today, with a
-    // today-or-yesterday grace so a fresh morning still reads the streak.
-    var currentStreak = 0;
-    var cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    if (!dayCounts[dayKey(cursor)]) {
-      cursor = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-      if (!dayCounts[dayKey(cursor)]) cursor = null; // neither today nor yesterday
-    }
-    while (cursor && dayCounts[dayKey(cursor)]) {
-      currentStreak++;
-      cursor = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() - 1);
-    }
-
-    // longest streak: longest consecutive run over the sorted unique active days.
-    var days = Object.keys(dayCounts).sort(); // 'YYYY-MM-DD' sorts chronologically
-    var longestStreak = 0;
-    var runLen = 0;
-    var prev = null;
-    days.forEach(function (k) {
-      if (prev === null) {
-        runLen = 1;
-      } else {
-        var diff = Math.round((parseDayKey(k) - parseDayKey(prev)) / 86400000);
-        runLen = diff === 1 ? runLen + 1 : 1;
-      }
-      if (runLen > longestStreak) longestStreak = runLen;
-      prev = k;
-    });
-
-    // heatmap: last 119 days (17 weeks), oldest -> newest.
-    var heatmap = [];
-    for (var j = 118; j >= 0; j--) {
-      var hd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - j);
-      var hk = dayKey(hd);
-      heatmap.push({ date: hk, count: dayCounts[hk] || 0 });
-    }
-
-    return {
-      total: runs.length,
-      distinctProblems: Object.keys(probSet).length,
-      today: today,
-      thisWeek: thisWeek,
-      currentStreak: currentStreak,
-      longestStreak: longestStreak,
-      byMode: byMode,
-      byLanguage: byLanguage,
-      byTopic: byTopic,
-      heatmap: heatmap,
-    };
-  }
-
-  // 5 intensity buckets (classes hm-0..hm-4) by runs/day.
-  function heatBucket(c) {
-    if (c <= 0) return 0;
-    if (c === 1) return 1;
-    if (c === 2) return 2;
-    if (c <= 4) return 3;
-    return 4;
-  }
-
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
   function setStatText(id, val) {
@@ -1298,7 +1399,6 @@
     if (e) e.textContent = String(val);
   }
 
-  // ---- Console streak badge (B3) -----------------------------------------
   function renderStreakBadge(stats) {
     var badge = $("streak-badge");
     if (!badge) return;
@@ -1310,13 +1410,14 @@
       badge.appendChild(el("span", "sb-txt", "Start your streak today"));
       return;
     }
-    badge.appendChild(el("span", "sb-flame", "🔥")); // fire emoji
+    var flame = el("span", "sb-flame", "🔥");
+    flame.setAttribute("aria-hidden", "true");
+    badge.appendChild(flame);
     var txt = stats.currentStreak + "-day streak";
     if (stats.today > 0) txt += " · " + stats.today + " today";
     badge.appendChild(el("span", "sb-txt", txt));
   }
 
-  // ---- Stats view: tiles --------------------------------------------------
   function renderTiles(stats) {
     setStatText("stat-streak", stats.currentStreak);
     setStatText("stat-streak-sub",
@@ -1330,20 +1431,17 @@
       stats.distinctProblems + (stats.distinctProblems === 1 ? " problem" : " problems"));
   }
 
-  // ---- Stats view: activity heatmap --------------------------------------
-  // GitHub-style: columns = weeks, rows = weekday. Lead with blank cells so the
-  // first day lands on its correct weekday row (grid-auto-flow:column fills a
-  // column top-to-bottom before moving right).
+  // GitHub-style: columns = weeks, rows = weekday.
   function renderHeatmap(heatmap) {
     var grid = $("hm-grid");
     var months = $("hm-months");
     if (!grid || !months) return;
-    grid.innerHTML = "";
-    months.innerHTML = "";
+    grid.textContent = "";
+    months.textContent = "";
     if (!heatmap.length) return;
 
-    var first = parseDayKey(heatmap[0].date);
-    var pad = first.getDay(); // 0=Sun .. 6=Sat leading blanks
+    var first = core.parseDayKey(heatmap[0].date);
+    var pad = first.getDay();
     var cells = [];
     for (var p = 0; p < pad; p++) cells.push(null);
     heatmap.forEach(function (d) { cells.push(d); });
@@ -1351,16 +1449,17 @@
 
     grid.style.gridTemplateColumns = "repeat(" + numCols + ", var(--hm-cell))";
     months.style.gridTemplateColumns = "repeat(" + numCols + ", var(--hm-cell))";
+    grid.setAttribute("role", "img");
+    var active = heatmap.filter(function (d) { return d.count > 0; }).length;
+    grid.setAttribute("aria-label", "Activity heatmap: " + active + " active days in the last 17 weeks");
 
     cells.forEach(function (d) {
       if (!d) { grid.appendChild(el("span", "hm-cell hm-pad")); return; }
-      var cell = el("span", "hm-cell hm-" + heatBucket(d.count));
+      var cell = el("span", "hm-cell hm-" + core.heatBucket(d.count));
       cell.title = d.date + " · " + d.count + (d.count === 1 ? " run" : " runs");
       grid.appendChild(cell);
     });
 
-    // Month labels above the columns where the month first changes (spaced out
-    // so a short leading month doesn't collide with the next label).
     var lastMonth = -1;
     var lastLabelCol = -99;
     for (var c = 0; c < numCols; c++) {
@@ -1370,7 +1469,7 @@
         if (cc) { rep = cc; break; }
       }
       if (!rep) continue;
-      var mo = parseDayKey(rep.date).getMonth();
+      var mo = core.parseDayKey(rep.date).getMonth();
       if (mo !== lastMonth) {
         lastMonth = mo;
         if (c - lastLabelCol >= 3) {
@@ -1383,7 +1482,6 @@
     }
   }
 
-  // ---- Stats view: breakdowns --------------------------------------------
   function sortedEntries(map) {
     return Object.keys(map).map(function (k) {
       return { key: k, count: map[k] };
@@ -1395,7 +1493,7 @@
   function renderBars(id, map) {
     var host = $(id);
     if (!host) return;
-    host.innerHTML = "";
+    host.textContent = "";
     var rows = sortedEntries(map);
     if (!rows.length) { host.appendChild(el("div", "bd-empty", "No data yet")); return; }
     var max = rows[0].count || 1;
@@ -1403,6 +1501,7 @@
       var r = el("div", "bd-row");
       r.appendChild(el("span", "bd-key", row.key));
       var track = el("span", "bd-track");
+      track.setAttribute("aria-hidden", "true");
       var fill = el("span", "bd-fill");
       fill.style.width = Math.max(6, Math.round((row.count / max) * 100)) + "%";
       track.appendChild(fill);
@@ -1415,8 +1514,8 @@
   function renderTopicList(id, map) {
     var host = $(id);
     if (!host) return;
-    host.innerHTML = "";
-    var rows = sortedEntries(map).slice(0, 8); // byTopic rendered sorted desc
+    host.textContent = "";
+    var rows = sortedEntries(map).slice(0, 8);
     if (!rows.length) { host.appendChild(el("div", "bd-empty", "No topics yet")); return; }
     rows.forEach(function (row, i) {
       var r = el("div", "bd-trow");
@@ -1427,11 +1526,10 @@
     });
   }
 
-  // ---- Stats orchestration (badge always; view when populated) -----------
   function refreshStats() {
-    var stats = computeStats(currentRuns);
+    if (!libLoaded) return; // C10: no empty-state flash before /library answers
+    var stats = core.computeStats(currentRuns);
     renderStreakBadge(stats);
-
     var empty = $("stats-empty");
     var body = $("stats-body");
     if (!stats.total) {
@@ -1460,13 +1558,13 @@
     var head = libViewer.querySelector(".vw-head");
     if (!head) return;
     var main = document.createElement("div");
-    main.className = "vw-main"; // styled in style.css (.vw-main / .vw-title / .vw-sub)
-    vwTitle = el("div", "vw-title");
+    main.className = "vw-main";
+    vwTitle = el("h2", "vw-title");
     vwSub = el("div", "vw-sub");
-    head.insertBefore(main, libViewerPath); // keep close button as the trailing sibling
+    head.insertBefore(main, libViewerPath);
     main.appendChild(vwTitle);
     main.appendChild(vwSub);
-    main.appendChild(libViewerPath); // relocate the raw path under the humanized head
+    main.appendChild(libViewerPath);
   })();
 
   function fileMeta(path) {
@@ -1488,6 +1586,7 @@
       topic: humanize(topicRaw),
       mode: modeFolder ? modeLabel(modeFolder) : "",
       mtime: f && f.mtime,
+      verdict: (f && f.verdict) || "",
     };
   }
 
@@ -1495,7 +1594,7 @@
     var meta = fileMeta(relPath);
     if (vwTitle) vwTitle.textContent = meta.title;
     if (vwSub) {
-      vwSub.innerHTML = "";
+      vwSub.textContent = "";
       if (meta.topic) vwSub.appendChild(chipEl(meta.topic, "mint"));
       if (meta.mode) vwSub.appendChild(chipEl(meta.mode, ""));
       if (meta.ext === "md") {
@@ -1504,12 +1603,16 @@
         var ll = langLabel(meta.ext);
         if (ll !== "—") vwSub.appendChild(chipEl(ll, ""));
       }
+      if (meta.verdict) {
+        var info = core.verdictInfo(meta.verdict);
+        vwSub.appendChild(chipEl(info.glyph + " " + info.label, verdictChipVariant(meta.verdict)));
+      }
       if (meta.mtime) vwSub.appendChild(chipEl("saved " + savedDate(meta.mtime), "mono"));
     }
     if (libViewerPath) libViewerPath.textContent = relPath;
     currentViewPath = relPath;
 
-    libViewerBody.innerHTML = "";
+    libViewerBody.textContent = "";
     if (meta.ext === "md" && window.marked) {
       libViewerBody.innerHTML = marked.parse(text); // same hardened pipeline
     } else {
@@ -1520,26 +1623,22 @@
       pre.appendChild(code);
       libViewerBody.appendChild(pre);
     }
-    if (window.hljs) {
-      libViewerBody.querySelectorAll("pre code").forEach(function (b) {
-        try { hljs.highlightElement(b); } catch (e) { /* noop */ }
-      });
-    }
+    highlightCode(libViewerBody, false);
     decorateCode(libViewerBody, false);
     libViewer.hidden = false;
+    libViewer.scrollTop = 0; // C10: a newly opened file starts at its top
   }
 
   function markTreeActive(relPath) {
-    var prev = libTree.querySelector(".filerow.on");
-    if (prev) prev.classList.remove("on");
-    var rows = libTree.querySelectorAll(".filerow");
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].getAttribute("data-path") === relPath) { rows[i].classList.add("on"); break; }
-    }
+    libTree.querySelectorAll(".filerow").forEach(function (row) {
+      var on = !!relPath && row.getAttribute("data-path") === relPath;
+      row.classList.toggle("on", on);
+      if (on) row.setAttribute("aria-current", "true"); else row.removeAttribute("aria-current");
+    });
   }
 
   function openFile(relPath) {
-    fetch("/library/file?path=" + encodeURIComponent(relPath))
+    return fetch("/library/file?path=" + encodeURIComponent(relPath))
       .then(function (resp) {
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         return resp.text();
@@ -1549,12 +1648,13 @@
         markTreeActive(relPath);
       })
       .catch(function (e) {
-        console.warn("Could not open " + relPath + " (" + (e && e.message) + ").");
+        notify("Could not open " + relPath.split("/").pop() + " (" + ((e && e.message) || "error") +
+          "). It may have been moved or deleted.", "error");
       });
   }
 
   function renderTree(files) {
-    libTree.innerHTML = "";
+    libTree.textContent = "";
     if (!files.length) {
       libTree.appendChild(el("div", "grp-h", "Nothing saved yet — run a problem to build your library."));
       return;
@@ -1569,9 +1669,11 @@
     });
     groups.forEach(function (folder) {
       var grp = el("div", "grp");
+      grp.setAttribute("role", "group");
       var h = el("div", "grp-h");
       h.innerHTML = FOLDER_SVG;
       h.appendChild(document.createTextNode(" " + (folder || "(library root)")));
+      grp.setAttribute("aria-label", folder || "library root");
       grp.appendChild(h);
       byFolder[folder].forEach(function (f) {
         var name = f.path.slice(f.path.lastIndexOf("/") + 1);
@@ -1587,12 +1689,20 @@
         fn.appendChild(el("span", "a", mt.a));
         if (mt.b) fn.appendChild(el("span", "b", mt.b));
         btn.appendChild(fn);
+        if (f.verdict) {
+          var vi = core.verdictInfo(f.verdict);
+          var vd = el("span", "fverdict v-" + vi.cls, vi.glyph);
+          vd.title = vi.label;
+          btn.appendChild(vd);
+          btn.setAttribute("aria-label", name + " — " + vi.label);
+        }
         btn.addEventListener("click", function () { openFile(f.path); });
         grp.appendChild(btn);
       });
       libTree.appendChild(grp);
     });
     applyLibFilter();
+    markTreeActive(currentViewPath); // C10: keep the open file highlighted
   }
 
   function currentLibFilter() {
@@ -1615,32 +1725,34 @@
   }
 
   function loadLibrary() {
-    fetch("/library")
+    return fetch("/library")
       .then(function (resp) {
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         return resp.json();
       })
       .then(function (data) {
+        libLoaded = true;
         libFiles = (data && data.files) || [];
         libByPath = {};
         libFiles.forEach(function (f) { libByPath[f.path] = f; });
-        currentRuns = deriveRuns(libFiles);
+        currentRuns = core.deriveRuns(libFiles);
         renderRecents(currentRuns);
         renderRecentTable(currentRuns);
         renderTopics(currentRuns);
         renderTree(libFiles);
-        refreshStats(); // recompute streak badge + Stats view from the new runs
+        refreshStats();
       })
       .catch(function (e) {
+        libLoaded = true;
         libFiles = [];
         libByPath = {};
         currentRuns = [];
         renderRecents([]);
         renderRecentTable([]);
         renderTopics([]);
-        refreshStats(); // empty-state + "start your streak" nudge on load failure
+        refreshStats();
         if (libTree) {
-          libTree.innerHTML = "";
+          libTree.textContent = "";
           libTree.appendChild(el("div", "grp-h", "Could not load the library (" + (e && e.message) + ")."));
         }
       });
@@ -1648,42 +1760,49 @@
 
   function closeViewer() {
     libViewer.hidden = true;
-    libViewerBody.innerHTML = "";
+    libViewerBody.textContent = "";
     currentViewPath = null;
-    var on = libTree.querySelector(".filerow.on");
-    if (on) on.classList.remove("on");
+    markTreeActive(null);
   }
+  if (libViewerClose) libViewerClose.addEventListener("click", closeViewer);
 
-  if (libViewerClose) {
-    libViewerClose.addEventListener("click", closeViewer);
-  }
-
+  // B19: "Delete run" removes the doc AND its code file(s) (scope=run).
   if (libViewerDelete) {
     libViewerDelete.addEventListener("click", function () {
       var path = currentViewPath;
       if (!path) return;
-      var name = path.slice(path.lastIndexOf("/") + 1);
-      if (!window.confirm("Delete " + name + " from your library? This can't be undone.")) return;
-      libViewerDelete.disabled = true;
-      fetch("/library/file?path=" + encodeURIComponent(path), { method: "DELETE" })
-        .then(function (resp) {
-          if (!resp.ok) throw new Error("HTTP " + resp.status);
-          closeViewer();
-          loadLibrary(); // listing refreshes without the deleted file (cache invalidated server-side)
-        })
-        .catch(function (e) {
-          console.warn("Could not delete " + path + " (" + (e && e.message) + ").");
-          window.alert("Could not delete that file.");
-        })
-        .then(function () { libViewerDelete.disabled = false; });
+      var targets = core.runSiblings(libFiles, path);
+      confirmDialog({
+        title: targets.length > 1 ? "Delete this run (" + targets.length + " files)?" : "Delete this file?",
+        lines: targets,
+        note: "This can't be undone.",
+        ok: targets.length > 1 ? "Delete run" : "Delete file",
+        returnFocus: libViewerDelete,
+      }).then(function (yes) {
+        if (!yes) return;
+        libViewerDelete.disabled = true;
+        fetch("/library/file?path=" + encodeURIComponent(path) + "&scope=run", { method: "DELETE" })
+          .then(function (resp) {
+            if (!resp.ok) throw new Error("HTTP " + resp.status);
+            return resp.json().catch(function () { return {}; });
+          })
+          .then(function (d) {
+            var n = (d && d.paths && d.paths.length) || targets.length;
+            closeViewer();
+            loadLibrary();
+            notify("Deleted " + n + (n === 1 ? " file." : " files."), "");
+          })
+          .catch(function (e) {
+            notify("Could not delete that run (" + ((e && e.message) || "error") + ").", "error");
+          })
+          .then(function () { libViewerDelete.disabled = false; });
+      });
     });
   }
 
   // =========================================================================
-  // Overlays (Cycle 10, C1/C2): keyboard-shortcuts help modal + ⌘K search
-  // palette. Both toggle via the `hidden` property (like every other section
-  // here) and render ALL user-derived text through el()/textContent — never
-  // innerHTML — so the XSS posture is preserved. No backend/route change.
+  // Overlays: shortcuts modal, ⌘K search palette, confirm dialog — all trap
+  // focus (C9) and render user-derived text via el()/textContent only.
   // =========================================================================
   var shortcutsModal = $("shortcuts-modal");
   var shortcutsBtn = $("shortcuts-btn");
@@ -1692,11 +1811,32 @@
   var searchBox = $("tb-search");
   var searchInput = $("search-input");
   var searchResults = $("search-results");
-  var overlayReturnFocus = null; // element focus returns to when an overlay closes
-  var searchRows = [];           // current filtered items (parallel to the rendered rows)
-  var searchActive = -1;         // highlighted index within searchRows
+  var confirmModal = $("confirm-modal");
+  var overlayReturnFocus = null;
+  var searchRows = [];
+  var searchActive = -1;
 
-  // The `?` shortcut must never fire while the user is typing text.
+  var FOCUSABLE = 'button:not([disabled]):not([hidden]), [href], input:not([disabled]), ' +
+    'select, textarea, [tabindex]:not([tabindex="-1"])';
+  function focusablesIn(root) {
+    return Array.prototype.filter.call(root.querySelectorAll(FOCUSABLE), function (n) {
+      return n.offsetParent !== null || n === document.activeElement;
+    });
+  }
+  // Keep Tab inside `root` (wrapping both ways).
+  function trapTab(e, root) {
+    if (e.key !== "Tab" || !root) return;
+    var list = focusablesIn(root);
+    if (!list.length) { e.preventDefault(); return; }
+    var i = list.indexOf(document.activeElement);
+    var next = core.nextFocusIndex(i, list.length, e.shiftKey);
+    e.preventDefault();
+    list[next].focus();
+  }
+  function openOverlay() {
+    return document.querySelector(".overlay:not([hidden])");
+  }
+
   function isTypingTarget(node) {
     if (!node) return false;
     var tag = (node.tagName || "").toLowerCase();
@@ -1711,10 +1851,10 @@
   // ---- shortcuts modal ----------------------------------------------------
   function openShortcuts() {
     if (!shortcutsModal || !shortcutsModal.hidden) return;
-    closeSearch(); // never stack overlays
+    closeSearch();
     overlayReturnFocus = document.activeElement;
     shortcutsModal.hidden = false;
-    if (shortcutsClose) shortcutsClose.focus(); // move focus into the dialog
+    if (shortcutsClose) shortcutsClose.focus();
   }
   function closeShortcuts() {
     if (!shortcutsModal || shortcutsModal.hidden) return;
@@ -1725,7 +1865,44 @@
   if (shortcutsClose) shortcutsClose.addEventListener("click", closeShortcuts);
   if (shortcutsModal) {
     shortcutsModal.addEventListener("click", function (e) {
-      if (e.target === shortcutsModal) closeShortcuts(); // backdrop click only
+      if (e.target === shortcutsModal) closeShortcuts();
+    });
+  }
+
+  // ---- confirm dialog ---------------------------------------------------------
+  var confirmResolve = null;
+  function confirmDialog(opts) {
+    if (!confirmModal) return Promise.resolve(window.confirm(opts.title));
+    closeSearch();
+    closeShortcuts();
+    $("confirm-title").textContent = opts.title;
+    var body = $("confirm-body");
+    body.textContent = "";
+    if (opts.lines && opts.lines.length) {
+      var ul = el("ul", "confirm-list");
+      opts.lines.forEach(function (l) { ul.appendChild(el("li", null, l)); });
+      body.appendChild(ul);
+    }
+    if (opts.note) body.appendChild(el("p", "confirm-note", opts.note));
+    $("confirm-ok").textContent = opts.ok || "OK";
+    overlayReturnFocus = opts.returnFocus || document.activeElement;
+    confirmModal.hidden = false;
+    $("confirm-cancel").focus(); // the safe choice has focus
+    return new Promise(function (resolve) { confirmResolve = resolve; });
+  }
+  function closeConfirm(answer) {
+    if (!confirmModal || confirmModal.hidden) return;
+    confirmModal.hidden = true;
+    var r = confirmResolve;
+    confirmResolve = null;
+    restoreOverlayFocus();
+    if (r) r(!!answer);
+  }
+  if (confirmModal) {
+    $("confirm-ok").addEventListener("click", function () { closeConfirm(true); });
+    $("confirm-cancel").addEventListener("click", function () { closeConfirm(false); });
+    confirmModal.addEventListener("click", function (e) {
+      if (e.target === confirmModal) closeConfirm(false);
     });
   }
 
@@ -1734,8 +1911,6 @@
     return parts.filter(function (p) { return p && p !== "—"; }).join(" · ");
   }
 
-  // Searchable corpus = grouped runs (rich rows) ∪ any loose library file NOT
-  // folded into a run (defensive: output/ is normally all 3-segment run files).
   function buildSearchItems() {
     var items = [];
     var claimed = {};
@@ -1755,7 +1930,7 @@
       });
     });
     libFiles.forEach(function (f) {
-      if (claimed[f.path]) return; // already represented by its run row
+      if (claimed[f.path]) return;
       var meta = fileMeta(f.path);
       items.push({
         title: meta.title,
@@ -1769,8 +1944,6 @@
     return items;
   }
 
-  // Case-insensitive: every whitespace-separated term must be a substring.
-  // Empty query -> most recent runs so the palette is useful before typing.
   function filterSearch(query) {
     var all = buildSearchItems();
     var q = String(query || "").trim().toLowerCase();
@@ -1783,76 +1956,89 @@
     }).slice(0, 40);
   }
 
+  // C9: the input stays focused; the highlighted option is announced through
+  // aria-activedescendant.
   function setSearchActive(i) {
     var rows = searchResults.querySelectorAll(".pal-row");
-    if (!rows.length) { searchActive = -1; return; }
+    if (!rows.length) {
+      searchActive = -1;
+      searchInput.removeAttribute("aria-activedescendant");
+      return;
+    }
     if (i < 0) i = 0;
     if (i > rows.length - 1) i = rows.length - 1;
     searchActive = i;
     for (var r = 0; r < rows.length; r++) {
       var on = r === i;
       rows[r].classList.toggle("on", on);
-      if (on) { rows[r].setAttribute("aria-selected", "true"); rows[r].scrollIntoView({ block: "nearest" }); }
-      else rows[r].removeAttribute("aria-selected");
+      rows[r].setAttribute("aria-selected", on ? "true" : "false");
+      if (on) {
+        searchInput.setAttribute("aria-activedescendant", rows[r].id);
+        if (rows[r].scrollIntoView) rows[r].scrollIntoView({ block: "nearest" });
+      }
     }
   }
   function moveSearchActive(delta) {
     var rows = searchResults.querySelectorAll(".pal-row");
     if (!rows.length) return;
     var next = searchActive + delta;
-    if (next < 0) next = rows.length - 1;   // wrap
+    if (next < 0) next = rows.length - 1;
     if (next > rows.length - 1) next = 0;
     setSearchActive(next);
   }
 
   function renderSearchResults(items) {
     searchRows = items;
-    searchResults.innerHTML = ""; // trusted: only .pal-* nodes are appended below
+    searchResults.textContent = "";
     if (!items.length) {
       searchResults.appendChild(el("div", "pal-none", "No matches"));
       searchActive = -1;
+      searchInput.removeAttribute("aria-activedescendant");
       return;
     }
     items.forEach(function (it, i) {
-      var row = el("div", "pal-row" + (i === 0 ? " on" : ""));
+      var row = el("div", "pal-row");
+      row.id = "search-opt-" + i;
       row.setAttribute("role", "option");
-      if (i === 0) row.setAttribute("aria-selected", "true");
       row.appendChild(typeBadge(extOf(it.path)));
       var main = el("div", "pal-main");
-      main.appendChild(el("div", "pal-title", it.title)); // user text -> textContent
+      main.appendChild(el("div", "pal-title", it.title));
       if (it.hint) main.appendChild(el("div", "pal-hint", it.hint));
       row.appendChild(main);
       row.addEventListener("click", function () { openSearchItem(it); });
-      (function (idx) {
-        row.addEventListener("mousemove", function () {
-          if (searchActive !== idx) setSearchActive(idx);
-        });
-      })(i);
+      row.addEventListener("mousemove", function () {
+        if (searchActive !== i) setSearchActive(i);
+      });
       searchResults.appendChild(row);
     });
-    searchActive = 0;
+    setSearchActive(0);
   }
 
-  // Reuse the existing library-open path so a result opens in the Library viewer.
   function openSearchItem(it) {
     if (!it) return;
     closeSearch();
     if (it.run) {
-      openRun(it.run);            // switchView("library") + openFile(run's md/first file)
+      openRun(it.run);
     } else {
       switchView("library");
       openFile(it.path);
     }
   }
 
-  function openSearch() {
+  function openSearch(prefill) {
     if (!searchPalette || !searchInput) return;
-    if (!searchPalette.hidden) { searchInput.focus(); searchInput.select(); return; }
-    closeShortcuts(); // never stack overlays
+    var q = typeof prefill === "string" ? prefill : "";
+    if (!searchPalette.hidden) {
+      if (q) { searchInput.value = q; renderSearchResults(filterSearch(q)); }
+      searchInput.focus();
+      searchInput.select();
+      return;
+    }
+    closeShortcuts();
     overlayReturnFocus = document.activeElement;
     searchPalette.hidden = false;
-    searchInput.value = "";
-    renderSearchResults(filterSearch(""));
+    searchInput.value = q;
+    renderSearchResults(filterSearch(q));
     searchInput.focus();
   }
   function closeSearch() {
@@ -1862,7 +2048,7 @@
   }
 
   if (searchBox) {
-    searchBox.addEventListener("click", openSearch);
+    searchBox.addEventListener("click", function () { openSearch(); });
     searchBox.addEventListener("keydown", function (e) {
       if (e.key === "Enter" || e.key === " " || e.keyCode === 13 || e.keyCode === 32) {
         e.preventDefault(); openSearch();
@@ -1871,7 +2057,7 @@
   }
   if (searchPalette) {
     searchPalette.addEventListener("click", function (e) {
-      if (e.target === searchPalette) closeSearch(); // backdrop click only
+      if (e.target === searchPalette) closeSearch();
     });
   }
   if (searchInput) {
@@ -1882,33 +2068,79 @@
       if (e.key === "ArrowDown") { e.preventDefault(); moveSearchActive(1); }
       else if (e.key === "ArrowUp") { e.preventDefault(); moveSearchActive(-1); }
       else if (e.key === "Enter" || e.keyCode === 13) {
+        if (core.isComposingEnter(e)) return; // C9 IME guard
         e.preventDefault();
         openSearchItem(searchRows[searchActive] || searchRows[0]);
       }
-      // Esc is handled by the global overlay handler below.
     });
   }
 
-  // ---- global overlay keys (kept independent of the run / Quick-Ask keys) --
+  // =========================================================================
+  // C11: sidebar drawer below 900 px.
+  // =========================================================================
+  var sidebarEl = $("sidebar");
+  var drawerToggle = $("sidebar-toggle");
+  var drawerBackdrop = $("drawer-backdrop");
+  var narrowMq = window.matchMedia ? window.matchMedia("(max-width: 900px)") : null;
+  function drawerOpen() { return !!appEl && appEl.classList.contains("drawer-open"); }
+  function openDrawer() {
+    if (!appEl || !(narrowMq && narrowMq.matches)) return;
+    appEl.classList.add("drawer-open");
+    if (drawerBackdrop) drawerBackdrop.hidden = false;
+    if (drawerToggle) {
+      drawerToggle.setAttribute("aria-expanded", "true");
+      drawerToggle.setAttribute("aria-label", "Close the sidebar");
+    }
+    var first = sidebarEl && focusablesIn(sidebarEl)[0];
+    if (first) setTimeout(function () { first.focus(); }, 30);
+  }
+  function closeDrawer(refocus) {
+    if (!drawerOpen()) return;
+    appEl.classList.remove("drawer-open");
+    if (drawerBackdrop) drawerBackdrop.hidden = true;
+    if (drawerToggle) {
+      drawerToggle.setAttribute("aria-expanded", "false");
+      drawerToggle.setAttribute("aria-label", "Open the sidebar");
+      if (refocus !== false) drawerToggle.focus();
+    }
+  }
+  if (drawerToggle) {
+    drawerToggle.addEventListener("click", function () {
+      if (drawerOpen()) closeDrawer(); else openDrawer();
+    });
+  }
+  if (drawerBackdrop) drawerBackdrop.addEventListener("click", function () { closeDrawer(); });
+  if (recentsEl) recentsEl.addEventListener("click", function () { closeDrawer(false); });
+  if (narrowMq) {
+    var onMq = function () { if (!narrowMq.matches) closeDrawer(false); };
+    if (narrowMq.addEventListener) narrowMq.addEventListener("change", onMq);
+    else if (narrowMq.addListener) narrowMq.addListener(onMq);
+  }
+
+  // ---- global overlay keys: Esc, focus trap, ⌘/Ctrl+K, "?" ------------------
   document.addEventListener("keydown", function (e) {
-    // Esc closes whichever overlay is open (palette wins if both somehow are).
     if (e.key === "Escape" || e.keyCode === 27) {
+      if (confirmModal && !confirmModal.hidden) { e.preventDefault(); closeConfirm(false); return; }
       if (searchPalette && !searchPalette.hidden) { e.preventDefault(); closeSearch(); return; }
       if (shortcutsModal && !shortcutsModal.hidden) { e.preventDefault(); closeShortcuts(); return; }
+      if (drawerOpen()) { e.preventDefault(); closeDrawer(); return; }
       return;
     }
-    // ⌘/Ctrl+K opens the search palette (preventDefault so the browser's own
-    // find/location shortcut doesn't fire). The ⌘/Ctrl+Enter run handler and
-    // the Quick-Ask Enter handler check different keys, so both keep working.
+    if (e.key === "Tab") {
+      var ov = openOverlay();
+      if (ov) { trapTab(e, ov.querySelector('[role="dialog"], [role="alertdialog"]') || ov); return; }
+      if (drawerOpen()) { trapTab(e, sidebarEl); return; }
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === "k" || e.key === "K")) {
+      if (confirmModal && !confirmModal.hidden) return;
       e.preventDefault();
       openSearch();
       return;
     }
-    // "?" (Shift+/) opens the shortcuts modal — GUARDED so it never fires while
-    // focus is in an input / textarea / contenteditable (e.g. the problem box).
     if (e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) {
       if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
+      if (confirmModal && !confirmModal.hidden) return;
       e.preventDefault();
       openShortcuts();
     }
@@ -1916,6 +2148,5 @@
 
   // ---- boot ---------------------------------------------------------------
   enterIdle();
-  refreshStats(); // instant streak badge / empty-state before /library resolves
-  loadLibrary();
+  loadLibrary(); // stats / streak render once it answers (no empty flash)
 })();

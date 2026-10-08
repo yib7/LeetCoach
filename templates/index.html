@@ -9,58 +9,63 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body data-claude-available="__CLAUDE_AVAILABLE__" data-claude-logged-in="__CLAUDE_LOGGED_IN__" data-claude-model="__CLAUDE_MODEL__">
-  <div class="app">
+  <div class="app" id="app">
 
     <!-- ===== top bar ===== -->
     <header class="topbar">
+      <button class="iconbtn nav-toggle" id="sidebar-toggle" type="button"
+              aria-controls="sidebar" aria-expanded="false" aria-label="Open the sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
       <div class="brand">
         <div class="mark"><span class="bk">[</span><span class="lc">lc</span><span class="bk">]</span></div>
         <div class="wm">Leet<span class="b">Coach</span></div>
       </div>
       <nav class="nav" aria-label="Primary">
-        <a class="on" data-view="console" role="button" tabindex="0">Console</a>
+        <a class="on" data-view="console" role="button" tabindex="0" aria-current="page">Console</a>
         <a data-view="library" role="button" tabindex="0">Library</a>
         <a data-view="stats" role="button" tabindex="0">Stats</a>
       </nav>
       <div class="tb-spacer"></div>
       <div class="tb-search" id="tb-search" role="button" tabindex="0"
-           title="Search your library (Ctrl/&#8984; + K)" aria-label="Search your library">
+           title="Search your library" aria-label="Search your library" aria-haspopup="dialog">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
         <span class="ph">Search…</span>
-        <span class="k"><kbd>&#8984;</kbd><kbd>K</kbd></span>
+        <span class="k"><kbd data-mod>Ctrl</kbd><kbd>K</kbd></span>
       </div>
       <span class="tb-status" id="claude-status">
         <span class="dot"></span>
         <span class="tb-status-label">claude CLI</span>
       </span>
-      <button class="iconbtn" id="shortcuts-btn" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+      <button class="iconbtn" id="shortcuts-btn" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-haspopup="dialog">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>
       </button>
     </header>
 
     <div class="main">
 
-      <!-- ===== sidebar ===== -->
-      <aside class="sidebar">
+      <!-- ===== sidebar (a drawer below 900px: #sidebar-toggle) ===== -->
+      <aside class="sidebar" id="sidebar" aria-label="Sidebar">
         <button class="newrun" id="new-run" type="button">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
           New run
         </button>
         <nav class="side-nav" aria-label="Sections">
-          <a class="on" data-view="console" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-4 6 4 6M16 6l4 6-4 6"/></svg> Console</a>
+          <a class="on" data-view="console" role="button" tabindex="0" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-4 6 4 6M16 6l4 6-4 6"/></svg> Console</a>
           <a data-view="library" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4h3v16H5zM10.5 4h3v16h-3z"/><path d="m16 5 3 .8-3.2 14-3-.8z"/></svg> Library</a>
           <a data-view="stats" role="button" tabindex="0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-3"/></svg> Stats</a>
         </nav>
-        <div class="side-lbl">Recent runs</div>
-        <div class="recents" id="recents" aria-label="Recent runs"></div>
+        <div class="side-lbl" id="recents-label">Recent runs</div>
+        <div class="recents" id="recents" role="group" aria-labelledby="recents-label"></div>
         <div class="side-foot">
           <div class="t"><span class="dot"></span> Local &amp; offline</div>
           <div class="d">Runs stream from the claude CLI on your machine. <kbd>?</kbd> for shortcuts.</div>
         </div>
       </aside>
+      <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
 
-      <!-- ===== content ===== -->
-      <main class="content">
+      <!-- ===== content (the scroll container; each view keeps its own position) ===== -->
+      <main class="content" id="content">
 
         <!-- claude CLI availability / sign-in warning (JS reveals from body flags) -->
         <section id="claude-warning" class="banner" hidden>
@@ -76,7 +81,7 @@
             <div data-banner="signedout" hidden>
               <div class="bt">You&#8217;re signed out of the <code>claude</code> CLI</div>
               <div class="bd">Runs will fail until you sign in. In a terminal, run
-                <code class="cmd">claude auth login</code>, then reload this page (the sign-in check refreshes in the background, so it can take a second reload to show).</div>
+                <code>claude auth login</code>, then reload this page (the sign-in check refreshes in the background, so it can take a second reload to show).</div>
             </div>
           </div>
         </section>
@@ -90,17 +95,17 @@
             </div>
             <div class="r">
               <span class="streak-badge" id="streak-badge" hidden></span>
-              <span class="hint"><span class="kbd"><kbd>&#8984;</kbd><kbd>&#8629;</kbd></span> to run</span>
+              <span class="hint"><span class="kbd"><kbd data-mod>Ctrl</kbd><kbd>Enter</kbd></span> to run</span>
             </div>
           </div>
 
-          <!-- topic chip strip (JS fills from the real library) -->
-          <div class="topics" id="topics"></div>
+          <!-- topic chips (JS fills from the real library; each opens search prefilled) -->
+          <div class="topics" id="topics" role="group" aria-label="Topics in your library"></div>
 
           <!-- composer -->
           <section class="panel">
             <div class="p-head">
-              <span class="p-title">Problem <span class="tag">input</span></span>
+              <label class="p-title" for="problem">Problem <span class="tag">input</span></label>
               <div class="p-tools">
                 <button class="btn ghost" id="sample" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3h6l1 4H8zM8 7h8l1 14H7z"/></svg> Sample: Two Sum</button>
                 <button class="btn ghost" id="clear" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6 6 18"/></svg> Clear</button>
@@ -108,42 +113,42 @@
               </div>
             </div>
             <div class="editor" id="editor">
-              <div class="gutter" aria-hidden="true"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span></div>
-              <textarea id="problem" class="problem" spellcheck="false"
+              <textarea id="problem" class="problem" spellcheck="false" aria-describedby="problem-help"
                 placeholder="Paste the full LeetCode problem here — title, description, examples, and constraints…"></textarea>
+              <span class="sr-only" id="problem-help">Your draft is kept in this browser until you clear it.</span>
             </div>
             <div class="toolbar">
               <div class="tgroup" data-seg="mode">
-                <span class="tlabel">Mode</span>
-                <div class="seg" data-seg="mode" role="group" aria-label="Mode">
-                  <button class="seg-btn on" type="button" data-val="answer">Answer</button>
-                  <button class="seg-btn" type="button" data-val="learning">Learning</button>
-                  <button class="seg-btn" type="button" data-val="guided">Guided</button>
+                <span class="tlabel" id="lbl-mode">Mode</span>
+                <div class="seg" data-seg="mode" role="group" aria-labelledby="lbl-mode">
+                  <button class="seg-btn on" type="button" data-val="answer" aria-pressed="true">Answer</button>
+                  <button class="seg-btn" type="button" data-val="learning" aria-pressed="false">Learning</button>
+                  <button class="seg-btn" type="button" data-val="guided" aria-pressed="false">Guided</button>
                 </div>
               </div>
               <div class="tgroup" data-seg="lang">
-                <span class="tlabel">Lang</span>
-                <div class="seg" data-seg="lang" role="group" aria-label="Language">
-                  <button class="seg-btn on" type="button" data-val="python">Python</button>
-                  <button class="seg-btn" type="button" data-val="cpp">C++</button>
-                  <button class="seg-btn" type="button" data-val="java">Java</button>
+                <span class="tlabel" id="lbl-lang">Lang</span>
+                <div class="seg" data-seg="lang" role="group" aria-labelledby="lbl-lang">
+                  <button class="seg-btn on" type="button" data-val="python" aria-pressed="true">Python</button>
+                  <button class="seg-btn" type="button" data-val="cpp" aria-pressed="false">C++</button>
+                  <button class="seg-btn" type="button" data-val="java" aria-pressed="false">Java</button>
                 </div>
               </div>
               <div class="tgroup" data-seg="tier">
-                <span class="tlabel">Code Quality</span>
-                <div class="seg" data-seg="tier" role="group" aria-label="Code Quality">
-                  <button class="seg-btn" type="button" data-val="basic">Basic</button>
-                  <button class="seg-btn on" type="button" data-val="normal">Normal</button>
-                  <button class="seg-btn" type="button" data-val="optimal">Optimal</button>
+                <span class="tlabel" id="lbl-tier">Code Quality</span>
+                <div class="seg" data-seg="tier" role="group" aria-labelledby="lbl-tier">
+                  <button class="seg-btn" type="button" data-val="basic" aria-pressed="false">Basic</button>
+                  <button class="seg-btn on" type="button" data-val="normal" aria-pressed="true">Normal</button>
+                  <button class="seg-btn" type="button" data-val="optimal" aria-pressed="false">Optimal</button>
                 </div>
               </div>
               <div class="tgroup" data-seg="model">
-                <span class="tlabel">Model</span>
-                <div class="seg" data-seg="model" role="group" aria-label="Model">
-                  <button class="seg-btn" type="button" data-val="fable" title="__MODEL_LABEL_FABLE__ - most capable; uses more of your plan">Fable</button>
-                  <button class="seg-btn" type="button" data-val="opus" title="__MODEL_LABEL_OPUS__">Opus</button>
-                  <button class="seg-btn" type="button" data-val="sonnet" title="__MODEL_LABEL_SONNET__">Sonnet</button>
-                  <button class="seg-btn" type="button" data-val="haiku" title="__MODEL_LABEL_HAIKU__">Haiku</button>
+                <span class="tlabel" id="lbl-model">Model</span>
+                <div class="seg" data-seg="model" role="group" aria-labelledby="lbl-model">
+                  <button class="seg-btn" type="button" data-val="fable" aria-pressed="false" title="__MODEL_LABEL_FABLE__ - most capable; uses more of your plan">Fable</button>
+                  <button class="seg-btn" type="button" data-val="opus" aria-pressed="false" title="__MODEL_LABEL_OPUS__">Opus</button>
+                  <button class="seg-btn" type="button" data-val="sonnet" aria-pressed="false" title="__MODEL_LABEL_SONNET__">Sonnet</button>
+                  <button class="seg-btn" type="button" data-val="haiku" aria-pressed="false" title="__MODEL_LABEL_HAIKU__">Haiku</button>
                 </div>
               </div>
               <div class="tb-spacer"></div>
@@ -151,19 +156,21 @@
             </div>
           </section>
 
-          <!-- quick ask (Haiku one-shot; independent of the run stream) -->
+          <!-- quick ask (one-shot; independent of the run stream) -->
           <section class="panel qa" id="quickask">
             <div class="p-head">
-              <span class="p-title">Quick Ask <span class="tag">haiku</span></span>
-              <button class="btn ghost" id="qa-toggle" type="button" aria-expanded="true">Hide</button>
+              <label class="p-title" for="qa-input">Quick Ask <span class="tag">haiku</span></label>
+              <button class="btn ghost" id="qa-toggle" type="button" aria-expanded="true" aria-controls="qa-body">Hide</button>
             </div>
             <div id="qa-body">
               <div class="qa-row">
                 <input id="qa-input" type="text" maxlength="500" spellcheck="false"
+                       aria-label="Quick Ask question"
                        placeholder="Syntax / stdlib lookup — e.g. &#8220;C++ syntax for a min-heap?&#8221; (Enter to ask)">
                 <button class="btn green" id="qa-ask" type="button">Ask</button>
               </div>
-              <div class="qa-answer md" id="qa-answer" hidden></div>
+              <div class="qa-status" id="qa-status" hidden></div>
+              <div class="qa-answer md" id="qa-answer" aria-live="polite" hidden></div>
             </div>
           </section>
 
@@ -185,41 +192,41 @@
 
             <!-- run header (sibling ABOVE #output; JS writes label/chips/timer, toggles state class) -->
             <div class="runhead" hidden>
-              <span class="rh-state"><span class="pulse"></span> <span class="rh-label">Running</span></span>
+              <span class="rh-state"><span class="pulse"></span> <span class="rh-label" id="rh-label">Running</span></span>
               <div class="rh-chips"></div>
               <span class="spacer"></span>
-              <span class="timer"></span>
-              <button id="stop" class="btn-stop" type="button" hidden disabled><span class="sq"></span> Stop</button>
+              <span class="timer" aria-label="Elapsed time"></span>
+              <button id="stop" class="btn-stop" type="button" hidden disabled><span class="sq"></span> <span class="stop-lbl">Stop</span></button>
             </div>
 
-            <!-- streamed output node (its innerHTML is replaced every frame; keep chrome OUTSIDE it) -->
+            <!-- streamed output node (its innerHTML is replaced per throttled frame; keep chrome OUTSIDE it) -->
             <div class="outwrap" hidden>
               <div class="obody">
-                <article id="output" class="output md" aria-live="polite"></article>
+                <article id="output" class="output md" aria-labelledby="rh-label" aria-busy="false"></article>
               </div>
             </div>
 
-            <!-- streaming caret (sibling BELOW #output) -->
+            <!-- streaming caret + phase note (sibling BELOW #output) -->
             <div class="stream-foot" hidden><span class="caret"></span> <span class="stream-note">streaming…</span></div>
 
             <!-- terminal states (JS fills + reveals) -->
             <div class="summary" hidden></div>
-            <div class="errbox" hidden></div>
+            <div class="errbox" role="alert" hidden></div>
             <div class="stopmark" hidden></div>
           </div>
 
           <!-- recent runs table (JS appends .trow rows into #recent-table) -->
           <div class="section-h">
-            <div class="l"><h2>Recent runs</h2><span class="n" data-recent-count>output/</span></div>
-            <div class="filterpills" data-filter-group="recent">
-              <button class="fp on" type="button" data-recent-filter="all">All</button>
-              <button class="fp" type="button" data-recent-filter="answer">Answer</button>
-              <button class="fp" type="button" data-recent-filter="learning">Learning</button>
-              <button class="fp" type="button" data-recent-filter="guided">Guided</button>
+            <div class="l"><h2 id="recent-h">Recent runs</h2><span class="n" data-recent-count>output/</span></div>
+            <div class="filterpills" data-filter-group="recent" role="group" aria-label="Filter recent runs by mode">
+              <button class="fp on" type="button" data-recent-filter="all" aria-pressed="true">All</button>
+              <button class="fp" type="button" data-recent-filter="answer" aria-pressed="false">Answer</button>
+              <button class="fp" type="button" data-recent-filter="learning" aria-pressed="false">Learning</button>
+              <button class="fp" type="button" data-recent-filter="guided" aria-pressed="false">Guided</button>
             </div>
           </div>
-          <div id="recent-table" class="table">
-            <div class="thead"><span>Diff.</span><span>Problem</span><span>Topic</span><span>Mode</span><span>Lang</span><span>Saved</span><span></span></div>
+          <div id="recent-table" class="table" role="group" aria-labelledby="recent-h">
+            <div class="thead" aria-hidden="true"><span>Diff.</span><span>Problem</span><span>Topic</span><span>Mode</span><span>Lang</span><span>Saved</span><span>Status</span></div>
           </div>
         </section>
 
@@ -231,10 +238,10 @@
               <div class="sub">Saved runs in <b>output/</b> — grouped by problem type.</div>
             </div>
             <div class="r">
-              <div class="filterpills" data-filter-group="library">
-                <button class="fp on" type="button" data-lib-filter="all">All</button>
-                <button class="fp" type="button" data-lib-filter="md">Markdown</button>
-                <button class="fp" type="button" data-lib-filter="code">Code</button>
+              <div class="filterpills" data-filter-group="library" role="group" aria-label="Filter library files">
+                <button class="fp on" type="button" data-lib-filter="all" aria-pressed="true">All</button>
+                <button class="fp" type="button" data-lib-filter="md" aria-pressed="false">Markdown</button>
+                <button class="fp" type="button" data-lib-filter="code" aria-pressed="false">Code</button>
               </div>
             </div>
           </div>
@@ -243,7 +250,7 @@
             <div id="library-viewer" class="lib-view" hidden>
               <div class="vw-head">
                 <code id="library-viewer-path"></code>
-                <button id="library-viewer-delete" class="mini danger" type="button">Delete</button>
+                <button id="library-viewer-delete" class="mini danger" type="button" aria-haspopup="dialog">Delete run</button>
                 <button id="library-viewer-close" class="mini" type="button">Close</button>
               </div>
               <div id="library-viewer-body" class="md pad"></div>
@@ -263,7 +270,7 @@
             </div>
           </div>
 
-          <!-- empty state (JS toggles vs #stats-body) -->
+          <!-- empty state (JS toggles vs #stats-body once the library has loaded) -->
           <div class="stats-empty" id="stats-empty" hidden>
             <div class="se-flame">&#128293;</div>
             <div class="se-t">No runs yet</div>
@@ -272,7 +279,7 @@
           </div>
 
           <!-- populated stats -->
-          <div id="stats-body">
+          <div id="stats-body" hidden>
             <div class="stat-tiles">
               <div class="stat-tile">
                 <div class="st-top"><span class="st-ic">&#128293;</span><span class="st-lbl">Current streak</span></div>
@@ -299,7 +306,7 @@
             <section class="panel stats-panel">
               <div class="p-head">
                 <span class="p-title">Activity <span class="tag">last 17 weeks</span></span>
-                <div class="hm-legend">
+                <div class="hm-legend" aria-hidden="true">
                   <span>Less</span>
                   <span class="hm-cell hm-0"></span>
                   <span class="hm-cell hm-1"></span>
@@ -338,6 +345,13 @@
     </div>
   </div>
 
+  <!-- D11: shown while streaming when the reader has scrolled away from the live edge -->
+  <button class="jump-pill" id="jump-latest" type="button" hidden>Jump to latest <span aria-hidden="true">&#8595;</span></button>
+
+  <!-- status messages: run progress for screen readers (C9) + visible toasts (C10) -->
+  <div class="sr-only" id="run-status" role="status" aria-live="polite"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
   <!-- ===== keyboard shortcuts help modal (C1) ===== -->
   <div class="overlay" id="shortcuts-modal" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
@@ -349,25 +363,39 @@
       </div>
       <div class="modal-body">
         <div class="sc-row">
-          <span class="sc-desc">Run the current problem</span>
-          <span class="sc-keys"><kbd>Ctrl</kbd><span class="sc-or">/</span><kbd>&#8984;</kbd><kbd>Enter</kbd></span>
+          <span class="sc-desc">Run the current problem (from any view)</span>
+          <span class="sc-keys"><kbd data-mod>Ctrl</kbd><kbd>Enter</kbd></span>
         </div>
         <div class="sc-row">
           <span class="sc-desc">Search your library</span>
-          <span class="sc-keys"><kbd>Ctrl</kbd><span class="sc-or">/</span><kbd>&#8984;</kbd><kbd>K</kbd></span>
+          <span class="sc-keys"><kbd data-mod>Ctrl</kbd><kbd>K</kbd></span>
         </div>
         <div class="sc-row">
           <span class="sc-desc">Show this shortcuts dialog</span>
           <span class="sc-keys"><kbd>?</kbd></span>
         </div>
         <div class="sc-row">
-          <span class="sc-desc">Ask in Quick Ask</span>
+          <span class="sc-desc">Ask in Quick Ask (Esc cancels)</span>
           <span class="sc-keys"><kbd>Enter</kbd></span>
         </div>
         <div class="sc-row">
-          <span class="sc-desc">Close a dialog or search</span>
+          <span class="sc-desc">Close a dialog, search or the sidebar</span>
           <span class="sc-keys"><kbd>Esc</kbd></span>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== confirm dialog (Delete run) ===== -->
+  <div class="overlay" id="confirm-modal" hidden>
+    <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+      <div class="modal-head">
+        <h2 class="modal-title" id="confirm-title">Delete this run?</h2>
+      </div>
+      <div class="modal-body" id="confirm-body"></div>
+      <div class="modal-foot">
+        <button class="btn" id="confirm-cancel" type="button">Cancel</button>
+        <button class="btn danger" id="confirm-ok" type="button">Delete</button>
       </div>
     </div>
   </div>
@@ -392,6 +420,7 @@
   <script src="/static/vendor/hljs-python.min.js"></script>
   <script src="/static/vendor/hljs-cpp.min.js"></script>
   <script src="/static/vendor/hljs-java.min.js"></script>
+  <script src="/static/lib/core.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
