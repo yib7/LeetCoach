@@ -16,7 +16,11 @@ NEVER CALLS REAL CLAUDE and never touches your real data:
   extra tiers and ``__2`` slots of one problem. SP7: a Code Review doc
   (``reviews/``), a review queue with problems due today / overdue and one
   not due (``REVIEW_STATE``), a seeded note, ``## Flashcards`` in every
-  contract doc, and Two Sum's statement keeps its sample for "Test my code";
+  contract doc, and Two Sum's statement keeps its sample for "Test my code".
+  SP8 (D6 follow-up): every logged run has a session id the fake resumes
+  except the 206 Java run (``NO_SESSION``: logged, but no session -> the
+  fallback); unlogged legacy docs such as ``guided/stack/20_valid_parentheses.md``
+  fall back too;
 * the real ``.env`` is never loaded (``LEETCOACH_NO_DOTENV=1``) and model-picker
   writes go to a scratch ``.env``; the topic index and the claude cwd are
   scratch files too;
@@ -229,6 +233,11 @@ LOG = [
 ]
 
 
+# SP8 / D6: logged runs WITHOUT a session id (an older run, or a CLI that never
+# reported one): a follow-up on their doc takes the fresh fallback call.
+NO_SESSION = {"206-reverse_linked_list"}
+
+
 # SP7 / D4: review state per problem, relative to today: (box, due in N days
 # (negative = overdue), [(graded N days ago, grade, from box, to box)], notes).
 # 1-two_sum is due today (graded "solo" 3 days ago: box 1 -> 2, +3 days);
@@ -280,7 +289,8 @@ def _seed_metadata(output: Path, now: float) -> None:
         lines.append(json.dumps({
             "ts": _iso(stamp), "problem_id": pid, "mode": mode, "language": lang,
             "tier": tier, "model": "claude-opus-5-5", "verdict": verdict, "files": files,
-            "session_id": f"fake-session-{len(lines) + 1}", "duration_s": 42.0,
+            "session_id": None if pid in NO_SESSION else f"fake-session-{len(lines) + 1}",
+            "duration_s": 42.0,
             "pattern": pattern,
         }, ensure_ascii=False, separators=(",", ":")))
         rec = records.get(pid)

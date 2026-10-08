@@ -16,6 +16,9 @@ subscription, a sign-in or any usage:
       It recognises the three kinds of call LeetCoach makes:
         - the problem classifier  -> one compact JSON object;
         - Quick Ask               -> a short Markdown answer;
+        - a follow-up (SP8 / D6)  -> a short canned answer. With
+          ``--resume <id>`` it answers "in" that session; without, it is the
+          app's fresh fallback call and says it read the fenced STUDY NOTE;
         - a study run             -> a Markdown study doc. For Answer/Guided in
           Python it contains a runnable ```python solution``` block that reads
           stdin, so the app's sandbox verifies it against the pasted samples
@@ -40,6 +43,10 @@ In-band markers (put them in the pasted problem text - no restart needed):
   FAKE_NOWALK Guided/Learning doc without the H3 that follows Hint 4
 In a Quick Ask question: FAKE_SLOW sleeps 75 s (tests the 60 s client timeout
 and Cancel), FAKE_FAIL returns an error result.
+In a follow-up question: FAKE_NORESUME makes ``--resume`` fail like a missing
+session ("No conversation found with session ID", exit 1, no output) so the
+app falls back; FAKE_SLOW 4x slower deltas (try Stop); FAKE_FAIL error result
+mid-stream.
 
 Launched through ``fake_claude.cmd`` (Windows needs an executable for
 ``LEETCOACH_CLAUDE_BIN``); see ``scripts/dev/run_fake.py``.
@@ -76,6 +83,7 @@ Options:
   --strict-mcp-config              Only use MCP servers from --mcp-config
   --safe-mode                      Disable hooks, plugins and customizations
   --no-session-persistence         Do not save the session to disk
+  -r, --resume [value]             Resume a conversation by session ID
   -h, --help                       Display help for command
 
 Commands:
@@ -142,6 +150,15 @@ def _question_text(prompt: str) -> str:
     if m:
         return m.group(1).strip()
     return prompt.strip().splitlines()[-1] if prompt.strip() else ""
+
+
+def _followup_question(prompt: str) -> str:
+    """The learner's question in a follow-up prompt (the QUESTION fence)."""
+    m = re.search(
+        r"^--- BEGIN QUESTION[^\n]*? (\w+) ---\n(.*?)\n--- END QUESTION \1 ---$",
+        prompt, re.S | re.M,
+    )
+    return m.group(2) if m else ""
 
 
 def _title(problem: str) -> str:
@@ -474,6 +491,22 @@ def quick_answer(prompt: str) -> str:
     )
 
 
+def followup_answer(question: str, *, resumed: bool) -> str:
+    """A short canned follow-up answer (no H1/H2, as the prompt asks)."""
+    q = " ".join(question.split())[:160]
+    where = ("I still have the study note from this session" if resumed
+             else "I read the saved study note you sent (there was no session to resume)")
+    return (
+        f"*(fake_claude canned follow-up)* {where}, so here is the short version.\n\n"
+        "- A hash map gives O(1) average lookups, so each element is checked once.\n"
+        "- Store each value's index **after** checking for its complement, so an "
+        "element is never paired with itself.\n\n"
+        "```python\nseen = {}\nfor i, x in enumerate(nums):\n"
+        "    if target - x in seen:\n        break\n    seen[x] = i\n```\n\n"
+        f"You asked: {q}"
+    )
+
+
 # --------------------------------------------------------------------------
 # the stream-json conversation
 # --------------------------------------------------------------------------
@@ -486,8 +519,8 @@ def _error_result(session: str, message: str) -> None:
 
 
 def stream(text: str, model: str, *, delay: float, stop_after: float | None = None,
-           tail: str = "result") -> int:
-    session = str(uuid.uuid4())
+           tail: str = "result", session: str | None = None) -> int:
+    session = session or str(uuid.uuid4())
     _emit({
         "type": "system", "subtype": "init", "session_id": session, "model": model,
         "cwd": os.getcwd(), "tools": [], "mcp_servers": [],
@@ -539,6 +572,9 @@ def run_print(argv: list[str]) -> int:
         _error_result(session, "Failed to authenticate: OAuth session expired (fake_claude)")
         return 1
 
+    if "--resume" in argv or "BEGIN QUESTION" in prompt:
+        return run_followup(argv, prompt, model, delay)
+
     if "strict LeetCode problem classifier" in prompt or "Classify the following" in prompt:
         return stream(classify(prompt), model, delay=0)
 
@@ -561,6 +597,22 @@ def run_print(argv: list[str]) -> int:
     if "FAKE_CUT" in problem:
         return stream(doc, model, delay=delay, stop_after=0.5, tail="cut")
     return stream(doc, model, delay=delay)
+
+
+def run_followup(argv: list[str], prompt: str, model: str, delay: float) -> int:
+    """SP8 / D6: a follow-up, resumed (``--resume <id>``) or the fallback."""
+    question = _followup_question(prompt)
+    resume = _arg_after(argv, "--resume") if "--resume" in argv else None
+    if resume is not None and "FAKE_NORESUME" in question:
+        # Mirrors the real CLI for an unknown session: stderr, exit 1, no stdout.
+        sys.stderr.write(f"No conversation found with session ID: {resume}\n")
+        return 1
+    text = followup_answer(question, resumed=resume is not None)
+    if "FAKE_SLOW" in question:
+        delay *= 4
+    if "FAKE_FAIL" in question:
+        return stream(text, model, delay=delay, stop_after=0.4, tail="error", session=resume)
+    return stream(text, model, delay=delay, session=resume)
 
 
 def main(argv: list[str]) -> int:
