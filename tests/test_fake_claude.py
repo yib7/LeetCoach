@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -258,3 +259,95 @@ def test_running_instance_accepts_only_leetcoach(monkeypatch):
         raise OSError("refused")
 
     assert run_fake.running_instance(5057, opener=refused) is None
+
+
+# ---- SP6: the fake's docs follow the D2 contract ------------------------------
+
+def _doc(flags, mode, problem=TWO_SUM, *, language="python", crlf=False):
+    if mode == "learning":
+        prompt = prompts.build_learning(problem, language=language)
+    elif mode == "guided":
+        prompt = prompts.build_guided(problem, tier="normal", language=language)
+    else:
+        prompt = prompts.build_answer(problem, tier="normal", language=language)
+    if crlf:
+        prompt = prompt.replace("\n", "\r\n")
+    return "".join(claude_cli.run(prompt, runner=_runner(), flags=flags, model="opus"))
+
+
+def _h2(text):
+    return [line[3:].strip() for line in text.splitlines() if line.startswith("## ")]
+
+
+@pytest.mark.parametrize("mode", ["answer", "guided", "learning"])
+def test_fake_doc_has_the_contract_header_and_sections(flags, mode):
+    text = _doc(flags, mode)
+    lines = text.splitlines()
+    assert lines[0] == "# Two Sum"
+    assert lines[1].startswith("Pattern: Arrays & Hashing · Difficulty: ")
+    assert _h2(text) == list(prompts.doc_sections(mode))
+    prose = re.sub(r"```.*?```", "", text.split("## Flashcards")[0], flags=re.S)
+    assert "?" not in prose.replace("?a=1", "")  # no questions to the reader
+
+
+def test_fake_guided_doc_has_hints_brute_force_and_one_solution_block(flags):
+    text = _doc(flags, "guided")
+    for n in range(1, 5):
+        assert f"### Hint {n}" in text
+    assert text.index("### Hint 4") < text.index("## Solution")
+    assert "brute force" in text.lower()
+    assert text.count("```python solution") == 1
+    code = parsing.extract_code(text, "python")
+    assert "json.dumps(" in code
+    assert sandbox.verify_answer(code, TWO_SUM, "python").status == "pass"
+
+
+def test_fake_learning_doc_has_hints_and_no_solution(flags):
+    text = _doc(flags, "learning")
+    assert "### Hint 1" in text and "### Hint 4" in text
+    assert "## Solution" not in text and "solution" not in "".join(
+        line for line in text.splitlines() if line.startswith("```"))
+
+
+def test_fake_answer_doc_has_no_hint_ladder(flags):
+    text = _doc(flags, "answer")
+    assert "### Hint" not in text
+    assert text.count("```python solution") == 1
+
+
+def test_fake_reads_number_and_difficulty_from_the_paste(flags):
+    text = _doc(flags, "guided", "1. Two Sum\nMedium\n\n" + TWO_SUM.split("\n", 1)[1])
+    assert text.startswith("# 1. Two Sum\nPattern: Arrays & Hashing · Difficulty: Medium\n")
+
+
+def test_fake_contract_survives_crlf_prompts(flags):
+    text = _doc(flags, "guided", crlf=True)
+    assert "### Hint 1" in text and _h2(text) == list(prompts.doc_sections("guided"))
+
+
+def test_seed_has_a_run_log_problem_records_and_legacy_files(tmp_path):
+    import problem_store
+    import stats
+
+    run_fake = _load_run_fake()
+    out = tmp_path / "output"
+    run_fake.seed(out)
+    entries = problem_store.read_runs(root=out)
+    assert len(entries) >= 3
+    logged = {f for e in entries for f in e["files"]}
+    for rel in logged:
+        assert (out / rel).is_file(), rel
+    for e in entries:
+        rec = problem_store.load_problem(e["problem_id"], root=out)
+        assert rec and rec["difficulty"] in ("Easy", "Medium", "Hard")
+    files = [{"path": p.relative_to(out).as_posix(), "mtime": p.stat().st_mtime}
+             for p in out.rglob("*") if p.is_file() and ".leetcoach" not in p.parts]
+    legacy = [f for f in files if f["path"] not in logged and f["path"].count("/") >= 2]
+    assert legacy, "some seeded runs must have no log entry (legacy fallback)"
+    s = stats.compute_stats(entries, files)
+    assert s["sources"]["log"] >= 3 and s["sources"]["legacy"] >= 3
+    assert s["currentStreak"] >= 4
+    guided = [p for p in logged if p.startswith("guided/")]
+    assert guided
+    text = (out / guided[0]).read_text(encoding="utf-8")
+    assert "### Hint 1" in text and "## Solution" in text
