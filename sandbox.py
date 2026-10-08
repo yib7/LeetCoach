@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import math
 import os
 import re
@@ -69,6 +70,8 @@ from proc_util import (
     kill_process_tree,
     terminate_job,
 )
+
+logger = logging.getLogger(__name__)
 
 # Cap captured child output so a runaway print loop can't blow up memory / the
 # saved markdown. Enforced *while reading* (see _CappedReader): the child is
@@ -317,28 +320,34 @@ def _clear_readonly_and_retry(func, path, exc) -> None:
 
 def _rmtree_with_retry(path: str, *, attempts: int = 6, base_delay: float = 0.05) -> bool:
     """Delete ``path`` with exponential backoff (B6). Returns True once it is
-    gone, False if it outlived every attempt. Never raises.
+    gone, False if it outlived every attempt. Never raises: it runs in
+    ``verify_python``'s ``finally``, where an escaping exception would replace
+    the verdict.
 
     Right after a kill, Windows can keep a handle on a file in the run dir for
     a moment (the process object is torn down asynchronously), so the old
     single ``rmtree(ignore_errors=True)`` routinely leaked the dir: 98 stale
     ``leetcoach_run_*`` dirs were found in %TEMP%. Worst case this waits
     ~1.5 s in total (0.05 + 0.1 + ... + 0.8).
+
+    Success is judged by whether ``path`` itself still exists, never by the
+    exception type: a ``FileNotFoundError`` about an entry INSIDE the dir
+    (removed concurrently) is not "the dir is gone".
     """
     delay = base_delay
+    last_exc: BaseException | None = None
     for attempt in range(attempts):
         try:
             shutil.rmtree(path, onexc=_clear_readonly_and_retry)
             return True
-        except FileNotFoundError:
+        except Exception as exc:  # noqa: BLE001 - cleanup must never raise
+            last_exc = exc
+        if not os.path.lexists(path):
             return True
-        except OSError:
-            if not os.path.lexists(path):
-                return True
-            if attempt == attempts - 1:
-                break
+        if attempt < attempts - 1:
             _sleep(delay)
             delay *= 2
+    logger.warning("could not remove sandbox dir %s: %s", path, last_exc)
     return False
 
 
@@ -354,12 +363,14 @@ def sweep_stale_run_dirs(
     are skipped (never followed), and nothing else in the temp dir is ever
     touched. Never raises.
     """
-    root = tmp_root or tempfile.gettempdir()
     cutoff = time.time() - max_age_s
     removed = 0
     try:
-        entries = list(os.scandir(root))
-    except OSError:
+        root = tmp_root or tempfile.gettempdir()
+        with os.scandir(root) as it:
+            entries = list(it)
+    except Exception as exc:  # noqa: BLE001 - housekeeping must never raise
+        logger.warning("could not scan for stale sandbox dirs: %s", exc)
         return 0
     for entry in entries:
         if not entry.name.startswith(_RUN_DIR_PREFIX):
@@ -371,10 +382,12 @@ def sweep_stale_run_dirs(
                 continue
             if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
                 continue
-        except OSError:
-            continue
-        if _rmtree_with_retry(entry.path, attempts=2):
-            removed += 1
+            if _rmtree_with_retry(entry.path, attempts=2):
+                removed += 1
+            else:
+                logger.warning("stale sandbox dir left in place: %s", entry.path)
+        except Exception as exc:  # noqa: BLE001 - housekeeping must never raise
+            logger.warning("skipped stale sandbox dir %s: %s", entry.path, exc)
     return removed
 
 
