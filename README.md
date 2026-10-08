@@ -160,7 +160,7 @@ settings ship commented out there — see why in the table below).
 
 | Variable               | Default                        | What it does                                                        |
 | ---------------------- | ------------------------------ | ------------------------------------------------------------------- |
-| `LEETCOACH_MODEL`      | `claude-opus-4-8`              | Claude model id passed to `claude --model` (e.g. `opus` / `sonnet`). The Console model picker writes this for you.|
+| `LEETCOACH_MODEL`      | `opus`                         | Model alias passed to `claude --model` (`fable` / `opus` / `sonnet` / `haiku`; aliases track the latest model of each family, or pin a full id). The Console model picker (including Fable) writes this for you.|
 | `LEETCOACH_CLASSIFIER_MODEL` | `haiku`                  | Model for the short classification call that tags each run.        |
 | `LEETCOACH_QUICK_ASK_MODEL`  | `haiku`                  | Model for the Quick Ask box (short syntax / stdlib lookups).       |
 | `LEETCOACH_CLAUDE_BIN` | `claude`                       | Name or absolute path of the `claude` executable.                   |

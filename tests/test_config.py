@@ -16,12 +16,32 @@ import config
 
 def test_model_alias_maps_default_opus_id(monkeypatch):
     monkeypatch.delenv("LEETCOACH_MODEL", raising=False)
-    # the default is claude-opus-4-8 -> the picker's "opus"
+    # the default is the generic `opus` alias -> the picker's "opus"
+    assert config.DEFAULT_MODEL == "opus"
+    assert config.model() == "opus"
     assert config.model_alias() == "opus"
 
 
+def test_model_alias_maps_latest_pinned_ids(monkeypatch):
+    for model_id, alias in (
+        ("claude-fable-5-1", "fable"),
+        ("claude-opus-5-5", "opus"),
+        ("claude-sonnet-5-5", "sonnet"),
+        ("claude-haiku-5-5", "haiku"),
+    ):
+        monkeypatch.setenv("LEETCOACH_MODEL", model_id)
+        assert config.model_alias() == alias
+
+
+def test_aliases_and_display_ids_cover_the_same_models():
+    assert config.ALLOWED_MODEL_ALIASES == ("fable", "opus", "sonnet", "haiku")
+    assert set(config.LATEST_MODEL_IDS) == set(config.ALLOWED_MODEL_ALIASES)
+    assert config.classifier_model() == "haiku"
+    assert config.quick_ask_model() == "haiku"
+
+
 def test_model_alias_matches_each_alias(monkeypatch):
-    for alias in ("opus", "sonnet", "haiku"):
+    for alias in ("fable", "opus", "sonnet", "haiku"):
         monkeypatch.setenv("LEETCOACH_MODEL", alias)
         assert config.model_alias() == alias
 

@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [1.4.0] - Unreleased
 
+### Changed
+- **The default model now tracks the latest Opus** through the `opus` alias instead of
+  a pinned id, and **Fable** (the most capable model) is added to the model picker. The
+  picker tooltips show the current version of each model; the aliases themselves are
+  what reach `claude --model`.
+
 ### Added
 - **One-click desktop launch.** A `LeetCoach.cmd` launcher plus
   `scripts/create-shortcut.ps1`, which drops a `LeetCoach` shortcut on your Desktop
