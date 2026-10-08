@@ -102,6 +102,18 @@
           <!-- topic chips (JS fills from the real library; each opens search prefilled) -->
           <div class="topics" id="topics" role="group" aria-label="Topics in your library"></div>
 
+          <!-- SP7 / D4: the review queue (JS fills from GET /review; hidden until a problem is scheduled) -->
+          <section class="panel due-panel" id="due-panel" aria-labelledby="due-title" hidden>
+            <div class="p-head">
+              <h2 class="p-title" id="due-title">Due today <span class="tag" id="due-count">0</span></h2>
+              <div class="p-tools">
+                <button class="btn ghost" id="due-flashcards" type="button" aria-haspopup="dialog">Flashcards</button>
+              </div>
+            </div>
+            <div class="due-list" id="due-list" role="list"></div>
+            <div class="due-empty" id="due-empty" hidden></div>
+          </section>
+
           <!-- composer -->
           <section class="panel">
             <div class="p-head">
@@ -117,6 +129,14 @@
                 placeholder="Paste the full LeetCode problem here — title, description, examples, and constraints…"></textarea>
               <span class="sr-only" id="problem-help">Your draft is kept in this browser until you clear it.</span>
             </div>
+            <!-- SP7 / D5: Code Review mode's attempt box (JS shows it for mode=review) -->
+            <div class="review-code" id="review-code-wrap" hidden>
+              <label class="rc-label" for="review-code">Your code <span class="tag">critiqued, not run</span></label>
+              <textarea id="review-code" class="problem code-input" spellcheck="false" maxlength="65536"
+                aria-describedby="review-code-help"
+                placeholder="Paste your attempt — the review points out bugs, complexity and edge cases without rewriting it."></textarea>
+              <span class="code-help" id="review-code-help">Tab indents, Shift+Tab outdents. Press Esc, then Tab, to move on.</span>
+            </div>
             <div class="toolbar">
               <div class="tgroup" data-seg="mode">
                 <span class="tlabel" id="lbl-mode">Mode</span>
@@ -124,6 +144,7 @@
                   <button class="seg-btn on" type="button" data-val="answer" aria-pressed="true">Answer</button>
                   <button class="seg-btn" type="button" data-val="learning" aria-pressed="false">Learning</button>
                   <button class="seg-btn" type="button" data-val="guided" aria-pressed="false">Guided</button>
+                  <button class="seg-btn" type="button" data-val="review" aria-pressed="false" title="Paste your own attempt and get it critiqued">Code Review</button>
                 </div>
               </div>
               <div class="tgroup" data-seg="lang">
@@ -223,6 +244,7 @@
               <button class="fp" type="button" data-recent-filter="answer" aria-pressed="false">Answer</button>
               <button class="fp" type="button" data-recent-filter="learning" aria-pressed="false">Learning</button>
               <button class="fp" type="button" data-recent-filter="guided" aria-pressed="false">Guided</button>
+              <button class="fp" type="button" data-recent-filter="code review" aria-pressed="false">Code Review</button>
             </div>
           </div>
           <div id="recent-table" class="table" role="group" aria-labelledby="recent-h">
@@ -250,11 +272,101 @@
             <div id="library-viewer" class="lib-view" hidden>
               <div class="vw-head">
                 <code id="library-viewer-path"></code>
+                <button id="library-viewer-reattempt" class="mini" type="button" hidden>Re-attempt</button>
+                <button id="library-viewer-cards" class="mini" type="button" aria-haspopup="dialog" hidden>Flashcards</button>
                 <button id="library-viewer-delete" class="mini danger" type="button" aria-haspopup="dialog">Delete run</button>
                 <button id="library-viewer-close" class="mini" type="button">Close</button>
               </div>
               <div id="library-viewer-body" class="md pad"></div>
+              <!-- SP7 / D9: per-problem notes (problem-linked docs only) -->
+              <div id="library-viewer-notes" class="vw-notes" hidden></div>
             </div>
+          </div>
+        </section>
+
+        <!-- ===== PRACTICE (RE-ATTEMPT) VIEW — SP7 / D3 ===== -->
+        <section id="view-practice" hidden>
+          <div class="ctx">
+            <div>
+              <h1 id="practice-title">Re-attempt</h1>
+              <div class="sub" id="practice-sub">Solve it again from memory, test it, then grade yourself.</div>
+            </div>
+            <div class="r">
+              <span class="hint"><span class="kbd"><kbd data-mod>Ctrl</kbd><kbd>Enter</kbd></span> to test</span>
+              <button class="btn ghost" id="practice-back" type="button">Back</button>
+            </div>
+          </div>
+
+          <div class="practice">
+            <section class="panel pr-statement" aria-labelledby="practice-statement-h">
+              <div class="p-head">
+                <h2 class="p-title" id="practice-statement-h">Problem <span class="tag" id="practice-due"></span></h2>
+              </div>
+              <div class="pr-text" id="practice-statement" tabindex="0" role="region" aria-labelledby="practice-statement-h"></div>
+            </section>
+
+            <section class="panel pr-work">
+              <div class="p-head">
+                <label class="p-title" for="practice-code">Your code</label>
+                <div class="p-tools">
+                  <label class="pr-lang-label" for="practice-lang">Language</label>
+                  <select id="practice-lang" class="pr-select">
+                    <option value="python">Python</option>
+                    <option value="cpp">C++</option>
+                    <option value="java">Java</option>
+                  </select>
+                  <button class="btn ghost" id="practice-starter" type="button">Insert starter</button>
+                </div>
+              </div>
+              <div class="editor pr-editor">
+                <textarea id="practice-code" class="problem code-input" spellcheck="false" maxlength="65536"
+                  aria-describedby="practice-code-help"
+                  placeholder="Write your solution. It reads one example's Input line on stdin and prints the Output."></textarea>
+              </div>
+              <div class="code-help" id="practice-code-help">Tab indents, Shift+Tab outdents; press Esc, then Tab, to leave the editor. Your draft is kept in this browser.</div>
+
+              <div class="pr-cases">
+                <div class="pr-cases-h">
+                  <span class="tlabel" id="practice-cases-h">Custom cases</span>
+                  <label class="pr-check"><input type="checkbox" id="practice-samples" checked> Include the statement's examples</label>
+                  <button class="btn ghost" id="practice-add-case" type="button">Add a case</button>
+                </div>
+                <div class="pr-case-list" id="practice-cases" role="group" aria-labelledby="practice-cases-h"></div>
+              </div>
+
+              <div class="toolbar pr-toolbar">
+                <button class="btn green" id="practice-test" type="button">Test my code</button>
+                <button class="btn" id="practice-cancel" type="button" hidden>Cancel</button>
+                <div class="tb-spacer"></div>
+                <button class="btn ghost" id="practice-giveup" type="button" aria-haspopup="dialog">Give up / show solution</button>
+              </div>
+              <div class="pr-results" id="practice-results" role="status" aria-live="polite"></div>
+            </section>
+
+            <section class="panel pr-grade" aria-labelledby="practice-grade-h">
+              <div class="p-head">
+                <h2 class="p-title" id="practice-grade-h">How did it go?</h2>
+                <span class="hint" id="practice-box"></span>
+              </div>
+              <div class="grade-btns" id="practice-grade" role="group" aria-labelledby="practice-grade-h">
+                <button class="grade-btn" type="button" data-grade="solo"><span class="gl">Solved it solo</span><span class="gd" data-grade-desc></span></button>
+                <button class="grade-btn" type="button" data-grade="hints"><span class="gl">Needed hints</span><span class="gd" data-grade-desc></span></button>
+                <button class="grade-btn" type="button" data-grade="peeked"><span class="gl">Peeked at the solution</span><span class="gd" data-grade-desc></span></button>
+              </div>
+              <div class="pr-grade-status" id="practice-grade-status" role="status" aria-live="polite"></div>
+            </section>
+
+            <section class="panel pr-solution" id="practice-solution" aria-labelledby="practice-solution-h" hidden>
+              <div class="p-head">
+                <h2 class="p-title" id="practice-solution-h">Solution</h2>
+                <code class="pr-sol-path" id="practice-solution-path"></code>
+              </div>
+              <div class="md pad" id="practice-solution-body"></div>
+            </section>
+
+            <section class="panel pr-notes-panel" aria-label="Notes">
+              <div id="practice-notes"></div>
+            </section>
           </div>
         </section>
 
@@ -324,6 +436,24 @@
               </div>
             </section>
 
+            <!-- SP7 / D4 + D10: the review queue and the flashcard export -->
+            <section class="panel stats-panel" id="stats-review" aria-labelledby="stats-review-h">
+              <div class="p-head">
+                <h2 class="p-title" id="stats-review-h">Review queue <span class="tag">spaced repetition</span></h2>
+                <div class="p-tools">
+                  <button class="btn ghost" id="stats-flashcards" type="button" aria-haspopup="dialog">Review flashcards</button>
+                  <a class="btn ghost" id="stats-tsv" href="/flashcards.tsv" download="leetcoach-flashcards.tsv">Export flashcards (Anki TSV)</a>
+                </div>
+              </div>
+              <div class="rv-tiles">
+                <div class="rv-tile"><span class="rv-val" id="rv-due">0</span><span class="rv-lbl">due now</span></div>
+                <div class="rv-tile"><span class="rv-val" id="rv-today">0</span><span class="rv-lbl">reviewed today</span></div>
+                <div class="rv-tile"><span class="rv-val" id="rv-scheduled">0</span><span class="rv-lbl">scheduled</span></div>
+                <div class="rv-tile"><span class="rv-val rv-next" id="rv-next">—</span><span class="rv-lbl">next due</span></div>
+              </div>
+              <div class="bd-list" id="bd-box" aria-label="Problems per review box"></div>
+            </section>
+
             <div class="stats-breakdowns">
               <section class="panel stats-panel">
                 <div class="p-head"><span class="p-title">By mode</span></div>
@@ -382,6 +512,18 @@
           <span class="sc-desc">Close a dialog, search or the sidebar</span>
           <span class="sc-keys"><kbd>Esc</kbd></span>
         </div>
+        <div class="sc-row">
+          <span class="sc-desc">Code box: indent / outdent (Esc, then Tab, leaves it)</span>
+          <span class="sc-keys"><kbd>Tab</kbd><kbd>Shift</kbd><kbd>Tab</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Re-attempt: test your code</span>
+          <span class="sc-keys"><kbd data-mod>Ctrl</kbd><kbd>Enter</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Flashcards: flip / previous / next</span>
+          <span class="sc-keys"><kbd>Space</kbd><kbd>&#8592;</kbd><kbd>&#8594;</kbd></span>
+        </div>
       </div>
     </div>
   </div>
@@ -396,6 +538,40 @@
       <div class="modal-foot">
         <button class="btn" id="confirm-cancel" type="button">Cancel</button>
         <button class="btn danger" id="confirm-ok" type="button">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== flashcards review (SP7 / D10) ===== -->
+  <div class="overlay" id="flashcards-modal" hidden>
+    <div class="modal fc-modal" role="dialog" aria-modal="true" aria-labelledby="fc-title">
+      <div class="modal-head">
+        <h2 class="modal-title" id="fc-title">Flashcards</h2>
+        <span class="fc-scope" id="fc-scope"></span>
+        <button class="iconbtn" id="fc-close" type="button" aria-label="Close flashcards">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body fc-body">
+        <div class="fc-empty" id="fc-empty" hidden></div>
+        <div class="fc-card" id="fc-card">
+          <div class="fc-side-lbl">Question</div>
+          <div class="fc-q" id="fc-q"></div>
+          <div class="fc-answer" id="fc-answer" hidden>
+            <div class="fc-side-lbl">Answer</div>
+            <div class="fc-a" id="fc-a"></div>
+          </div>
+          <div class="fc-src" id="fc-src"></div>
+        </div>
+        <div class="sr-only" id="fc-live" role="status" aria-live="polite"></div>
+      </div>
+      <div class="modal-foot fc-foot">
+        <button class="btn" id="fc-prev" type="button" aria-label="Previous card">&#8592; Prev</button>
+        <span class="fc-count" id="fc-count" aria-hidden="true"></span>
+        <button class="btn green" id="fc-flip" type="button" aria-expanded="false" aria-controls="fc-answer">Show answer</button>
+        <button class="btn" id="fc-next" type="button" aria-label="Next card">Next &#8594;</button>
+        <div class="tb-spacer"></div>
+        <a class="btn ghost" id="fc-download" href="/flashcards.tsv" download="leetcoach-flashcards.tsv">Download TSV</a>
       </div>
     </div>
   </div>
