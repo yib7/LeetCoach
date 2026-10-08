@@ -270,11 +270,6 @@
   function syncTier() {
     if (tierGroup) tierGroup.classList.toggle("disabled", activeVal("mode") === "learning");
   }
-  // Set once the user picks a model in THIS tab. Until then a run sends no
-  // model and the server uses its configured one, so a pinned id in .env
-  // (e.g. claude-sonnet-4-5, highlighted as "sonnet") is not swapped for
-  // the generic alias (SP4 review I1).
-  var modelTouched = false;
   // Persist the model choice as the default (server writes .env + updates env).
   // Best-effort: on failure the run path still uses the server's current model.
   function saveModel(alias) {
@@ -292,10 +287,7 @@
       b.classList.add("on");
       var group = seg.getAttribute("data-seg");
       if (group === "mode") syncTier();
-      if (group === "model") {
-        modelTouched = true;
-        saveModel(b.getAttribute("data-val"));
-      }
+      if (group === "model") saveModel(b.getAttribute("data-val"));
     });
   });
   // Reflect the server's current default model in the picker on load.
@@ -742,18 +734,29 @@
   // Resolves true only when the server answers 200 {"cancelled": false}: the
   // run already committed to saving (SP4 review M1), so the caller should let
   // it finish rather than abort and show "Stopped" for a run that was saved.
+  // An unresponsive server must not leave Stop hanging: the request is
+  // aborted after CANCEL_TIMEOUT_MS and resolves false (the caller then aborts
+  // the stream, which the server also treats as a cancel).
+  var CANCEL_TIMEOUT_MS = 3000;
   function cancelRun(runId) {
+    var timer = null;
     try {
+      var ctl = new AbortController();
+      timer = setTimeout(function () { ctl.abort(); }, CANCEL_TIMEOUT_MS);
       return fetch("/run/cancel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ run_id: runId }),
         keepalive: true,
+        signal: ctl.signal,
       }).then(function (r) {
         if (!r.ok) return false;
         return r.json().then(function (d) { return !!d && d.cancelled === false; });
-      }).catch(function () { return false; });
+      }).catch(function () { return false; }).finally(function () {
+        clearTimeout(timer);
+      });
     } catch (e) {
+      clearTimeout(timer);
       return Promise.resolve(false);
     }
   }
@@ -772,13 +775,14 @@
     var language = activeVal("lang");
     var tierDisabled = mode === "learning";
     var tier = tierDisabled ? "" : activeVal("tier");
-    // Wire contract: { problem, mode, language, tier, model? }. Once the user
-    // picked a model in this tab it is sent per run (B12), so the tab runs on
-    // the model it shows, not on a global default another tab may have
-    // changed; before that the server's configured model is used (I1).
+    // Wire contract: { problem, mode, language, tier, model? }. The picker's
+    // model is sent per run (B12), so the tab runs on the model it shows, not
+    // on a global default another tab may have changed. The server maps the
+    // alias that matches a pinned .env id (e.g. "sonnet" for
+    // claude-sonnet-4-5) back to that id (config.resolve_run_model, I1).
     var body = { problem: problem, mode: mode, language: language, tier: tier };
     var model = activeVal("model");
-    if (modelTouched && model) body.model = model;
+    if (model) body.model = model;
     // B14: name the run so Stop can cancel it server-side (frees the slot and
     // kills the claude process at once, instead of a 409 on an immediate re-run).
     var runId = newRunId();
