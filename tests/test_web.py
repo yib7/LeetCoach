@@ -865,15 +865,21 @@ def test_create_app_default_dotenv_path_is_not_the_real_project_env():
     real_env = Path(app_module.__file__).resolve().parent / ".env"
     assert application.config["DOTENV_PATH"] != str(real_env)
 
-    # Snapshot the real .env (which may genuinely exist -- this is a real dev's
-    # working checkout) rather than asserting on its content, so the test
-    # can't produce a false failure/pass depending on what's already in it.
-    before = real_env.read_text(encoding="utf-8") if real_env.exists() else None
+    # Snapshot the real .env's metadata (it may genuinely exist -- this is a
+    # real dev's working checkout). Size + mtime only: the test must never
+    # READ the real .env, which can hold secrets.
+    def _snapshot():
+        if not real_env.exists():
+            return None
+        st = real_env.stat()
+        return (st.st_size, st.st_mtime_ns)
+
+    before = _snapshot()
 
     resp = application.test_client().post(
         "/config/model", json={"model": "opus"}
     )
     assert resp.status_code == 200
 
-    after = real_env.read_text(encoding="utf-8") if real_env.exists() else None
+    after = _snapshot()
     assert after == before, "the real project .env must be untouched by create_app()"
