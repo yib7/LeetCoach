@@ -228,7 +228,7 @@ test("summaryActions offers the right re-runs", function () {
     ["lang-python", "lang-java", "learn"]);
   assert.deepStrictEqual(ids({ mode: "learning", language: "java", tier: "" }),
     ["lang-python", "lang-cpp"]);
-  var opt = core.summaryActions({ mode: "guided", language: "python", tier: "basic" })[0];
+  var opt = core.summaryActions({ mode: "answer", language: "python", tier: "basic" })[0];
   assert.deepStrictEqual(opt.patch, { tier: "optimal" });
   assert.strictEqual(core.summaryActions({ mode: "answer", language: "python" })[1].label, "Re-run in C++");
 });
