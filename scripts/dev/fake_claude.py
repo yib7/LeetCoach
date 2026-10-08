@@ -145,6 +145,7 @@ def _title(problem: str) -> str:
 
 PY_SOLUTION = '''\
 import ast
+import json
 import re
 import sys
 
@@ -172,7 +173,7 @@ if __name__ == "__main__":
     nums = args.get("nums", [])
     target = args.get("target", 0)
     answer = Solution().twoSum(nums, target)__WRONG____CRASH__
-    print("[" + ",".join(str(v) for v in answer) + "]")
+    print(json.dumps(answer, separators=(",", ":")))
 '''
 
 CPP_SOLUTION = '''\
@@ -228,68 +229,145 @@ def _solution(language: str, problem: str) -> str:
     return code
 
 
-def study_doc(prompt: str) -> str:
-    problem = _problem_text(prompt)
+# The D2 doc contract's sections (prompts.DOC_SECTIONS). The fake reads the
+# section list the prompt asks for (lines "  ## <title> - <guide>"), so its
+# docs follow the contract as it changes; this is only the fallback.
+DEFAULT_SECTIONS = (
+    "Problem in brief", "Constraints → target complexity", "How to recognize this pattern",
+    "Key insight", "Approach", "Solution", "Complexity", "Edge cases", "Common mistakes",
+    "Related problems", "Flashcards",
+)
+HINTS = (
+    "Each element needs exactly one partner, and the target fixes that partner's value.",
+    "For `x`, the partner is `target - x`. Checking every other element is slow - "
+    "find a structure that tells you instantly whether a value was already seen.",
+    "Remember every value you have passed, together with its index, in a hash map.",
+    "Walk once: if `target - x` is already in the map, return both indices; "
+    "otherwise store `x` and keep going.",
+)
+
+
+def _sections(prompt: str) -> list[str]:
+    found = re.findall(r"^  ## (.+?) - ", prompt, re.M)
+    return found or list(DEFAULT_SECTIONS)
+
+
+def _header(problem: str) -> tuple[str, str]:
+    """``(line 1, difficulty)`` from the paste: ``# <n>. <Title>``."""
     title = _title(problem)
+    m = re.match(r"^#*\s*(\d{1,5})[.):]\s+(.+)$", title)
+    head = f"# {m.group(1)}. {m.group(2).strip()}" if m else f"# {title}"
+    d = re.search(r"^\s*(?:difficulty\s*:\s*)?(easy|medium|hard)\s*$", problem, re.I | re.M)
+    return head, (d.group(1).capitalize() if d else "Easy")
+
+
+def _section_body(name: str, *, mode: str, fence: str, tier: str, problem: str) -> str:
+    key = name.split()[0].lower()
+    hints = "".join(f"### Hint {i}\n\n{text}\n\n" for i, text in enumerate(HINTS, 1))
+    if key == "problem":
+        return (
+            "We get an array and a target and return the indices of the two "
+            "values that add up to the target. Exactly one answer exists.\n\n"
+            "**Input:** `nums = [2,7,11,15], target = 9`\n\n"
+            "**Output:** `[0,1]`\n"
+        )
+    if key == "constraints":
+        return (
+            "`2 <= nums.length <= 10^4`, so an O(n^2) scan of every pair is "
+            "borderline; aim for O(n) time.\n"
+        )
+    if key == "how":
+        return (
+            "The task asks for a pair with a fixed sum, and each lookup only "
+            "checks whether the complement exists - a classic hash map signal.\n"
+        )
+    if key == "key":
+        return (
+            "For each value `x` the partner is `target - x`. Keep a map from "
+            "value to index of everything seen so far.\n\n"
+            "A quick sketch of the loop (pseudo-code, untagged on purpose):\n\n"
+            "```\nfor i, x in nums:\n    if target - x in seen: return [seen[target - x], i]\n"
+            "    seen[x] = i\n```\n"
+        )
+    if key == "approach":
+        if mode == "learning":
+            return hints + (
+                "### Using a dictionary idiomatically\n\n"
+                f"```{fence}\nseen = {{}}\nseen[7] = 1\nprint(9 - 2 in seen)  # True\n```\n\n"
+                "Lookups and inserts are O(1) on average. Storing *after* the "
+                "check avoids pairing an element with itself.\n"
+            )
+        if mode == "guided":
+            return hints + (
+                "### From brute force to optimal\n\n"
+                "**Brute force:** try every pair `(i, j)` - O(n^2) time, O(1) "
+                "space. With 10^4 elements that is 10^8 checks, too slow.\n\n"
+                "**Optimal:** one pass with a hash map of complements - O(n) "
+                "time, O(n) space.\n"
+            )
+        return (
+            "1. Start from the brute force pair scan.\n"
+            "2. Notice each inner scan only asks whether `target - x` exists.\n"
+            "3. Replace it with a hash map lookup: one pass, O(n).\n"
+        )
+    if key == "solution":
+        return (
+            f"Tier: {tier}.\n\n"
+            f"```{fence} solution\n{_solution(fence, problem)}```\n"
+        )
+    if key == "complexity":
+        text = "Complexity: time O(n), space O(n)\n"
+        if mode == "answer":
+            text += (
+                "\n| Tier | Idea | Time | Space |\n|---|---|---|---|\n"
+                "| basic | try every pair | O(n^2) | O(1) |\n"
+                "| normal | hash map, one pass | O(n) | O(n) |\n"
+                "| optimal | same as normal - one pass is optimal | O(n) | O(n) |\n"
+            )
+        return text
+    if key == "edge":
+        return "- Duplicates such as `[3,3]` with target 6.\n- Negative numbers.\n"
+    if key == "common":
+        return "- Inserting before checking, which pairs an element with itself.\n"
+    if key == "related":
+        return (
+            "- 15. 3Sum - the same complement idea, one level deeper.\n"
+            "- 167. Two Sum II - sorted input, so two pointers work.\n\n"
+            "See <https://leetcode.com/problems/two-sum/?a=1&b=2> for the original "
+            "statement (autolink with `&`).\n"
+        )
+    if key == "flashcards":
+        return (
+            "- Q: What does the map store? - A: value -> index of every element seen.\n"
+            "- Q: Why check before inserting? - A: so an element never pairs with itself.\n"
+        )
+    return "(fake_claude has no canned text for this section.)\n"
+
+
+def study_doc(prompt: str) -> str:
+    """A Markdown study doc in the D2 contract shape (header, Pattern /
+    Difficulty line, the fixed H2 sections the prompt lists; Guided and
+    Learning get a ### Hint 1..4 ladder; exactly one solution block, never in
+    Learning)."""
+    problem = _problem_text(prompt)
     lang = (re.search(r"language key: (\w+)", prompt) or [None, "python"])[1]
     fence = {"python": "python", "cpp": "cpp", "java": "java"}.get(lang, "python")
     tier_m = re.search(r"at the \*\*(\w+)\*\* tier", prompt)
     tier = tier_m.group(1) if tier_m else "normal"
-    learning = "Mode: Learning" in prompt
-    guided = "Mode: Guided" in prompt
-
-    parts = [f"# {title}\n\n"]
-    parts.append(
+    mode = ("learning" if "Mode: Learning" in prompt
+            else "guided" if "Mode: Guided" in prompt else "answer")
+    head, difficulty = _header(problem)
+    parts = [
+        f"{head}\nPattern: Arrays & Hashing · Difficulty: {difficulty}\n\n",
         "> Generated by **fake_claude** for local testing - this is canned text, "
-        "not real Claude output.\n\n"
-    )
-    if guided:
-        parts.append(
-            "## 1. Restate the problem\n\n"
-            "We get an array and a target and must return the indices of the two "
-            "values that add up to the target. Exactly one answer exists.\n\n"
-        )
-    parts.append(
-        "## Key idea: a hash map of complements\n\n"
-        "Walk the array once. For each value `x`, the partner we need is "
-        "`target - x`. Keep a map from value to index of everything seen so far; "
-        "if the partner is already there, we are done.\n\n"
-        "- **Hash map lookups** are O(1) on average.\n"
-        "- One pass means each element is touched once.\n"
-        "- Storing *after* the check avoids pairing an element with itself.\n\n"
-        "A quick sketch of the loop (pseudo-code, untagged on purpose):\n\n"
-        "```\nfor i, x in nums:\n    if target - x in seen: return [seen[target - x], i]\n"
-        "    seen[x] = i\n```\n\n"
-    )
-    if learning:
-        parts.append(
-            "## Using a dictionary idiomatically\n\n"
-            "```python\nseen = {}\nseen[7] = 1\nprint(9 - 2 in seen)  # True\n```\n\n"
-            "## Practice\n\n"
-            "1. Why must we check before inserting?\n"
-            "2. What changes if the array were sorted? (Hint: two pointers.)\n\n"
-            "Try writing the full solution yourself before switching to Answer mode.\n"
-        )
-        return "".join(parts)
-
-    parts.append(
-        "## Worked example\n\n"
-        "**Input:** `nums = [2,7,11,15], target = 9`\n\n"
-        "**Output:** `[0,1]`\n\n"
-        "At i = 0 we store 2. At i = 1 the partner 9 - 7 = 2 is in the map at "
-        "index 0, so the answer is [0,1].\n\n"
-        f"## Solution ({tier})\n\n"
-        f"```{fence} solution\n{_solution(fence, problem)}```\n\n"
-        "Complexity: time O(n), space O(n)\n\n"
-        "## Trade-offs\n\n"
-        "| Tier | Idea | Time | Space |\n|---|---|---|---|\n"
-        "| basic | try every pair | O(n^2) | O(1) |\n"
-        "| normal | hash map, one pass | O(n) | O(n) |\n"
-        "| optimal | same as normal - you cannot beat one pass | O(n) | O(n) |\n\n"
-        "See <https://leetcode.com/problems/two-sum/?a=1&b=2> for the original "
-        "statement (autolink with `&`).\n"
-    )
-    return "".join(parts)
+        "not real Claude output.\n\n",
+    ]
+    for name in _sections(prompt):
+        if mode == "learning" and name in ("Solution", "Complexity"):
+            continue
+        body = _section_body(name, mode=mode, fence=fence, tier=tier, problem=problem)
+        parts.append(f"## {name}\n\n{body}\n")
+    return "".join(parts).rstrip("\n") + "\n"
 
 
 CLASSIFY_RULES = [

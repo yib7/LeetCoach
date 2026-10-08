@@ -9,7 +9,11 @@ NEVER CALLS REAL CLAUDE and never touches your real data:
   stream-json; see ``fake_claude.py`` for the FAKE_* knobs and markers);
 * ``LEETCOACH_OUTPUT_DIR`` -> ``%TEMP%/leetcoach-fake/output``, re-seeded on
   every start (unless ``--keep``) with pass / fail / error / not-verified /
-  learning runs spread over several days;
+  learning runs spread over several days. SP6: some runs are in the run log
+  (``.leetcoach/runs.jsonl`` + problem records with Easy / Medium / Hard, and
+  D2-contract Guided / Learning docs with hints), the rest are legacy files
+  with no log entry (Stats' per-file fallback, the doc-parsed verdict), incl.
+  extra tiers and ``__2`` slots of one problem;
 * the real ``.env`` is never loaded (``LEETCOACH_NO_DOTENV=1``) and model-picker
   writes go to a scratch ``.env``; the topic index and the claude cwd are
   scratch files too;
@@ -21,6 +25,7 @@ URL and exits: it never re-seeds (wipes) the library of a running instance.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -28,6 +33,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -90,7 +96,133 @@ SEED = [
      _doc("Merge Intervals", "## Solution\n\nSort by start, then sweep.",
           "⚠ not auto-verified (C++ answers are not run)"), 9),
     ("answers/intervals/merge_intervals__normal.cpp", "class Solution {};\n", 9),
+    # A8: other tiers / slots of the same problem are separate runs (legacy).
+    ("answers/hash_map/two_sum__optimal.md",
+     _doc("Two Sum", "## Solution\n\nOne pass with a hash map.",
+          "✓ Sample tests PASS (1/1 samples)"), 2),
+    ("answers/hash_map/two_sum__normal__2.md",
+     _doc("Two Sum", "## Solution\n\nA re-run that did not overwrite the first.",
+          "✓ Sample tests PASS (1/1 samples)"), 3),
+    ("answers/heap/215_kth_largest_element_in_an_array__optimal.md",
+     _doc("215. Kth Largest Element in an Array", "## Solution\n\nA size-k min-heap.",
+          "✓ Sample tests PASS (2/2 samples)"), 4),
+    ("answers/heap/215_kth_largest_element_in_an_array__optimal.py",
+     "import heapq\n\n\nclass Solution:\n    def findKthLargest(self, nums, k):\n"
+     "        return heapq.nlargest(k, nums)[-1]\n", 4),
+    ("answers/two_pointers/42_trapping_rain_water__optimal.md",
+     _doc("42. Trapping Rain Water", "## Solution\n\nTwo pointers from both ends.",
+          "⚠ not auto-verified (C++ answers are not run)"), 6),
+    ("answers/two_pointers/42_trapping_rain_water__optimal.cpp", "class Solution {};\n", 6),
 ]
+
+
+def _fake_claude():
+    """The sibling fake_claude module (its D2-contract doc generator)."""
+    spec = importlib.util.spec_from_file_location(
+        "leetcoach_fake_claude", Path(__file__).resolve().with_name("fake_claude.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _contract_doc(mode: str, problem: str, verification: str | None) -> str:
+    """A D2-contract study doc exactly as the fake CLI writes one (hints in
+    Guided / Learning, a hidden-by-default Solution in Guided)."""
+    prompt = (
+        f"Mode: {mode.capitalize()}\nlanguage key: python\n"
+        f"--- BEGIN PROBLEM 0f0f0f0f0f0f ---\n{problem}\n--- END PROBLEM 0f0f0f0f0f0f ---\n"
+    )
+    text = _fake_claude().study_doc(prompt)
+    if verification is not None:
+        text += "\n\n---\n\n**Verification:** " + verification + "\n"
+    return text
+
+
+TWO_SUM_PASTE = (
+    "1. Two Sum\nEasy\n\nGiven an array of integers nums and an integer target, return "
+    "indices of the two numbers such that they add up to target.\n\n"
+    "Example 1:\nInput: nums = [2,7,11,15], target = 9\nOutput: [0,1]"
+)
+
+# D2-contract docs that ARE in the run log (relative path, mode, paste, verdict
+# line, age in days).
+CONTRACT_SEED = [
+    ("guided/hash_map/1_two_sum.md", "guided", TWO_SUM_PASTE,
+     "✓ Sample tests PASS (1/1 samples)", 0),
+    ("learning/hash_map_learning/1_two_sum.md", "learning", TWO_SUM_PASTE, None, 1),
+]
+
+# problem_id -> (number, title, difficulty, pattern, statement)
+PROBLEMS = {
+    "1-two_sum": (1, "Two Sum", "Easy", "hash_map", TWO_SUM_PASTE),
+    "20-valid_parentheses": (20, "Valid Parentheses", "Easy", "stack",
+                             "20. Valid Parentheses\nEasy\n\nGiven a string s of brackets..."),
+    "206-reverse_linked_list": (206, "Reverse Linked List", "Easy", "linked_list",
+                                "206. Reverse Linked List\nEasy\n\nReverse a singly linked list."),
+    "215-kth_largest_element_in_an_array": (
+        215, "Kth Largest Element in an Array", "Medium", "heap",
+        "215. Kth Largest Element in an Array\nMedium\n\nReturn the kth largest element."),
+    "42-trapping_rain_water": (42, "Trapping Rain Water", "Hard", "two_pointers",
+                               "42. Trapping Rain Water\nHard\n\nCompute trapped water."),
+}
+
+# Run-log entries: (age days, problem_id, mode, language, tier, verdict, files)
+LOG = [
+    (9, "42-trapping_rain_water", "answer", "cpp", "optimal", "not_verified",
+     ["answers/two_pointers/42_trapping_rain_water__optimal.md",
+      "answers/two_pointers/42_trapping_rain_water__optimal.cpp"]),
+    (4, "215-kth_largest_element_in_an_array", "answer", "python", "optimal", "pass",
+     ["answers/heap/215_kth_largest_element_in_an_array__optimal.md",
+      "answers/heap/215_kth_largest_element_in_an_array__optimal.py"]),
+    (2, "206-reverse_linked_list", "answer", "java", "normal", "not_verified",
+     ["answers/linked_list/reverse_linked_list__normal.md",
+      "answers/linked_list/reverse_linked_list__normal.java"]),
+    (1, "20-valid_parentheses", "answer", "python", "optimal", "fail",
+     ["answers/stack/valid_parentheses__optimal.md",
+      "answers/stack/valid_parentheses__optimal.py"]),
+    (1, "1-two_sum", "learning", "python", None, None,
+     ["learning/hash_map_learning/1_two_sum.md"]),
+    (0, "1-two_sum", "guided", "python", "normal", "pass", ["guided/hash_map/1_two_sum.md"]),
+    (0, "1-two_sum", "answer", "python", "normal", "pass",
+     ["answers/hash_map/two_sum__normal.md", "answers/hash_map/two_sum__normal.py"]),
+]
+
+
+def _iso(stamp: float) -> str:
+    return datetime.fromtimestamp(stamp).astimezone().isoformat(timespec="seconds")
+
+
+def _seed_metadata(output: Path, now: float) -> None:
+    """The run log + problem records for the LOG entries (same shapes as
+    problem_store writes)."""
+    meta = output / ".leetcoach"
+    (meta / "problems").mkdir(parents=True, exist_ok=True)
+    lines = []
+    records: dict[str, dict] = {}
+    for age, pid, mode, lang, tier, verdict, files in sorted(LOG, key=lambda e: -e[0]):
+        stamp = now - age * DAY - 600
+        number, title, difficulty, pattern, statement = PROBLEMS[pid]
+        lines.append(json.dumps({
+            "ts": _iso(stamp), "problem_id": pid, "mode": mode, "language": lang,
+            "tier": tier, "model": "claude-opus-5-5", "verdict": verdict, "files": files,
+            "session_id": f"fake-session-{len(lines) + 1}", "duration_s": 42.0,
+            "pattern": pattern,
+        }, ensure_ascii=False, separators=(",", ":")))
+        rec = records.get(pid)
+        if rec is None:
+            due = (datetime.fromtimestamp(stamp).date() + timedelta(days=1)).isoformat()
+            rec = records[pid] = {
+                "id": pid, "number": number, "title": title, "difficulty": difficulty,
+                "pattern": pattern, "statement": statement, "created": _iso(stamp),
+                "updated": _iso(stamp), "notes": "",
+                "review": {"box": 1, "due": due, "history": []}, "runs": [],
+            }
+        rec["updated"] = _iso(stamp)
+        rec["runs"] += [f for f in files if f not in rec["runs"]]
+    (meta / "runs.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    for pid, rec in records.items():
+        (meta / "problems" / f"{pid}.json").write_text(
+            json.dumps(rec, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 def seed(output: Path) -> None:
@@ -104,12 +236,15 @@ def seed(output: Path) -> None:
     (output / MARKER).write_text("scratch library created by scripts/dev/run_fake.py\n",
                                  encoding="utf-8")
     now = time.time()
-    for rel, content, age_days in SEED:
+    contract = [(rel, _contract_doc(mode, paste, verdict), age)
+                for rel, mode, paste, verdict, age in CONTRACT_SEED]
+    for rel, content, age_days in SEED + contract:
         path = output / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
         stamp = now - age_days * DAY - 600
         os.utime(path, (stamp, stamp))
+    _seed_metadata(output, now)
 
 
 def configure(scratch: Path, *, keep: bool = False) -> Path:
