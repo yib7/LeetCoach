@@ -47,6 +47,10 @@ session history. Every call therefore:
 * persists its session only when the caller asks (study runs, for a later
   ``--resume``); utility calls pass ``--no-session-persistence``.
 
+A follow-up on a saved doc (D6) resumes the study run's session with
+``--resume <session_id>`` - same isolation flags, same neutral cwd (the CLI
+looks the session up in that directory's project bucket).
+
 Each optional flag is passed only if the installed CLI lists it in
 ``claude --help`` (probed once, cached, timeout-bounded), so an older CLI keeps
 working with whatever subset it supports.
@@ -83,6 +87,13 @@ NO_RESULT_MESSAGE = (
 )
 
 
+class ResumeUnsupportedError(ClaudeUnavailableError):
+    """Raised (lazily, before anything is spawned) when a caller asks to
+    ``--resume`` a session but the installed CLI does not list that flag, or
+    the session id is not a plain token. The D6 follow-up falls back to a
+    fresh call on it."""
+
+
 class ClaudeCancelledError(RuntimeError):
     """Raised by a run's iterator after :meth:`ClaudeRun.cancel` killed it."""
 
@@ -110,6 +121,10 @@ FLAG_TOOLS = "--tools"
 FLAG_STRICT_MCP = "--strict-mcp-config"
 FLAG_SYSTEM_PROMPT = "--system-prompt"
 FLAG_NO_PERSIST = "--no-session-persistence"
+FLAG_RESUME = "--resume"  # D6: only passed when a caller resumes a session
+# A session id reaches argv (through the cmd.exe shim on Windows), so only a
+# plain token is ever passed: the CLI's ids are UUIDs.
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 # Never passed, whatever the CLI lists: --bare never reads OAuth, so it would
 # break the subscription login this whole app depends on.
 FORBIDDEN_FLAGS = frozenset({"--bare"})
@@ -205,11 +220,14 @@ def build_argv(
     flags: frozenset,
     system_prompt: Optional[str],
     persist_session: bool,
+    resume: Optional[str] = None,
 ) -> list[str]:
     """The `claude -p` argv for one call, isolation flags gated on ``flags``.
 
     The optional flags sit BEFORE ``--output-format``: ``--tools`` is variadic,
     so its ``""`` must be followed by another ``--flag``, never a bare value.
+    ``resume`` (D6) adds ``--resume <session id>``; the caller (:func:`run`)
+    has already checked the CLI lists the flag and the id is a plain token.
     """
     argv = [config.claude_bin(), "-p"]
     if FLAG_SAFE_MODE in flags:
@@ -222,6 +240,8 @@ def build_argv(
         argv += [FLAG_SYSTEM_PROMPT, system_prompt]
     if not persist_session and FLAG_NO_PERSIST in flags:
         argv.append(FLAG_NO_PERSIST)
+    if resume:
+        argv += [FLAG_RESUME, resume]
     argv += [
         "--output-format",
         "stream-json",
@@ -626,6 +646,12 @@ def failure_message(returncode: int, stderr: str, stream_detail: str = "") -> st
         )
     headline = f"`{binary}` failed (exit code {returncode}): {_first_line(detail)}"
     return _compose_error(headline, detail)
+
+
+def is_auth_or_limit_error(message: str) -> bool:
+    """True when a failure reads like a sign-in or usage-limit problem - one
+    that a retry (e.g. the D6 follow-up's fresh fallback call) would hit too."""
+    return bool(_hint_for(message or ""))
 
 
 def result_error_message(obj: dict) -> str:
@@ -1151,6 +1177,7 @@ def run(
     system_prompt: Optional[str] = None,
     persist_session: bool = False,
     flags: Optional[frozenset] = None,
+    resume: Optional[str] = None,
 ) -> ClaudeRun:
     """Stream Claude's answer to `prompt` as a sequence of text deltas.
 
@@ -1180,6 +1207,11 @@ def run(
     flags:
         The CLI's supported long options; defaults to the cached
         ``claude --help`` probe (:func:`cli_supported_flags`).
+    resume:
+        A session id to continue with ``--resume`` (D6 follow-up). Gated like
+        every optional flag: when the CLI does not list ``--resume`` (or the
+        id is not a plain token) the iterator raises
+        :class:`ResumeUnsupportedError` before anything is spawned.
 
     Returns
     -------
@@ -1198,6 +1230,7 @@ def run(
         system_prompt=system_prompt,
         persist_session=persist_session,
         flags=flags,
+        resume=resume,
     )
     return handle
 
@@ -1212,6 +1245,7 @@ def _run_gen(
     system_prompt,
     persist_session,
     flags,
+    resume=None,
 ) -> Iterator[str]:
     """The lazy body of :func:`run` (a generator, so nothing happens - no
     availability check, no probe, no spawn - until the caller iterates)."""
@@ -1231,6 +1265,13 @@ def _run_gen(
 
     if flags is None:
         flags = cli_supported_flags()
+    if resume is not None:
+        if not isinstance(resume, str) or not SESSION_ID_RE.fullmatch(resume):
+            raise ResumeUnsupportedError("The saved session id is not resumable.")
+        if FLAG_RESUME not in flags:
+            raise ResumeUnsupportedError(
+                f"This `{config.claude_bin()}` CLI does not support --resume."
+            )
     if system_prompt is None:
         system_prompt = DEFAULT_SYSTEM_PROMPT
 
@@ -1239,6 +1280,7 @@ def _run_gen(
         flags=flags,
         system_prompt=system_prompt,
         persist_session=persist_session,
+        resume=resume,
     )
     stdin_text = prompt
     if system_prompt and FLAG_SYSTEM_PROMPT not in flags:

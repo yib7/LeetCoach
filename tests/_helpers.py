@@ -66,6 +66,7 @@ Options:
   --no-session-persistence              Disable session persistence
   --output-format <format>              Output format
   -p, --print                           Print response and exit
+  -r, --resume [value]                  Resume a conversation by session ID
   --safe-mode                           Start with all customizations disabled
   --strict-mcp-config                   Only use MCP servers from --mcp-config
   --system-prompt <prompt>              System prompt to use for the session
