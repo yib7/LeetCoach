@@ -186,3 +186,101 @@ def test_write_many_restores_a_preexisting_file_on_rollback(tmp_path, monkeypatc
     assert a.read_text(encoding="utf-8") == "previous"
     assert not b.exists()
     assert [p.name for p in tmp_path.iterdir()] == ["s.py"]
+
+
+# --- SP4 review M5/M6/M7 ---------------------------------------------------------
+
+def test_worst_case_wait_matches_the_real_backoff_schedule(monkeypatch, tmp_path):
+    def always_locked(src, dst):
+        raise PermissionError(13, "locked")
+
+    sleeps = []
+    monkeypatch.setattr(fsutil, "_replace", always_locked)
+    monkeypatch.setattr(fsutil, "_sleep", sleeps.append)
+    with pytest.raises(PermissionError):
+        fsutil.atomic_write_text(tmp_path / "f.md", "x")
+    assert sum(sleeps) == pytest.approx(fsutil.WORST_CASE_WAIT)
+    assert fsutil.WORST_CASE_WAIT == pytest.approx(3.55)
+
+
+def test_temp_name_suffix_is_short(tmp_path, monkeypatch):
+    seen = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        seen.append(os.path.basename(os.fspath(src)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(fsutil, "_replace", spy)
+    fsutil.atomic_write_text(tmp_path / "note.md", "x")
+    fsutil.atomic_write_text(tmp_path / "note.md", "y")
+    for name in seen:
+        tag = name[len(".note.md."):-len(".tmp")]
+        assert len(tag) == 8 and all(c in "0123456789abcdef" for c in tag), name
+    assert seen[0] != seen[1]
+
+
+def test_temp_name_collision_picks_another_name(tmp_path, monkeypatch):
+    tags = iter(["deadbeef", "deadbeef", "cafef00d"])
+    monkeypatch.setattr(fsutil.secrets, "token_hex", lambda n: next(tags))
+    (tmp_path / ".note.md.deadbeef.tmp").write_text("someone else's", encoding="utf-8")
+    fsutil.atomic_write_text(tmp_path / "note.md", "mine")
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "mine"
+    # the existing temp file is not clobbered
+    assert (tmp_path / ".note.md.deadbeef.tmp").read_text(encoding="utf-8") == "someone else's"
+
+
+def _make_readonly(path):
+    import stat
+
+    os.chmod(path, stat.S_IREAD)
+
+
+def test_read_only_target_fails_fast_without_retrying(tmp_path, monkeypatch):
+    import stat
+
+    target = tmp_path / "locked.md"
+    target.write_text("original", encoding="utf-8")
+    _make_readonly(target)
+    sleeps = []
+    monkeypatch.setattr(fsutil, "_sleep", sleeps.append)
+    try:
+        with pytest.raises(PermissionError, match="read-only"):
+            fsutil.atomic_write_text(target, "new")
+        assert sleeps == []  # no 3.5 s of pointless retries
+        assert target.read_text(encoding="utf-8") == "original"
+        assert not (os.stat(target).st_mode & stat.S_IWUSR)  # flag left alone
+        assert _tmp_leftovers(tmp_path) == []
+    finally:
+        os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_write_many_checks_read_only_before_touching_anything(tmp_path):
+    import stat
+
+    free = tmp_path / "a.md"
+    locked = tmp_path / "b.md"
+    locked.write_text("original", encoding="utf-8")
+    _make_readonly(locked)
+    try:
+        with pytest.raises(PermissionError, match="read-only"):
+            fsutil.atomic_write_many([(free, "a"), (locked, "b")])
+        assert not free.exists()
+        assert locked.read_text(encoding="utf-8") == "original"
+        assert _tmp_leftovers(tmp_path) == []
+    finally:
+        os.chmod(locked, stat.S_IREAD | stat.S_IWRITE)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows hidden attribute")
+def test_hidden_attribute_survives_the_replace(tmp_path):
+    import ctypes
+    import stat
+
+    target = tmp_path / "hidden.json"
+    target.write_text("{}", encoding="utf-8")
+    kernel32 = ctypes.windll.kernel32
+    assert kernel32.SetFileAttributesW(str(target), stat.FILE_ATTRIBUTE_HIDDEN)
+    fsutil.atomic_write_text(target, '{"a": 1}')
+    assert target.read_text(encoding="utf-8") == '{"a": 1}'
+    assert os.stat(target).st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN
