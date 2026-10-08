@@ -50,11 +50,13 @@ def _seed(tmp_path):
         "# Arrays\n", encoding="utf-8"
     )
     (tmp_path / "topic_index.json").write_text("{}", encoding="utf-8")
+    # B19: app metadata is never part of the library listing.
+    (tmp_path / ".leetcoach" / "problems").mkdir(parents=True)
+    (tmp_path / ".leetcoach" / "problems" / "1-two-sum.json").write_text("{}", encoding="utf-8")
     return {
         "answers/two_pointers/two_sum__normal.py",
         "answers/two_pointers/two_sum__normal.md",
         "learning/arrays_learning/intro.md",
-        "topic_index.json",
     }
 
 
@@ -123,13 +125,16 @@ def test_library_file_markdown_served_as_plain_text(client):
     assert resp.get_data(as_text=True) == "# Arrays\n"
 
 
-def test_library_file_topic_index_is_readable(client):
-    # topic_index.json lives inside output and is harmless; .json is allowlisted.
+def test_library_file_hides_app_metadata(client):
+    # B19: topic_index.json and anything under a dot-dir (.leetcoach/) are app
+    # metadata - not listed, not served, not deletable (uniform 404).
     c, tmp_path = client
     _seed(tmp_path)
-    resp = c.get("/library/file?path=topic_index.json")
-    assert resp.status_code == 200
-    assert resp.get_data(as_text=True) == "{}"
+    for rel in ("topic_index.json", ".leetcoach/problems/1-two-sum.json"):
+        assert c.get("/library/file?path=" + rel).status_code == 404
+        assert c.delete("/library/file?path=" + rel).status_code == 404
+    assert (tmp_path / "topic_index.json").exists()
+    assert (tmp_path / ".leetcoach" / "problems" / "1-two-sum.json").exists()
 
 
 def test_library_file_missing_is_404(client):
