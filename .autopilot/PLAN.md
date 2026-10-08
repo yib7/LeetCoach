@@ -164,22 +164,23 @@ single-instance, `.env` edge cases, atomic writes under a held reader, non-ASCII
 fake bin — never real) for: run-id guard, Stop→re-run, reload persistence, throttled render, verdict colours,
 keyboard nav, focus trap, narrow-width sidebar access; zero console errors; suite green.
 
-- [ ] B13 run-id guard; B14 client (Stop calls cancel; 409 → retry w/ backoff + message); B17 truthful
+- [x] B13 run-id guard; B14 client (Stop calls cancel; 409 → retry w/ backoff + message); B17 truthful
   "stream ended unexpectedly"; B20 Quick Ask cancel + 60 s client timeout; B12 client `resp.ok` + revert +
   model chip on runs, showing the concrete model from the stream-json `system/init` event (e.g. "Opus 5.5") because the picker passes aliases.
-- [ ] B15/D7 — localStorage (try/catch) for draft/mode/lang/tier/QA-collapsed; `beforeunload` guard while
+- [x] B15/D7 — localStorage (try/catch) for draft/mode/lang/tier/QA-collapsed; `beforeunload` guard while
   streaming; summary actions: Open in Library, Re-run as Optimal, Re-run in other language, Learn this topic.
-- [ ] B16 — render throttle (~150 ms), highlight on final render / closed blocks only, untagged → plaintext.
+- [x] B16 — render throttle (~150 ms), highlight on final render / closed blocks only, untagged → plaintext.
   D11 — auto-follow + "Jump to latest" pill; SSE `phase` events (streaming → verifying i/n → saving) rendered.
-- [ ] B18 real status column + coloured FAIL/not-verified chips; B19 client "Delete run"; C9 a11y set
+- [x] B18 real status column + coloured FAIL/not-verified chips; B19 client "Delete run"; C9 a11y set
   (aria-busy + separate live region, button rows, working topic chips → ⌘K prefilled, aria-pressed/disabled,
   `--tx4` contrast ≥4.5:1, focus trap + aria-activedescendant, labels, IME guard).
-- [ ] C10 set (Ctrl+Enter switches to Console, library scroll reset + active highlight, per-view scroll, copy
+- [x] C10 set (Ctrl+Enter switches to Console, library scroll reset + active highlight, per-view scroll, copy
   label, platform glyphs, remove fake gutter, visible failures, title captured at run start, no Stats empty-
   flash, autolink `&`); C11 narrow screens (≤900 px sidebar drawer/toggle, topbar wraps, table min widths,
   library stacks); C12 dead CSS/vars removed.
-- [ ] Tests: add `tests/js/` node-runnable unit tests (no deps) for pure helpers where feasible + wire into
+- [x] Tests: add `tests/js/` node-runnable unit tests (no deps) for pure helpers where feasible + wire into
   pytest via a skip-if-no-node test; browser verification recorded.
+- Verified: 2026-10-08 orchestrator at 55d0511: 966 passed/1 skipped, ruff clean, node 32/32; browser-verified on the fake harness (never real claude): model chip pending->Opus 5.5, PASS/FAIL chip colours, summary actions, Jump-to-latest, Stop->'Stopped' (no errbox) + immediate re-run, cut stream -> error and nothing saved, reload persistence, Quick Ask Cancel/Esc + 'Quick Ask cancelled.', Delete run modal (focus trap, both files deleted), Ctrl+K aria-activedescendant, <=900px drawer + Esc + focus return, no h-scroll, Ctrl+Enter from Library, table slug ellipsis, zero console/server errors. Review approved with minors, all fixed.
 
 ## SP6 — Study foundation: problem record, run log, doc contract, hints
 
