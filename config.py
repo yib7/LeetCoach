@@ -121,6 +121,20 @@ def model_alias() -> str:
     return ""
 
 
+def resolve_run_model(alias: str) -> str:
+    """The ``--model`` value for a per-run picker ``alias`` (SP4 review I1).
+
+    When ``alias`` is the picker button the configured model already maps to
+    (:func:`model_alias`), the configured value itself is used, so a pinned id
+    in ``.env`` (``LEETCOACH_MODEL=claude-sonnet-4-5``) is not silently
+    swapped for the generic ``sonnet`` alias just because the page posts the
+    highlighted button. Any other alias is used as-is; ``""`` stays ``""``.
+    """
+    if alias and alias == model_alias():
+        return model()
+    return alias
+
+
 def classifier_model() -> str:
     """Model id/alias for the classifier's short Claude call (audit6 P2-4).
 
@@ -273,6 +287,59 @@ def _env_line_key(line: str) -> str | None:
     return key.strip() if sep else None
 
 
+def _quote_closes(text: str, quote: str) -> int:
+    """Index just past the closing ``quote`` in ``text`` (which starts right
+    after the opening one), or ``-1`` if it does not close on this line. Inside
+    double quotes a backslash escapes the next character (python-dotenv's
+    rule); single quotes have no escapes."""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote == '"' and ch == "\\":
+            i += 2
+            continue
+        if ch == quote:
+            return i + 1
+        i += 1
+    return -1
+
+
+def _env_entries(text: str) -> list[tuple[str | None, list[str]]]:
+    """Split dotenv ``text`` into ``(key, lines)`` entries (SP4 review M3).
+
+    Lines are split on ``"\n"`` only (a trailing ``"\r"`` is dropped) -
+    ``str.splitlines`` would also break on U+2028, ``\x85``, form feed and
+    friends, which are ordinary characters in a value. An assignment whose
+    value opens a quote that does not close on the same line swallows the
+    following lines up to the closing quote, so text INSIDE a quoted
+    multi-line value is never mistaken for an assignment. ``key`` is ``None``
+    for blanks, comments and anything else that assigns nothing.
+    """
+    raw_lines = text.split("\n")
+    if raw_lines and raw_lines[-1] == "":
+        raw_lines.pop()  # the final newline ends the last line, no extra one
+    lines = [ln[:-1] if ln.endswith("\r") else ln for ln in raw_lines]
+    entries: list[tuple[str | None, list[str]]] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        key = _env_line_key(line)
+        group = [line]
+        i += 1
+        if key is not None:
+            value = line.split("=", 1)[1].lstrip()
+            if value[:1] in ("'", '"'):
+                quote = value[0]
+                if _quote_closes(value[1:], quote) < 0:
+                    while i < len(lines):
+                        group.append(lines[i])
+                        i += 1
+                        if _quote_closes(group[-1], quote) >= 0:
+                            break
+        entries.append((key, group))
+    return entries
+
+
 def _decode_env_bytes(data: bytes) -> str:
     """Decode ``.env`` bytes (B12): UTF-8 (with or without a BOM) or UTF-16
     (BOM, or BOM-less LE/BE detected by its NUL pattern - what Windows
@@ -305,11 +372,14 @@ def read_env_text(path) -> str:
 def upsert_env_var(path, key: str, value: str) -> None:
     """Set ``key=value`` in the dotenv file at ``path``, in place.
 
-    Replaces EVERY existing assignment to ``key`` (dotenv is last-wins, so a
-    stale duplicate would otherwise override the choice), preserving every
-    other line, comment, and blank, or appends the assignment when the key is
-    absent. Creates the file if it does not exist. This is how the in-app
-    model picker persists ``LEETCOACH_MODEL`` so the choice survives a restart.
+    Updates the FIRST assignment to ``key`` in place and removes every later
+    one (dotenv is last-wins, so a stale duplicate would otherwise override
+    the choice - SP4 review M4), preserving every other line, comment, and
+    blank, or appends the assignment when the key is absent. A ``key=`` that
+    sits inside another key's quoted multi-line value is not an assignment and
+    is left alone (M3). Creates the file if it does not exist. This is how the
+    in-app model picker persists ``LEETCOACH_MODEL`` so the choice survives a
+    restart.
 
     B12 robustness: a UTF-8 BOM or UTF-16 file is read correctly and written
     back as plain UTF-8 (what python-dotenv reads at boot); a read or decode
@@ -317,16 +387,16 @@ def upsert_env_var(path, key: str, value: str) -> None:
     file as empty and wiping it; the write is atomic (:mod:`fsutil`). Pure I/O
     on the given path - the live process env is updated by the caller.
     """
-    lines = read_env_text(path).splitlines()
     new_line = f"{key}={value}"
     out: list[str] = []
     replaced = False
-    for line in lines:
-        if _env_line_key(line) == key:
+    for entry_key, group in _env_entries(read_env_text(path)):
+        if entry_key != key:
+            out.extend(group)
+        elif not replaced:
             out.append(new_line)
             replaced = True
-        else:
-            out.append(line)
+        # else: a later duplicate - dropped, with any continuation lines
     if not replaced:
         out.append(new_line)
     fsutil.atomic_write_text(path, "\n".join(out) + "\n")

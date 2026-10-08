@@ -131,13 +131,17 @@ def test_upsert_reads_utf16_files(tmp_path, encoding):
     assert env.read_bytes().decode("utf-8").splitlines() == ["# picked", "LEETCOACH_MODEL=sonnet"]
 
 
-def test_upsert_replaces_every_duplicate_assignment(tmp_path):
+def test_upsert_keeps_the_first_assignment_and_drops_later_duplicates(tmp_path):
     env = tmp_path / ".env"
-    env.write_text("LEETCOACH_MODEL=opus\nX=1\nLEETCOACH_MODEL=haiku\n", encoding="utf-8")
+    env.write_text(
+        "LEETCOACH_MODEL=opus\nX=1\nLEETCOACH_MODEL=haiku\nexport LEETCOACH_MODEL=sonnet\n",
+        encoding="utf-8",
+    )
     config.upsert_env_var(env, "LEETCOACH_MODEL", "fable")
     lines = env.read_text(encoding="utf-8").splitlines()
-    # no stale later assignment can override the choice (dotenv is last-wins)
-    assert lines == ["LEETCOACH_MODEL=fable", "X=1", "LEETCOACH_MODEL=fable"]
+    # SP4 review M4: the first occurrence is updated in place and the later
+    # duplicates are removed, so no stale assignment can win (dotenv is last-wins)
+    assert lines == ["LEETCOACH_MODEL=fable", "X=1"]
 
 
 def test_upsert_aborts_on_read_error_and_leaves_the_file_alone(tmp_path, monkeypatch):
@@ -195,3 +199,62 @@ def test_read_env_text_decodes_bom_and_utf16(tmp_path, raw, expected):
 
 def test_read_env_text_missing_file_is_empty(tmp_path):
     assert config.read_env_text(tmp_path / "nope.env") == ""
+
+
+def _text(path):
+    """The file's text with the platform line ending folded to a bare LF."""
+    return path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+
+
+# --- SP4 review M3: line splitting and quoted multi-line values -----------------
+
+def test_upsert_splits_only_on_newlines(tmp_path):
+    env = tmp_path / ".env"
+    # U+2028, U+0085 and form feed are NOT line breaks in a dotenv file
+    other = "NOTE=a\u2028b\x85c\x0cd"
+    env.write_bytes(f"{other}\r\nLEETCOACH_MODEL=opus\r\n".encode("utf-8"))
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "haiku")
+    text = _text(env)
+    assert text.split("\n") == [other, "LEETCOACH_MODEL=haiku", ""]
+
+
+def test_upsert_leaves_a_key_inside_a_quoted_multiline_value_alone(tmp_path):
+    env = tmp_path / ".env"
+    body = (
+        'BLURB="first line\n'
+        "LEETCOACH_MODEL=inside-the-quote\n"
+        'last line"\n'
+        "LEETCOACH_MODEL=opus\n"
+        "SINGLE='LEETCOACH_MODEL=x'\n"
+    )
+    env.write_bytes(body.encode("utf-8"))
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "haiku")
+    assert _text(env) == body.replace(
+        "LEETCOACH_MODEL=opus", "LEETCOACH_MODEL=haiku"
+    )
+
+
+def test_upsert_drops_a_later_duplicate_with_a_multiline_value_entirely(tmp_path):
+    env = tmp_path / ".env"
+    env.write_bytes(b'LEETCOACH_MODEL=opus\nLEETCOACH_MODEL="multi\nline"\nAFTER=1\n')
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "haiku")
+    assert _text(env) == "LEETCOACH_MODEL=haiku\nAFTER=1\n"
+
+
+def test_upsert_escaped_quote_does_not_end_a_double_quoted_value(tmp_path):
+    env = tmp_path / ".env"
+    body = 'A="say \\"hi\\"\nLEETCOACH_MODEL=inside"\nLEETCOACH_MODEL=opus\n'
+    env.write_bytes(body.encode("utf-8"))
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "haiku")
+    assert _text(env) == body.replace(
+        "LEETCOACH_MODEL=opus", "LEETCOACH_MODEL=haiku"
+    )
+
+
+# --- SP4 review I1: a per-run alias vs a pinned id ------------------------------
+
+def test_resolve_run_model_keeps_a_pinned_id_for_its_own_alias(monkeypatch):
+    monkeypatch.setenv("LEETCOACH_MODEL", "claude-sonnet-4-5")
+    assert config.resolve_run_model("sonnet") == "claude-sonnet-4-5"
+    assert config.resolve_run_model("haiku") == "haiku"
+    assert config.resolve_run_model("") == ""
