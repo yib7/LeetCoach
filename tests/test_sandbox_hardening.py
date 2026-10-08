@@ -589,9 +589,15 @@ def test_app_startup_sweeps_stale_run_dirs(monkeypatch):
     monkeypatch.setattr(sandbox, "sweep_stale_run_dirs", boom)
     assert app_module._sweep_sandbox_temp() == 0  # a hiccup never blocks launch
 
-    src = open(app_module.__file__, encoding="utf-8").read()
-    main_block = src[src.index('if __name__ == "__main__":'):]
-    assert "_sweep_sandbox_temp()" in main_block
+    # The launch path (app.main(), run by `python app.py`) really sweeps.
+    swept = []
+    monkeypatch.setenv("LEETCOACH_NO_BROWSER", "1")
+    monkeypatch.setattr(app_module, "_existing_instance_url", lambda host, port, **kw: None)
+    monkeypatch.setattr(app_module, "_choose_port", lambda preferred, host: 5007)
+    monkeypatch.setattr(app_module, "_sweep_sandbox_temp", lambda: swept.append(1) or 0)
+    monkeypatch.setattr(app_module.storage, "migrate_tier_suffixes", lambda: [])
+    assert app_module.main(open_browser=lambda url: None, serve=lambda port: None) == 0
+    assert swept == [1]
 
 
 # --- B6 review: raw reads, decode-at-end, cleanup after kill, sweep safety --
