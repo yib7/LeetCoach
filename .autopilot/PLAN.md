@@ -225,6 +225,8 @@ console errors; MILESTONES written; branch handed to human.
 
 ## Blocked (filled in during the run)
 
+- [2026-10-08] PAUSED (usage limit) after the SP7 implementation (dc75c33..ff36e3e; orchestrator re-ran 1243 passed/1 skipped, ruff clean, node 62/62). No SP7 box ticked yet. On resume: code review over dc75c33..HEAD, browser checklist in .superpowers/sdd/sp-7-report.md on the fake harness, fix round, tick; then SP8.
+
 - [2026-09-29] MOVED TO CLOUD mid-SP3 (user request). SP3 commits: ce2bc68 (A5 bootstrap handshake), efd847e (C6 audit
   hook), f71e237 (SECURITY.md), 6f62aaa (B6 WIP, committed unreviewed; 682 passed + 1 skipped on Windows). On resume: finish or
   fix B6, then review SP3 over 2389d89..HEAD; no SP3 box is ticked yet. CLOUD CAVEATS: the cloud runner is Linux, so
