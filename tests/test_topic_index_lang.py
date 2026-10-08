@@ -142,12 +142,12 @@ def _client(tmp_path, monkeypatch, captured):
     monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path / "out"))
     real_learning, real_guided = prompts.build_learning, prompts.build_guided
 
-    def spy_learning(problem, *, language, already_learned_topics=None):
+    def spy_learning(problem, *, language, already_learned_topics=None, meta=None):
         captured.append(("learning", language, already_learned_topics))
         return real_learning(problem, language=language,
                              already_learned_topics=already_learned_topics)
 
-    def spy_guided(problem, *, tier, language, already_learned_topics=None):
+    def spy_guided(problem, *, tier, language, already_learned_topics=None, meta=None):
         captured.append(("guided", language, already_learned_topics))
         return real_guided(problem, tier=tier, language=language,
                            already_learned_topics=already_learned_topics)

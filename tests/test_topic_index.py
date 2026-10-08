@@ -201,7 +201,7 @@ def test_learning_route_passes_known_topics_to_prompt(tmp_path, monkeypatch):
     captured = {}
     real_build = app_module.prompts.build_learning
 
-    def spy_build_learning(problem, *, language, already_learned_topics=None):
+    def spy_build_learning(problem, *, language, already_learned_topics=None, meta=None):
         captured["topics"] = already_learned_topics
         return real_build(
             problem, language=language, already_learned_topics=already_learned_topics
