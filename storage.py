@@ -9,6 +9,7 @@ Directory layout (from the plan):
       learning/<problem_type>_learning/<problem>.md
       guided/<problem_type>/<problem>.md
       answers/<problem_type>/<problem>__<tier>.<ext>   (+ a sibling .md)
+      reviews/<problem_type>/<problem>__review.md      (SP7 Code Review)
 
 The single most important property is **containment**: a hostile problem name
 like ``../../etc/passwd`` (or an absolute path, or one full of backslashes) must
@@ -247,6 +248,30 @@ def save_guided(problem: str, problem_type: str, body: str) -> str:
     root = config.output_dir()
     folder = root / "guided" / slug(problem_type)
     return _write_entry(folder, _problem_name(problem), [("md", body)])[0]
+
+
+REVIEW_SUFFIX = "review"
+
+
+def save_review(problem: str, problem_type: str, body: str) -> str:
+    """Write a Code Review doc (SP7 / D5) and return its path.
+
+    -> ``output/reviews/<problem_type>/<problem>__review.md``
+    """
+    root = config.output_dir()
+    folder = root / "reviews" / slug(problem_type)
+    return _write_entry(folder, f"{_problem_name(problem)}__{REVIEW_SUFFIX}", [("md", body)])[0]
+
+
+def attempt_block(code: str, language: str) -> str:
+    """The learner's attempt as a fenced Markdown block for a saved review.
+    The fence is longer than any backtick run inside the code, so the code
+    can never close it early (and is tagged with the plain language, never
+    ``solution``)."""
+    longest = max((len(m) for m in re.findall(r"`+", code or "")), default=0)
+    ticks = "`" * max(3, longest + 1)
+    tag = slug(language) if language in _LANG_EXT else ""
+    return f"{ticks}{tag}\n{(code or '').rstrip()}\n{ticks}\n"
 
 
 def save_answer(

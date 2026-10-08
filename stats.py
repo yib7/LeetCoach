@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta
 HEATMAP_DAYS = 119  # 17 weeks
 
 MODE_LABELS = {"answer": "Answer", "answers": "Answer", "learning": "Learning",
-               "guided": "Guided", "review": "Review", "reviews": "Review"}
+               "guided": "Guided", "review": "Code Review", "reviews": "Code Review"}
 LANGUAGE_LABELS = {"python": "Python", "py": "Python", "cpp": "C++", "java": "Java"}
 _CODE_EXT = {"py": "python", "cpp": "cpp", "java": "java"}
 _SLOT = re.compile(r"__\d+$")
