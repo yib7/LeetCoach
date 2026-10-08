@@ -2053,9 +2053,18 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"error": "Not found."}), 404
         rel_path = resolved.relative_to(config.output_dir().resolve()).as_posix()
         try:
-            doc_text = resolved.read_text(encoding="utf-8", errors="replace")
+            raw_doc = resolved.read_bytes()
         except OSError:
             return jsonify({"error": "Not found."}), 404
+        # SP8 fix M2: the append reads the doc strictly (re-encoding replaced
+        # bytes would corrupt it), so a doc that is not UTF-8 is refused HERE,
+        # before a Claude call is spent on an answer that could not be saved.
+        try:
+            doc_text = raw_doc.decode("utf-8")
+        except UnicodeDecodeError:
+            return jsonify({"error": "This doc is not valid UTF-8 text, so a follow-up "
+                            "can't be added to it. Re-save it as UTF-8 and try again."}), 422
+        doc_text = doc_text.replace("\r\n", "\n").replace("\r", "\n")
         try:
             logged = problem_store.session_for_doc(rel_path)
         except Exception:  # noqa: BLE001 - no log: a legacy doc, use the fallback
@@ -2153,6 +2162,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 except FileNotFoundError:
                     raise RuntimeError(
                         "the doc was moved or deleted while Claude answered; nothing was saved"
+                    ) from None
+                except UnicodeDecodeError:
+                    raise RuntimeError(
+                        "the doc was changed to non-UTF-8 text while Claude answered; "
+                        "nothing was saved"
                     ) from None
                 except OSError as exc:
                     raise RuntimeError(
