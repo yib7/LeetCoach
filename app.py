@@ -61,6 +61,7 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 import classifier
 import claude_cli
 import config
+import flashcards
 import parsing
 import practice
 import problem_store
@@ -1273,6 +1274,51 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"cancelled": False}), 404
         event.set()  # the sandbox kills the running case within a poll tick
         return jsonify({"cancelled": True})
+
+    def _flashcard_scope():
+        """The ``problem_id`` / ``path`` filters of a flashcards request, or
+        an error response."""
+        pid = request.args.get("problem_id")
+        if pid is not None and not problem_store.valid_problem_id(pid):
+            return None, None, (jsonify({"error": "Invalid problem id."}), 400)
+        path = request.args.get("path")
+        if path is not None:
+            resolved = _resolve_library_file(path)
+            if resolved is None or resolved.suffix.lower() != ".md":
+                return None, None, (jsonify({"error": "Not found."}), 404)
+            path = resolved.relative_to(config.output_dir().resolve()).as_posix()
+        if pid is not None:
+            rec = problem_store.load_problem(pid)
+            pid = rec.get("id") if rec else pid  # an alias names its record
+        return pid, path, None
+
+    @app.get("/flashcards")
+    def flashcards_list():
+        # SP7 / D10: the cards of every doc's ## Flashcards section (newest
+        # doc first) for the in-app flip review; ?problem_id= / ?path= narrow.
+        pid, path, err = _flashcard_scope()
+        if err:
+            return err
+        root = config.output_dir().resolve()
+        cards = flashcards.collect(root, _cached_library_files(), problem_id=pid, path=path)
+        return jsonify({"cards": cards, "count": len(cards)})
+
+    @app.get("/flashcards.tsv")
+    def flashcards_tsv():
+        # SP7 / D10: the same cards as an Anki-importable TSV download.
+        pid, path, err = _flashcard_scope()
+        if err:
+            return err
+        root = config.output_dir().resolve()
+        cards = flashcards.collect(root, _cached_library_files(), problem_id=pid, path=path)
+        return Response(
+            flashcards.to_tsv(cards).encode("utf-8"),
+            content_type="text/tab-separated-values; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="leetcoach-flashcards.tsv"',
+                "Cache-Control": "no-store",
+            },
+        )
 
     @app.get("/stats")
     def stats_route():
