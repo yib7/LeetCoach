@@ -111,6 +111,7 @@ def test_probe_url_brackets_ipv6_and_maps_wildcard_hosts():
 
 def test_main_reuses_a_running_instance_and_does_not_serve(monkeypatch):
     opened, served_ports = [], []
+    monkeypatch.setattr(app_module, "_port_is_free", lambda host, port: False)
     monkeypatch.setattr(app_module, "_existing_instance_url",
                         lambda host, port, **kw: f"http://127.0.0.1:{port}/")
 
@@ -127,6 +128,7 @@ def test_main_reuses_a_running_instance_and_does_not_serve(monkeypatch):
 def test_main_reuse_respects_no_browser(monkeypatch, capsys):
     opened = []
     monkeypatch.setenv("LEETCOACH_NO_BROWSER", "1")
+    monkeypatch.setattr(app_module, "_port_is_free", lambda host, port: False)
     monkeypatch.setattr(app_module, "_existing_instance_url",
                         lambda host, port, **kw: f"http://127.0.0.1:{port}/")
     rc = app_module.main(open_browser=opened.append, serve=lambda port: None)

@@ -177,7 +177,7 @@ def test_sse_pings_while_verifying(env, monkeypatch):
 
     monkeypatch.setattr(app_module, "SSE_PING_INTERVAL", 0.05)
 
-    def slow_verify(code, problem, language):
+    def slow_verify(code, problem, language, **kwargs):
         time.sleep(0.4)
         return sandbox.VerifyResult(status="not_verified", note="no samples")
 
@@ -313,7 +313,7 @@ def test_cancel_during_verification_saves_nothing(env, monkeypatch):
     verifying = threading.Event()
     release = threading.Event()
 
-    def slow_verify(code, problem, language):
+    def slow_verify(code, problem, language, **kwargs):
         verifying.set()
         release.wait(5)
         return sandbox.VerifyResult(status="not_verified", note="no samples")
