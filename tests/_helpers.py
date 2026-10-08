@@ -36,7 +36,10 @@ def parse_sse(body: str):
             continue
         event_name = None
         data_lines = []
-        for line in block.split("\n"):
+        lines = block.split("\n")
+        if all(line.startswith(":") for line in lines):
+            continue  # an SSE comment frame (the C3 ": ping" heartbeat)
+        for line in lines:
             if line.startswith("event:"):
                 event_name = line[len("event:"):].strip()
             elif line.startswith("data:"):
