@@ -226,7 +226,10 @@ def _cross_site_rejection(method: str, path: str, headers, host_header: str, sch
 
     ``GET /`` runs the CLI sign-in probe, so a cross-site page must not be able
     to trigger it with an ``<img>``/``<iframe>``/``fetch``; only a top-level
-    navigation (the user following a link) is allowed cross-site.
+    navigation (the user following a link) is allowed cross-site. SP4 review
+    M11: ``same-site`` is treated the same way - another app on a different
+    localhost port is "same-site" (the port is not part of a site), so only
+    ``same-origin`` and ``none`` (typed URL, bookmark) load it freely.
     """
     site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
     if method in _UNSAFE_METHODS:
@@ -236,7 +239,7 @@ def _cross_site_rejection(method: str, path: str, headers, host_header: str, sch
         if origin is not None and not _same_origin(origin, host_header, scheme):
             return "Cross-origin request refused."
         return None
-    if path == "/" and site == "cross-site":
+    if path == "/" and site in ("cross-site", "same-site"):
         mode = (headers.get("Sec-Fetch-Mode") or "").strip().lower()
         dest = (headers.get("Sec-Fetch-Dest") or "").strip().lower()
         if not (mode == "navigate" and dest == "document"):
@@ -314,10 +317,14 @@ def _iter_with_heartbeat(iterable):
                     pass
 
 
-def _call_with_heartbeat(fn):
+def _call_with_heartbeat(fn, *, on_abandon=None):
     """Run the blocking ``fn()`` on a helper thread, yielding ``SSE_PING``
     every ``SSE_PING_INTERVAL`` while it works; ``return`` its result (use
-    with ``yield from`` inside an SSE generator) or re-raise its exception."""
+    with ``yield from`` inside an SSE generator) or re-raise its exception.
+
+    If the consumer stops early (the client went away: ``GeneratorExit`` at a
+    ping), ``on_abandon()`` is called so the work can be stopped instead of
+    running out its clock unobserved (SP4 review M2: the sandbox)."""
     box: dict = {}
     done = threading.Event()
 
@@ -330,8 +337,15 @@ def _call_with_heartbeat(fn):
             done.set()
 
     threading.Thread(target=work, name="leetcoach-blocking-call", daemon=True).start()
-    while not done.wait(SSE_PING_INTERVAL):
-        yield SSE_PING
+    try:
+        while not done.wait(SSE_PING_INTERVAL):
+            yield SSE_PING
+    finally:
+        if not done.is_set() and on_abandon is not None:
+            try:
+                on_abandon()
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
     if "error" in box:
         raise box["error"]
     return box["value"]
@@ -343,12 +357,18 @@ class _RunCancelled(Exception):
 
 class _RunState:
     """One in-flight /run (B14): its dedup key and the cancel hooks of every
-    Claude call it started, so ``POST /run/cancel`` can kill them all."""
+    Claude call it started, so ``POST /run/cancel`` can kill them all.
+
+    SP4 review M1: :meth:`commit` is the point of no return (the save). It and
+    :meth:`cancel` decide under one lock, so exactly one of them wins: a run
+    cancelled first saves nothing, and a cancel that arrives after the commit
+    is refused (the run finishes and reports ``done``)."""
 
     def __init__(self, key) -> None:
         self.key = key
         self._lock = threading.Lock()
         self._cancelled = False
+        self._committed = False
         self._hooks: list = []
 
     @property
@@ -362,16 +382,28 @@ class _RunState:
         if fire:
             hook()
 
-    def cancel(self) -> None:
+    def cancel(self) -> bool:
+        """Cancel the run; ``False`` (and nothing fired) if it already
+        committed to saving."""
         with self._lock:
+            if self._committed:
+                return False
             self._cancelled = True
             hooks = list(self._hooks)
         for hook in hooks:
             hook()
+        return True
 
     def check(self) -> None:
         if self._cancelled:
             raise _RunCancelled()
+
+    def commit(self) -> None:
+        """Final cancel check before the save; after it, cancel() refuses."""
+        with self._lock:
+            if self._cancelled:
+                raise _RunCancelled()
+            self._committed = True
 
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -388,7 +420,24 @@ def _sweep_sandbox_temp() -> int:
         return 0
 
 
-def _choose_port(preferred: int, host: str, *, span: int = 20) -> int:
+PORT_SPAN = 20  # how far past PORT the fallback (and the instance probe) looks
+
+
+def _port_is_free(host: str, port: int) -> bool:
+    """Whether a fresh ``SOCK_STREAM`` socket (no ``SO_REUSEADDR``) can bind
+    ``host:port`` right now. The socket is always closed again."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _choose_port(preferred: int, host: str, *, span: int = PORT_SPAN) -> int:
     """Pick a bindable TCP port on ``host``, preferring ``preferred`` (SP-A).
 
     Probe-bind a fresh ``SOCK_STREAM`` socket (address family derived from ``host``,
@@ -402,20 +451,10 @@ def _choose_port(preferred: int, host: str, *, span: int = 20) -> int:
     hard crash on an occupied port into a graceful fallback."""
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
 
-    def _binds(port: int) -> bool:
-        sock = socket.socket(family, socket.SOCK_STREAM)
-        try:
-            sock.bind((host, port))
-            return True
-        except OSError:
-            return False
-        finally:
-            sock.close()
-
     # Clamp the scan so a candidate never exceeds the valid port range (a high
     # PORT would otherwise raise OverflowError, not OSError, past 65535).
     for candidate in range(preferred, min(preferred + span, 65535) + 1):
-        if _binds(candidate):
+        if _port_is_free(host, candidate):
             return candidate
     # Whole span occupied (or preferred out of range) — OS-assigned ephemeral port.
     sock = socket.socket(family, socket.SOCK_STREAM)
@@ -452,13 +491,14 @@ def _verification_line(result) -> str:
     return f"⚠ not auto-verified ({note})" if note else "⚠ not auto-verified"
 
 
-def _verify_code(code: str, problem: str, language: str):
+def _verify_code(code: str, problem: str, language: str, *, cancel=None):
     """Best-effort sandbox verification of pre-extracted ``code`` (the caller
     extracts exactly once — audit6 P2-13). Returns ``(result, verdict_line)``;
     never raises (a verifier hiccup must not break a run). ``result`` may be
-    ``None`` if verification couldn't even start."""
+    ``None`` if verification couldn't even start. ``cancel`` (a
+    ``threading.Event``) stops the sandbox early (SP4 review M2)."""
     try:
-        result = sandbox.verify_answer(code, problem, language)
+        result = sandbox.verify_answer(code, problem, language, cancel=cancel)
         return result, _verification_line(result)
     except Exception as exc:  # noqa: BLE001 - verification is strictly best-effort
         return None, f"⚠ not auto-verified (verifier error: {exc})"
@@ -877,6 +917,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         model = (data.get("model") or "").strip().lower()
         if model and model not in config.ALLOWED_MODEL_ALIASES:
             return jsonify({"error": f"Unknown model {model!r}."}), 400
+        # SP4 review I1: the picker's highlighted button for a pinned id in
+        # .env (claude-sonnet-4-5 -> "sonnet") runs the pinned id, not the
+        # generic alias.
+        model = config.resolve_run_model(model)
         # B14: the client names its run so Stop can POST /run/cancel; a
         # client that doesn't gets a server-made id (echoed in X-Run-Id).
         run_id = data.get("run_id")
@@ -936,7 +980,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     **study_kwargs,
                 )
                 # B14: POST /run/cancel kills this call's process tree.
-                state.add_cancel_hook(lambda: _cancel_call(call))
+                state.add_cancel_hook(lambda: _cancel_call(call, "study call"))
                 # C3: pings keep flowing while Claude thinks in silence.
                 for delta in _iter_with_heartbeat(call):
                     if delta is _HEARTBEAT:
@@ -972,13 +1016,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         cls_calls_lock = threading.Lock()
         cls_cancelled = [False]
 
-        def _cancel_call(call) -> None:
+        def _cancel_call(call, what: str = "classifier call") -> None:
             cancel = getattr(call, "cancel", None)
             if callable(cancel):
                 try:
                     cancel()
                 except Exception:  # noqa: BLE001 - cancelling is best-effort
-                    app.logger.exception("could not cancel the classifier call")
+                    app.logger.exception("could not cancel the %s", what)
 
         def _classifier_run_fn(prompt, **kwargs):
             call = run_fn(prompt, **kwargs)
@@ -1033,6 +1077,20 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     f"Could not save to the usual library folder ({exc}). "
                     f"Saved to {path} instead."
                 )
+
+        def _verify(code):
+            """Sandbox-verify ``code`` with heartbeats (C3). SP4 review M2: a
+            Stop (POST /run/cancel) or a client disconnect sets ``stop``, and
+            the sandbox kills the running solution at once instead of letting
+            it run out its timeout unobserved."""
+            stop = threading.Event()
+            state.add_cancel_hook(stop.set)
+            verified = yield from _call_with_heartbeat(
+                lambda: _verify_code(code, problem, language, cancel=stop),
+                on_abandon=stop.set,
+            )
+            state.check()  # cancelled while verifying: report that, not a verdict
+            return verified
 
         def event_stream():
             save_warning = None
@@ -1111,9 +1169,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     # SP5: best-effort sample-I/O verification. Stream a short
                     # verdict line; the saved reasoning .md gets the verdict
                     # PLUS the per-sample failure detail (audit6 P2-9).
-                    result, verdict = yield from _call_with_heartbeat(
-                        lambda: _verify_code(code, problem, language)
-                    )
+                    result, verdict = yield from _verify(code)
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")
                     reasoning = (
@@ -1122,7 +1178,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     )
 
                     cls = yield from _classification()  # join before the save
-                    state.check()  # B14: a cancelled run saves nothing
+                    state.commit()  # B14 / M1: cancel wins only before this point
 
                     def _save_answer():
                         code_path, reasoning_path = storage.save_answer(
@@ -1154,7 +1210,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     )
                     yield from _stream_and_accumulate(prompt)
                     cls = yield from _classification()  # join before the save
-                    state.check()  # B14: a cancelled run saves nothing
+                    state.commit()  # B14 / M1: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
                         lambda: [storage.save_learning(problem, cls.problem_type, out[0])],
                         out[0],
@@ -1177,9 +1233,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     # extract the code from the full piped doc exactly once
                     # (P2-13), and save verdict + failure detail (P2-9).
                     code = parsing.extract_code(body, language)
-                    result, verdict = yield from _call_with_heartbeat(
-                        lambda: _verify_code(code, problem, language)
-                    )
+                    result, verdict = yield from _verify(code)
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")
                     saved = (
@@ -1187,7 +1241,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         + _verification_detail(result)
                     )
                     cls = yield from _classification()  # join before the save
-                    state.check()  # B14: a cancelled run saves nothing
+                    state.commit()  # B14 / M1: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
                         lambda: [storage.save_guided(problem, cls.problem_type, saved)],
                         saved,
@@ -1263,7 +1317,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             state = _runs.get(run_id)
         if state is None:
             return jsonify({"cancelled": False}), 404
-        state.cancel()
+        if not state.cancel():
+            # M1: too late - the run already committed to saving. It finishes
+            # (and frees its own slot); the client keeps reading for `done`.
+            return jsonify({"cancelled": False})
         _release_run(run_id, state)
         return jsonify({"cancelled": True})
 
@@ -1364,6 +1421,46 @@ def _existing_instance_url(host: str, port: int, *, timeout: float = 1.0, opener
     return None
 
 
+def _find_existing_instance(
+    host: str,
+    preferred: int,
+    *,
+    span: int = PORT_SPAN,
+    timeout: float = 1.0,
+    fallback_timeout: float = 0.5,
+    budget: float = 3.0,
+    opener=None,
+    is_free=None,
+    clock=time.monotonic,
+):
+    """SP4 review M10: the URL of a LeetCoach already serving anywhere in the
+    port span :func:`_choose_port` would fall back across, or ``None``.
+
+    An earlier instance that found ``preferred`` taken by another app is on a
+    fallback port, so probing only ``preferred`` would start a second server.
+    A port that is free (nothing listening) is skipped without a request -
+    on Windows a connect to a closed loopback port can take a second or two
+    to be refused. Each probe has a short timeout (``timeout`` for the
+    preferred port, ``fallback_timeout`` for the rest) and the whole scan an
+    overall ``budget``, so a port held by something that never answers can't
+    hang the launch."""
+    is_free = is_free or _port_is_free
+    deadline = clock() + budget
+    for port in range(preferred, min(preferred + span, 65535) + 1):
+        if is_free(host, port):
+            continue
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        per_probe = timeout if port == preferred else fallback_timeout
+        url = _existing_instance_url(
+            host, port, timeout=min(per_probe, remaining), opener=opener
+        )
+        if url:
+            return url
+    return None
+
+
 def _browser_enabled() -> bool:
     return os.environ.get("LEETCOACH_NO_BROWSER", "").lower() not in {"1", "true", "yes"}
 
@@ -1371,15 +1468,16 @@ def _browser_enabled() -> bool:
 def main(*, open_browser=webbrowser.open, serve=None) -> int:
     """Launch LeetCoach (``python app.py`` / the desktop launcher).
 
-    D16/B11: if LeetCoach is already running on the preferred port, open the
-    browser there and exit - a second double-click must not start a second
-    server on the next free port sharing ``output/`` (the per-process locks
-    don't coordinate across processes). Only when nothing (or something other
-    than LeetCoach) holds the port does it fall back to a nearby free port.
+    D16/B11: if LeetCoach is already running on the preferred port - or on a
+    fallback port in the span (M10) - open the browser there and exit - a
+    second double-click must not start a second server on the next free port
+    sharing ``output/`` (the per-process locks don't coordinate across
+    processes). Only when no LeetCoach answers does it fall back to a nearby
+    free port.
     ``open_browser`` / ``serve`` are injectable for tests.
     """
     host = HOST
-    existing = _existing_instance_url(host, PORT)
+    existing = _find_existing_instance(host, PORT)
     if existing:
         print(f"LeetCoach is already running at  {existing}  - opening it.")
         if _browser_enabled():

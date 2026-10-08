@@ -139,6 +139,10 @@ _READY = READY
 _CAPS_UNAVAILABLE_NOTE = "sandbox caps unavailable (job object could not be applied)"
 _RLIMITS_UNAVAILABLE_NOTE = "sandbox caps unavailable (resource limits could not be applied)"
 
+# SP4 review M2: the verdict when the run was cancelled (Stop, or the client
+# went away) while verifying; the child's tree is killed at once.
+_CANCELLED_NOTE = "verification cancelled"
+
 # "LeetCoach sandbox: <event> is blocked (<why>)" -- the audit hook's message.
 _BLOCKED_RE = re.compile(
     re.escape(DENY_PREFIX) + r" (?P<event>.+?) is blocked(?: \((?P<why>[^()\n]*)\))?"
@@ -783,6 +787,7 @@ def verify_python(
     timeout: float = 10.0,
     problem_text: str = "",
     audit_hook: bool = True,
+    cancel: threading.Event | None = None,
 ) -> VerifyResult:
     """Run ``code`` through the trusted bootstrap (A5; see
     :func:`_child_python`), feeding ``stdin_text`` on stdin,
@@ -811,7 +816,13 @@ def verify_python(
     exercise the other containment layers (job caps, tree kill, grandchild
     pipe capture) by spawning a grandchild on purpose; production callers
     never pass it.
+
+    ``cancel`` (SP4 review M2): an optional ``threading.Event``. Once set,
+    nothing new is spawned and a running child's tree is killed within one
+    poll tick; the result is ``not_verified`` ("verification cancelled").
     """
+    if cancel is not None and cancel.is_set():
+        return VerifyResult(status="not_verified", note=_CANCELLED_NOTE)
     run_dir = tempfile.mkdtemp(prefix=_RUN_DIR_PREFIX)
     job_handle = None
     feeder = None
@@ -905,6 +916,11 @@ def verify_python(
         if waiter.is_alive() or waiter.data != _READY:
             feeder.abort()
             return _pre_go_result(proc, waiter, err_reader, timeout, stdin_text, expected_stdout)
+        if cancel is not None and cancel.is_set():
+            # Cancelled during startup: the solution never gets its go byte.
+            feeder.abort()
+            _discard_child(proc)
+            return VerifyResult(status="not_verified", note=_CANCELLED_NOTE)
 
         feeder.release()
         out_reader = _CappedReader(proc.stdout)
@@ -913,8 +929,12 @@ def verify_python(
         # A short poll loop (not proc.wait(timeout)) so the overflow flag can
         # interrupt the wait; 50ms granularity is plenty for a verifier.
         timed_out = False
+        cancelled = False
         while proc.poll() is None:
             if out_reader.overflowed.is_set() or err_reader.overflowed.is_set():
+                break
+            if cancel is not None and cancel.is_set():
+                cancelled = True
                 break
             if time.monotonic() >= deadline:
                 timed_out = True
@@ -959,6 +979,9 @@ def verify_python(
         # couldn't show either).
         stdout = out_reader.text()
         stderr = err_reader.text()
+
+        if cancelled:
+            return VerifyResult(status="not_verified", note=_CANCELLED_NOTE)
 
         if timed_out:
             return VerifyResult(
@@ -1194,7 +1217,9 @@ _COMPILERS = {
 }
 
 
-def verify_answer(code: str, problem_text: str, language: str) -> VerifyResult:
+def verify_answer(
+    code: str, problem_text: str, language: str, *, cancel: threading.Event | None = None
+) -> VerifyResult:
     """Verify a generated solution against the problem's sample I/O.
 
     * **python** — first-class: parse samples from ``problem_text``, run ``code``
@@ -1207,7 +1232,8 @@ def verify_answer(code: str, problem_text: str, language: str) -> VerifyResult:
       auto-run unsupported). Either way it's "not auto-verified", never a fail.
 
     Never raises: any unexpected failure degrades to ``not_verified`` so a
-    verifier bug can't break the study run.
+    verifier bug can't break the study run. ``cancel`` is passed through to
+    :func:`verify_python` (SP4 review M2).
     """
     try:
         lang = (language or "").strip().lower()
@@ -1221,7 +1247,11 @@ def verify_answer(code: str, problem_text: str, language: str) -> VerifyResult:
                     status="not_verified", note="no sample I/O found in problem"
                 )
             return _verify_python_samples(
-                code, samples, timeout=config.verify_timeout(), problem_text=problem_text
+                code,
+                samples,
+                timeout=config.verify_timeout(),
+                problem_text=problem_text,
+                cancel=cancel,
             )
 
         if lang in _COMPILERS:
@@ -1251,7 +1281,12 @@ def verify_answer(code: str, problem_text: str, language: str) -> VerifyResult:
 
 
 def _verify_python_samples(
-    code: str, samples: list, *, timeout: float = 10.0, problem_text: str = ""
+    code: str,
+    samples: list,
+    *,
+    timeout: float = 10.0,
+    problem_text: str = "",
+    cancel: threading.Event | None = None,
 ) -> VerifyResult:
     """Run ``code`` against each parsed sample and aggregate the verdict.
 
@@ -1268,9 +1303,13 @@ def _verify_python_samples(
     errored = 0
     detail: list = []
     unverified_note = ""
+    # Only pass ``cancel`` when there is one, so a verify_python stand-in
+    # without the parameter keeps working.
+    extra = {"cancel": cancel} if cancel is not None else {}
     for idx, s in enumerate(samples, start=1):
         r = verify_python(
-            code, s.stdin, s.expected_stdout, timeout=timeout, problem_text=problem_text
+            code, s.stdin, s.expected_stdout, timeout=timeout, problem_text=problem_text,
+            **extra,
         )
         if r.status == "not_verified":
             # The sandbox refused to run it (caps unavailable): later samples
