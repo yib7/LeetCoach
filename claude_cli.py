@@ -87,6 +87,12 @@ NO_RESULT_MESSAGE = (
 )
 
 
+class ClaudeTimeoutError(ClaudeUnavailableError):
+    """Raised when the wall-clock watchdog killed a run that ran too long.
+    The D6 follow-up does not fall back to a fresh call on it (SP8 fix M4):
+    a second full call would most likely time out too, doubling the wait."""
+
+
 class ResumeUnsupportedError(ClaudeUnavailableError):
     """Raised (lazily, before anything is spawned) when a caller asks to
     ``--resume`` a session but the installed CLI does not list that flag, or
@@ -1024,7 +1030,7 @@ def _raise_for_outcome(
         )
         if stderr.strip():
             message += f"\n{stderr.strip()}"
-        raise ClaudeUnavailableError(message)
+        raise ClaudeTimeoutError(message)
     if failed:
         stderr_file.seek(0)
         stderr = stderr_file.read().decode("utf-8", "replace").strip()
