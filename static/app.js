@@ -3272,15 +3272,26 @@
         returnFocus: prGiveup,
       }).then(function (yes) {
         if (!yes || practice !== p) return;
-        var path = core.latestDocFor(p.rec);
-        if (!path) { notify("No saved doc for this problem yet.", "error"); return; }
-        fetch("/library/file?path=" + encodeURIComponent(path))
-          .then(function (resp) {
-            if (!resp.ok) throw new Error("HTTP " + resp.status);
-            return resp.text();
-          })
+        // SP8 fix M7: skip docs no longer in the library listing, and fall
+        // back to the next candidate when one 404s (deleted since the listing).
+        var candidates = core.docCandidatesFor(p.rec, libListed ? libByPath : null);
+        var NO_SOLUTION = "No saved solution exists for this problem - its saved docs were deleted " +
+          "or it has none yet.";
+        var path = "";
+        function fetchNext(i) {
+          if (i >= candidates.length) return Promise.resolve(null);
+          return fetch("/library/file?path=" + encodeURIComponent(candidates[i]))
+            .then(function (resp) {
+              if (resp.status === 404) return fetchNext(i + 1);
+              if (!resp.ok) throw new Error("HTTP " + resp.status);
+              path = candidates[i];
+              return resp.text();
+            });
+        }
+        fetchNext(0)
           .then(function (text) {
             if (practice !== p) return;
+            if (text === null) { notify(NO_SOLUTION); announce(NO_SOLUTION); return; }
             p.peeked = true;
             renderGradeDescs();
             if (prSolutionPath) prSolutionPath.textContent = path;
