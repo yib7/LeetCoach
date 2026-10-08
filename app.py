@@ -1069,6 +1069,14 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # some other app) on the preferred port. No probe, no filesystem.
         return jsonify({"app": "leetcoach", "version": VERSION})
 
+    @app.get("/favicon.ico")
+    def favicon():
+        # The page links /static/favicon.svg, but a browser still asks for
+        # /favicon.ico on pages without that <link> (a JSON route, a text/plain
+        # library file), which used to 404 in the console. Same-origin, so the
+        # CSP's img-src 'self' allows it.
+        return app.send_static_file("favicon.svg")
+
     @app.post("/config/model")
     def config_model():
         # Persist the in-app model picker's choice as the default. The alias is
