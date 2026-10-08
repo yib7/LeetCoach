@@ -148,9 +148,12 @@ RUN_SIBLING_EXTENSIONS = (".md", ".py", ".cpp", ".java", ".txt")
 QUICK_ASK_MAX_QUESTION = 500
 QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
 
-# GET /problems lists these fields of each record (+ run_count).
+# GET /problems lists these fields of each record - everything but the
+# (possibly long) statement and notes - plus ``run_count`` (saved runs: the
+# run-log entries of the problem, merged aliases included) and ``file_count``
+# (len(runs): the library files those runs produced; an Answer run adds two).
 PROBLEM_SUMMARY_FIELDS = ("id", "number", "title", "difficulty", "pattern",
-                          "created", "updated", "review")
+                          "created", "updated", "review", "runs", "aliases")
 
 # Allowlists — never pass an arbitrary string downstream to prompts/storage.
 MODES = ("answer", "learning", "guided")
@@ -609,7 +612,15 @@ def _library_signature(root: Path) -> tuple:
                         stack.append(Path(entry.path))
         except OSError:
             sig.append((str(folder), None))
-    return tuple(sorted(sig, key=lambda item: item[0]))
+    out = tuple(sorted(sig, key=lambda item: item[0]))
+    # SP6 fix M4: the hidden metadata store (run log + problem records) feeds
+    # each file's verdict / difficulty, so an append made outside the app
+    # (another instance, a hand edit) must invalidate the listing too.
+    try:
+        meta = problem_store.store_signature(root=root)
+    except Exception:  # noqa: BLE001 - a signature must never fail the listing
+        meta = None
+    return out + (("<meta>", meta),)
 
 
 # SP5 B18: the sandbox verdict a saved doc recorded in its trailing
@@ -720,6 +731,11 @@ def _library_files(root: Path) -> list[dict]:
                 entry["difficulty"] = logged["difficulty"]
             if logged.get("problem_id"):
                 entry["problem_id"] = logged["problem_id"]
+            # SP6 fix O3: the record's own title / number for display.
+            if logged.get("title"):
+                entry["title"] = logged["title"]
+            if isinstance(logged.get("number"), int):
+                entry["number"] = logged["number"]
             if path.suffix.lower() == ".md" and logged.get("verdict"):
                 entry["verdict"] = logged["verdict"]
         elif path.suffix.lower() == ".md":
@@ -1068,11 +1084,22 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     def problems():
         # SP6 / D1: every problem record, without the (possibly long)
         # statement; GET /problems/<id> has the full record.
+        # SP6 fix O1: ``runs`` (the record's library paths) is included;
+        # ``run_count`` counts saved runs from the log, ``file_count`` files.
+        counts: dict = {}
+        for entry in problem_store.read_runs():
+            pid = entry.get("problem_id")
+            if isinstance(pid, str):
+                counts[pid] = counts.get(pid, 0) + 1
         listing = []
         for rec in problem_store.list_problems():
             item = {k: rec.get(k) for k in PROBLEM_SUMMARY_FIELDS}
-            runs = rec.get("runs")
-            item["run_count"] = len(runs) if isinstance(runs, list) else 0
+            runs = rec.get("runs") if isinstance(rec.get("runs"), list) else []
+            aliases = rec.get("aliases") if isinstance(rec.get("aliases"), list) else []
+            item["runs"] = runs
+            item["aliases"] = aliases
+            item["run_count"] = sum(counts.get(i, 0) for i in {rec.get("id"), *aliases})
+            item["file_count"] = len(runs)
             listing.append(item)
         return jsonify({"problems": listing})
 
@@ -1081,7 +1108,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         rec = problem_store.load_problem(pid)  # None for an invalid id too
         if rec is None:
             return jsonify({"error": "Not found."}), 404
-        log = [e for e in problem_store.read_runs() if e.get("problem_id") == pid]
+        # An alias (an id merged into this record) resolves to the record.
+        log = problem_store.runs_for(pid)
         return jsonify({**rec, "log": log})
 
     @app.get("/stats")
@@ -1330,7 +1358,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     problem,
                     mode=mode,
                     language=language,
-                    tier=None if mode == "learning" else tier,
+                    tier=tier if mode == "answer" else None,  # O2: Answer only
                     model=run_meta.get("model") or model or config.model(),
                     verdict=verdict_from_line(verification),
                     paths=paths,

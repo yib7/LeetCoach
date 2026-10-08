@@ -7,27 +7,45 @@ segment is hidden):
     .leetcoach/problems/<problem_id>.json   one record per problem
     .leetcoach/runs.jsonl                    one JSON object per saved run
 
-A **problem record** is ``{id, number, title, difficulty, pattern, statement,
-created, updated, notes, review: {box, due, history[]}, runs[]}`` where
-``runs`` lists the library-relative paths every saved run of it produced.
-Records are rewritten through :func:`fsutil.atomic_write_text`.
+A **problem record** is ``{id, number, title, difficulty, difficulty_source,
+pattern, statement, created, updated, notes, review: {box, due, history[]},
+runs[], aliases[]}`` where ``runs`` lists the library-relative paths every
+saved run of it produced (files, so an Answer run adds two), ``aliases`` the
+older ids merged into it (an un-numbered ``two_sum`` record folds into
+``1-two_sum`` once a paste gives the number) and ``difficulty_source`` is
+``"paste"`` or ``"doc"`` (a doc-header guess; a later pasted difficulty
+replaces it). Records are rewritten through :func:`fsutil.atomic_write_text`.
 
 A **run-log entry** is ``{ts, problem_id, mode, language, tier, model,
 verdict, files, session_id, duration_s, pattern}``. The log is append-only:
 each record is ONE line, written under a lock (a thread lock plus an OS file
 lock, so a second process can't interleave), flushed and fsynced. The reader
 is tolerant - a torn last line (a crash mid-write) or any other unparsable
-line is skipped, and the next append starts on a fresh line.
+line is skipped, and the next append starts on a fresh line. The log is the
+source of truth: a run's line is appended BEFORE its record is updated, and a
+failing record write never loses the line. A run that saved no files is not
+logged. ``tier`` is only kept for Answer runs (``null`` otherwise).
+
+The parsed log and a light record index (id / number / title / difficulty -
+never the statement) are cached per library root and keyed on the files'
+``(mtime, size)``, so an append made outside this process is picked up on
+the next read; :func:`store_signature` exposes that key for the app's
+listing cache.
 
 ``problem_id`` = ``<number>-<slug>`` when a number is parsed from the paste,
 else the slug (:func:`storage.slug`: NFKD transliteration, hash suffix when
-nothing ASCII survives). Number / title / difficulty come from the paste,
-locally - no network.
+nothing ASCII survives). Generic first lines (``Description``, ``Problem:``,
+punctuation, ``untitled``) are skipped when looking for the title; a paste
+with no usable title gets a short statement-hash suffix so unrelated
+problems never share a record. Number / title / difficulty come from the
+paste, locally - no network.
 """
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -66,8 +84,18 @@ _DIFFICULTY_LINE = re.compile(
 _DOC_TITLE = re.compile(r"^#\s+(\d{1,5})\.\s+\S")
 _DOC_DIFFICULTY = re.compile(r"\bDifficulty:\s*(easy|medium|hard)\b", re.IGNORECASE)
 _ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,99}")
+# M2: first lines that name no problem - skipped when looking for the title.
+_GENERIC_LINE = re.compile(
+    r"^(?:(?:the\s+)?problem(?:\s+(?:statement|description))?|description|question|title"
+    r"|untitled|statement)\s*[:.\-]?\s*$",
+    re.IGNORECASE,
+)
+_LABELED_TITLE = re.compile(r"^(?:problem|title|question)\s*[:\-]\s*(\S.*)$", re.IGNORECASE)
+_NO_WORD = re.compile(r"^[\W_]*$")
+_HASH_LEN = 6
 
 _LOCK = threading.Lock()
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,24 +103,50 @@ class ParsedProblem:
     number: int | None
     title: str
     difficulty: str | None
+    # M2: no usable title line - the id gets ``digest`` (a statement hash).
+    generic: bool = False
+    digest: str = ""
 
 
 def _difficulty(word: str | None) -> str | None:
     return word.capitalize() if word else None
 
 
+def _generic(line: str) -> bool:
+    return bool(_GENERIC_LINE.match(line)) or bool(_NO_WORD.match(line))
+
+
 def parse_problem(text: str) -> ParsedProblem:
     """Number, title and difficulty of a pasted problem (all best-effort).
 
-    The title is the first non-blank line (markdown ``#`` stripped); a leading
-    ``<n>.`` / ``<n>)`` / ``<n>:`` is the LeetCode number. The difficulty is a
+    The title is the first non-blank line that is not generic (markdown ``#``
+    stripped; ``Description`` / ``Problem:`` / punctuation-only lines are
+    skipped and a ``Problem: <title>`` label is dropped); a leading ``<n>.``
+    / ``<n>)`` / ``<n>:`` is the LeetCode number. The difficulty is a
     trailing ``(Easy)`` on the title, or a line within the next few that is
-    just ``Easy`` / ``Medium`` / ``Hard`` (optionally ``Difficulty: ...``)."""
+    just ``Easy`` / ``Medium`` / ``Hard`` (optionally ``Difficulty: ...``).
+    A paste with no usable title is ``generic`` and carries a short hash of
+    its whole text (``digest``)."""
     lines = [ln.strip() for ln in (text or "").replace("\r\n", "\n").split("\n")]
     lines = [ln for ln in lines if ln]
     if not lines:
         return ParsedProblem(None, "", None)
-    first = lines[0].lstrip("#").strip()
+    start = None
+    first = ""
+    for i, line in enumerate(lines):
+        cand = line.lstrip("#").strip()
+        if _generic(cand):
+            continue
+        m = _LABELED_TITLE.match(cand)
+        if m:
+            cand = m.group(1).strip()
+            if _generic(cand):
+                continue
+        start, first = i, cand
+        break
+    if start is None:
+        digest = hashlib.sha1(" ".join(lines).encode("utf-8")).hexdigest()[:_HASH_LEN]
+        return ParsedProblem(None, "", None, generic=True, digest=digest)
     number = None
     m = _NUMBERED_TITLE.match(first)
     if m:
@@ -104,7 +158,7 @@ def parse_problem(text: str) -> ParsedProblem:
         difficulty = _difficulty(m.group(1))
         first = first[: m.start()].strip()
     if difficulty is None:
-        for line in lines[1 : 1 + _DIFFICULTY_SCAN]:
+        for line in lines[start + 1 : start + 1 + _DIFFICULTY_SCAN]:
             m = _DIFFICULTY_LINE.match(line)
             if m:
                 difficulty = _difficulty(m.group(1))
@@ -131,6 +185,8 @@ def parse_doc_header(doc: str) -> tuple[int | None, str | None]:
 
 
 def problem_id(parsed: ParsedProblem) -> str:
+    if parsed.generic:
+        return f"untitled_{parsed.digest or '0' * _HASH_LEN}"
     base = storage.slug(parsed.title)
     return f"{parsed.number}-{base}" if parsed.number is not None else base
 
@@ -235,13 +291,64 @@ def append_run(entry: dict, *, root=None) -> None:
         _append_locked(meta, entry)
 
 
-def read_runs(*, root=None) -> list[dict]:
-    """Every parsable run-log entry, oldest first. Torn / garbage lines and
-    non-object lines are skipped; a missing log is an empty list."""
+# --- caches (M4) ------------------------------------------------------------------
+# Keyed on the files' (mtime_ns, size): an append or a record rewrite made by
+# another process (or by hand) changes the key, so nothing stale is served.
+
+_CACHE_CAP = 64
+_cache_lock = threading.Lock()
+_log_cache: dict[str, tuple] = {}     # log path -> (sig, entries)
+_index_cache: dict[str, tuple] = {}   # problems dir -> (sig, light index)
+_path_cache: dict[str, tuple] = {}    # meta dir -> (store sig, path index)
+
+
+def _cache_put(cache: dict, key: str, value: tuple) -> None:
+    with _cache_lock:
+        if key not in cache and len(cache) >= _CACHE_CAP:
+            cache.clear()
+        cache[key] = value
+
+
+def _cache_get(cache: dict, key: str, sig):
+    with _cache_lock:
+        hit = cache.get(key)
+    return hit[1] if hit is not None and hit[0] == sig else None
+
+
+def _file_sig(path: Path):
     try:
-        raw = (meta_dir(root) / RUNS_FILE).read_bytes()
+        st = path.stat()
     except OSError:
-        return []
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _records_sig(folder: Path) -> tuple:
+    items = []
+    try:
+        with os.scandir(folder) as entries:
+            for e in entries:
+                if not e.name.endswith(".json"):
+                    continue
+                try:
+                    st = e.stat()
+                except OSError:
+                    continue
+                items.append((e.name, st.st_mtime_ns, st.st_size))
+    except OSError:
+        return ()
+    return tuple(sorted(items))
+
+
+def store_signature(*, root=None) -> tuple:
+    """A cheap freshness key for the whole metadata store: the run log's
+    ``(mtime, size)`` plus every record file's. Changes on any append or
+    record rewrite, including ones made outside this process."""
+    meta = meta_dir(root)
+    return (_file_sig(meta / RUNS_FILE), _records_sig(meta / PROBLEMS_DIR))
+
+
+def _parse_log(raw: bytes) -> list[dict]:
     entries = []
     for line in raw.decode("utf-8", errors="replace").split("\n"):
         line = line.strip()
@@ -256,7 +363,32 @@ def read_runs(*, root=None) -> list[dict]:
     return entries
 
 
+def read_runs(*, root=None) -> list[dict]:
+    """Every parsable run-log entry, oldest first. Torn / garbage lines and
+    non-object lines are skipped; a missing log is an empty list. Cached on
+    the log's ``(mtime, size)`` - treat the returned dicts as read-only."""
+    path = meta_dir(root) / RUNS_FILE
+    sig = _file_sig(path)
+    if sig is None:
+        return []
+    hit = _cache_get(_log_cache, str(path), sig)
+    if hit is not None:
+        return list(hit)
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    entries = _parse_log(raw)
+    # ``sig`` was taken before the read: a line appended meanwhile changes the
+    # key, so the next call re-reads rather than trusting this snapshot.
+    _cache_put(_log_cache, str(path), (sig, tuple(entries)))
+    return entries
+
+
 # --- problem records --------------------------------------------------------------
+
+_LIGHT_FIELDS = ("id", "number", "title", "difficulty")
+
 
 def _record_path(pid: str, root=None) -> Path:
     return meta_dir(root) / PROBLEMS_DIR / f"{pid}.json"
@@ -270,10 +402,43 @@ def _read_record(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def record_index(*, root=None) -> dict[str, dict]:
+    """``{id: {id, number, title, difficulty}}`` for every record, plus each
+    merged-away alias pointing at its record's entry. Light on purpose (no
+    statement); cached on the record files' ``(mtime, size)``. Read-only."""
+    folder = meta_dir(root) / PROBLEMS_DIR
+    sig = _records_sig(folder)
+    hit = _cache_get(_index_cache, str(folder), sig)
+    if hit is not None:
+        return hit
+    index: dict[str, dict] = {}
+    aliases: dict[str, dict] = {}
+    for name, _, _ in sig:
+        rec = _read_record(folder / name)
+        if rec is None or not valid_problem_id(rec.get("id")):
+            continue
+        light = {k: rec.get(k) for k in _LIGHT_FIELDS}
+        index[rec["id"]] = light
+        for alias in rec.get("aliases") or ():
+            if valid_problem_id(alias):
+                aliases[alias] = light
+    for alias, light in aliases.items():
+        index.setdefault(alias, light)
+    _cache_put(_index_cache, str(folder), (sig, index))
+    return index
+
+
 def load_problem(pid: str, *, root=None) -> dict | None:
+    """The record ``pid`` - or the record it was merged into (an alias)."""
     if not valid_problem_id(pid):
         return None
-    return _read_record(_record_path(pid, root))
+    rec = _read_record(_record_path(pid, root))
+    if rec is not None:
+        return rec
+    light = record_index(root=root).get(pid)
+    if light and light.get("id") != pid and valid_problem_id(light.get("id")):
+        return _read_record(_record_path(light["id"], root))
+    return None
 
 
 def list_problems(*, root=None) -> list[dict]:
@@ -290,6 +455,16 @@ def list_problems(*, root=None) -> list[dict]:
     return out
 
 
+def runs_for(pid: str, *, root=None) -> list[dict]:
+    """The run-log entries of problem ``pid``, its merged aliases included."""
+    rec = load_problem(pid, root=root)
+    ids = {pid}
+    if rec is not None:
+        ids.add(rec.get("id"))
+        ids.update(a for a in rec.get("aliases") or () if isinstance(a, str))
+    return [e for e in read_runs(root=root) if e.get("problem_id") in ids]
+
+
 def _preserve_corrupt(path: Path) -> None:
     if not path.exists():
         return
@@ -299,17 +474,97 @@ def _preserve_corrupt(path: Path) -> None:
         pass
 
 
-def _upsert(meta: Path, pid: str, parsed: ParsedProblem, *, statement: str, pattern: str,
+def _resolve(meta: Path, pasted: ParsedProblem) -> tuple[str, str | None]:
+    """``(problem_id, id to merge into it or None)`` for a paste (M1).
+
+    A numbered paste (``1. Two Sum``) adopts an earlier un-numbered record of
+    the same slug (``two_sum``) - unless that one already carries a different
+    number. An un-numbered paste joins the single numbered record with its
+    slug when there is exactly one. Generic (hashed) ids never merge."""
+    pid = problem_id(pasted)
+    if pasted.generic:
+        return pid, None
+    folder = meta / PROBLEMS_DIR
+    slug = storage.slug(pasted.title)
+    if pasted.number is not None:
+        if slug != pid and (folder / f"{slug}.json").is_file():
+            old = _read_record(folder / f"{slug}.json")
+            if old is not None and old.get("number") in (None, pasted.number):
+                return pid, slug
+        return pid, None
+    if (folder / f"{pid}.json").is_file():
+        return pid, None
+    numbered = re.compile(r"\d{1,5}-" + re.escape(slug))
+    try:
+        matches = sorted(p.stem for p in folder.glob(f"*-{slug}.json")
+                         if numbered.fullmatch(p.stem))
+    except OSError:
+        matches = []
+    return (matches[0], None) if len(matches) == 1 else (pid, None)
+
+
+def _aliases(rec: dict) -> list[str]:
+    return [a for a in rec.get("aliases") or () if isinstance(a, str)]
+
+
+def _source(rec: dict) -> str | None:
+    """Where a record's difficulty came from; a legacy record without the
+    field counts as a doc guess (a pasted difficulty may replace it)."""
+    if not rec.get("difficulty"):
+        return None
+    return rec.get("difficulty_source") or "doc"
+
+
+def _merged(target: dict | None, old: dict, pid: str, number: int | None) -> dict:
+    """``old`` (an un-numbered record) folded into ``target`` (or into a new
+    record ``pid`` when there is none yet)."""
+    alias_list = sorted(set(_aliases(old) + [old.get("id")]) - {None, pid})
+    if target is None:
+        rec = dict(old)
+        rec["id"] = pid
+        rec["number"] = number
+        rec["aliases"] = alias_list
+        return rec
+    rec = target
+    old_runs = [p for p in old.get("runs") or () if isinstance(p, str)]
+    rec["runs"] = old_runs + [p for p in rec.get("runs") or () if p not in old_runs]
+    created = [c for c in (old.get("created"), rec.get("created")) if isinstance(c, str)]
+    if created:
+        rec["created"] = min(created)
+    if len(old.get("statement") or "") > len(rec.get("statement") or ""):
+        rec["statement"] = old["statement"]
+    notes = [n for n in (old.get("notes"), rec.get("notes")) if isinstance(n, str) and n]
+    rec["notes"] = "\n\n".join(notes)
+    if (not rec.get("pattern") or rec.get("pattern") == patterns.FALLBACK) and old.get("pattern"):
+        rec["pattern"] = old["pattern"]
+    if old.get("difficulty") and (
+        not rec.get("difficulty") or (_source(old) == "paste" and _source(rec) != "paste")
+    ):
+        rec["difficulty"] = old["difficulty"]
+        rec["difficulty_source"] = _source(old)
+    rec["aliases"] = sorted(set(_aliases(rec) + alias_list) - {pid})
+    return rec
+
+
+def _upsert(meta: Path, pid: str, parsed: ParsedProblem, *, merge_from: str | None,
+            difficulty_source: str | None, statement: str, pattern: str,
             paths: list[str], stamp: str, today) -> dict:
-    path = meta / PROBLEMS_DIR / f"{pid}.json"
+    folder = meta / PROBLEMS_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{pid}.json"
     rec = _read_record(path)
     if rec is None:
         _preserve_corrupt(path)
+    old = _read_record(folder / f"{merge_from}.json") if merge_from else None
+    if old is not None:
+        rec = _merged(rec, old, pid, parsed.number)
+    if rec is None:
         rec = {
             "id": pid,
             "number": parsed.number,
             "title": parsed.title,
             "difficulty": parsed.difficulty,
+            "difficulty_source": difficulty_source if parsed.difficulty else None,
             "pattern": pattern,
             "statement": statement,
             "created": stamp,
@@ -321,12 +576,19 @@ def _upsert(meta: Path, pid: str, parsed: ParsedProblem, *, statement: str, patt
                 "history": [],
             },
             "runs": [],
+            "aliases": [],
         }
     else:
-        for key, value in (("number", parsed.number), ("title", parsed.title),
-                           ("difficulty", parsed.difficulty)):
+        for key, value in (("number", parsed.number), ("title", parsed.title)):
             if value and not rec.get(key):
                 rec[key] = value
+        if parsed.difficulty and (
+            not rec.get("difficulty")
+            or (difficulty_source == "paste" and _source(rec) != "paste")
+        ):
+            rec["difficulty"] = parsed.difficulty
+            rec["difficulty_source"] = difficulty_source
+        rec.setdefault("difficulty_source", _source(rec))
         if pattern != patterns.FALLBACK or not rec.get("pattern"):
             rec["pattern"] = pattern
         if len(statement) > len(rec.get("statement") or ""):
@@ -334,6 +596,7 @@ def _upsert(meta: Path, pid: str, parsed: ParsedProblem, *, statement: str, patt
         rec["updated"] = stamp
         rec.setdefault("notes", "")
         rec.setdefault("review", {"box": REVIEW_FIRST_BOX, "due": None, "history": []})
+        rec.setdefault("aliases", [])
     runs = rec.get("runs") if isinstance(rec.get("runs"), list) else []
     for p in paths:
         if p not in runs:
@@ -341,6 +604,9 @@ def _upsert(meta: Path, pid: str, parsed: ParsedProblem, *, statement: str, patt
     rec["runs"] = runs
     fsutil.atomic_write_text(path, json.dumps(rec, ensure_ascii=False, indent=2) + "\n",
                              newline="\n")
+    if old is not None:
+        with contextlib.suppress(OSError):
+            (folder / f"{merge_from}.json").unlink()
     return rec
 
 
@@ -359,49 +625,72 @@ def record_run(
     doc: str = "",
     now: datetime | None = None,
     root=None,
-) -> str:
-    """Upsert the problem record and append one run-log line for a saved run.
-    Returns the ``problem_id``."""
+) -> str | None:
+    """Append one run-log line for a saved run, then upsert its problem
+    record. Returns the ``problem_id`` - or ``None`` when the run saved no
+    files (nothing is logged then, M8).
+
+    The log line goes first (M3): it is the source of truth, so a failing
+    record write is logged and swallowed rather than losing the run. ``tier``
+    is recorded for Answer runs only (O2)."""
     base = _root(root)
+    files = [_rel(p, base) for p in paths or ()]
+    if not files:
+        return None
     now = now or datetime.now().astimezone()
     stamp = now.isoformat(timespec="seconds")
-    parsed = parse_problem(problem)
-    if parsed.number is None or parsed.difficulty is None:
+    pasted = parse_problem(problem)
+    number, difficulty = pasted.number, pasted.difficulty
+    source = "paste" if difficulty else None
+    if number is None or difficulty is None:
         doc_number, doc_difficulty = parse_doc_header(doc)
-        parsed = ParsedProblem(
-            parsed.number if parsed.number is not None else doc_number,
-            parsed.title,
-            parsed.difficulty or doc_difficulty,
-        )
-    # The id comes from the PASTE only (D1), so it is stable across runs.
-    pid = problem_id(parse_problem(problem))
+        if number is None:
+            number = doc_number
+        if difficulty is None and doc_difficulty:
+            difficulty, source = doc_difficulty, "doc"
+    parsed = ParsedProblem(number, pasted.title, difficulty)
     pattern = patterns.normalize_pattern(pattern)
-    files = [_rel(p, base) for p in paths]
-    entry = {
-        "ts": stamp,
-        "problem_id": pid,
-        "mode": mode,
-        "language": language,
-        "tier": tier or None,
-        "model": model or None,
-        "verdict": verdict,
-        "files": files,
-        "session_id": session_id or None,
-        "duration_s": round(duration_s, 1) if duration_s is not None else None,
-        "pattern": pattern,
-    }
     meta = meta_dir(base)
     with _locked(meta):
-        _upsert(meta, pid, parsed, statement=(problem or "").strip()[:STATEMENT_CAP],
-                pattern=pattern, paths=files, stamp=stamp, today=now.date())
-        _append_locked(meta, entry)
+        # The id comes from the PASTE only (D1), so it is stable across runs.
+        try:
+            pid, merge_from = _resolve(meta, pasted)
+        except OSError:
+            pid, merge_from = problem_id(pasted), None
+        _append_locked(meta, {
+            "ts": stamp,
+            "problem_id": pid,
+            "mode": mode,
+            "language": language,
+            "tier": (tier or None) if mode == "answer" else None,
+            "model": model or None,
+            "verdict": verdict,
+            "files": files,
+            "session_id": session_id or None,
+            "duration_s": round(duration_s, 1) if duration_s is not None else None,
+            "pattern": pattern,
+        })
+        try:
+            _upsert(meta, pid, parsed, merge_from=merge_from, difficulty_source=source,
+                    statement=(problem or "").strip()[:STATEMENT_CAP], pattern=pattern,
+                    paths=files, stamp=stamp, today=now.date())
+        except Exception:  # noqa: BLE001 - the log line already holds the run
+            _log.exception("could not update the problem record %s", pid)
     return pid
 
 
 def path_index(*, root=None) -> dict[str, dict]:
-    """``{library-relative path: {verdict, problem_id, difficulty, mode}}``
-    from the run log - the LAST entry naming a path wins (an identical re-run
-    rewrites the same file). ``difficulty`` comes from the problem record."""
+    """``{library-relative path: {verdict, problem_id, difficulty, mode,
+    title, number}}`` from the run log - the LAST entry naming a path wins
+    (an identical re-run rewrites the same file). ``difficulty`` / ``title``
+    / ``number`` come from the (light) record index, ``problem_id`` is the
+    record's current id (an alias resolves to the record it merged into).
+    Cached on :func:`store_signature`. Read-only."""
+    sig = store_signature(root=root)
+    key = str(meta_dir(root))
+    hit = _cache_get(_path_cache, key, sig)
+    if hit is not None:
+        return hit
     index: dict[str, dict] = {}
     for entry in read_runs(root=root):
         files = entry.get("files")
@@ -410,17 +699,19 @@ def path_index(*, root=None) -> dict[str, dict]:
         for f in files:
             if isinstance(f, str):
                 index[f] = entry
-    records: dict[str, dict | None] = {}
+    records = record_index(root=root)
     out = {}
     for path, entry in index.items():
         pid = entry.get("problem_id")
-        if isinstance(pid, str) and pid not in records:
-            records[pid] = load_problem(pid, root=root)
-        rec = records.get(pid) if isinstance(pid, str) else None
+        light = records.get(pid) if isinstance(pid, str) else None
+        light = light or {}
         out[path] = {
             "verdict": entry.get("verdict"),
-            "problem_id": pid,
-            "difficulty": (rec or {}).get("difficulty"),
+            "problem_id": light.get("id") or pid,
+            "difficulty": light.get("difficulty"),
             "mode": entry.get("mode"),
+            "title": light.get("title") or None,
+            "number": light.get("number"),
         }
+    _cache_put(_path_cache, key, (sig, out))
     return out

@@ -155,7 +155,7 @@ def test_problems_endpoints(out):
     listing = client.get("/problems").get_json()["problems"]
     assert [p["id"] for p in listing] == ["1-two_sum"]
     item = listing[0]
-    assert item["difficulty"] == "Easy" and item["run_count"] == 3
+    assert item["difficulty"] == "Easy" and item["run_count"] == 2  # runs, not files
     assert "statement" not in item
 
     full = client.get("/problems/1-two_sum").get_json()
