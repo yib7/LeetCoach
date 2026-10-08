@@ -32,6 +32,7 @@ import threading
 from pathlib import Path
 
 import config
+import fsutil
 
 # Extension chosen per answer language. Anything unknown falls back to ``.txt``
 # so an unexpected language never produces a separator-bearing extension.
@@ -160,9 +161,10 @@ def _resolve_slot(folder: Path, stem: str, files: list[tuple[str, str]]) -> list
 
 
 def _write(path: Path, body: str) -> str:
-    """Write ``body`` to ``path`` (UTF-8), creating parents; return str path."""
-    _ensure_dir(path.parent)
-    path.write_text(body, encoding="utf-8")
+    """Atomically write ``body`` to ``path`` (UTF-8), creating parents; return
+    the str path. Goes through the shared :mod:`fsutil` helper (SP4) so a
+    reader never sees a half-written doc and a held file is retried."""
+    fsutil.atomic_write_text(path, body)
     return str(path)
 
 

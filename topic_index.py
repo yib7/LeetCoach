@@ -36,13 +36,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import threading
+import time
 from pathlib import Path
 
 import config
+import fsutil
 import patterns
 
 logger = logging.getLogger(__name__)
@@ -164,13 +165,26 @@ def save(data: dict, path=None) -> str:
 
 
 def _write_json(p: Path, obj) -> None:
-    # Atomic write: dump to a sibling temp file, then os.replace() onto the
-    # target. os.replace is atomic on both Windows and POSIX, so a reader never
-    # sees a half-written file and a crash mid-write can't corrupt the index.
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
-    os.replace(tmp, p)
+    # Atomic write through the shared helper (SP4/B7): sibling temp file +
+    # os.replace, retried with backoff while Windows reports the index as held
+    # by another process (AV, OneDrive, a reader), temp file always cleaned up.
+    fsutil.atomic_write_text(p, json.dumps(obj, indent=2))
+
+
+def _preserve_corrupt(p: Path) -> None:
+    """B7: keep an unparseable index as ``<name>.corrupt-<timestamp>`` before
+    it is replaced, so a corrupt file is never silently overwritten.
+    Best-effort: never raises."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = p.with_name(f"{p.name}.corrupt-{stamp}")
+    n = 2
+    while dest.exists():
+        dest = p.with_name(f"{p.name}.corrupt-{stamp}-{n}")
+        n += 1
+    try:
+        shutil.copy2(p, dest)
+    except OSError:
+        logger.warning("topic_index: could not preserve corrupt %s", p)
 
 
 BACKUP_SUFFIX = ".pre-v1.5.bak"
@@ -266,6 +280,8 @@ def record(problem_type: str, topics, path=None, *, language=None) -> dict:
             )
             return _clean_index({})
         lossy = existed and raw is None
+        if lossy:
+            _preserve_corrupt(p)  # B7: never overwrite a corrupt file unkept
         if raw is None:
             raw = {}
         raw.setdefault("by_type", {})

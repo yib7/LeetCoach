@@ -239,3 +239,68 @@ def test_learning_route_passes_known_topics_to_prompt(tmp_path, monkeypatch):
     assert "binary_search" in known
     # the pre-existing topic is still there too
     assert "sliding_window" in known
+
+
+# --- B7: atomic writes through fsutil, corrupt file preserved ----------------
+
+def test_record_retries_a_locked_index_instead_of_losing_the_update(idx_path, monkeypatch):
+    import os as _os
+
+    import fsutil
+
+    topic_index.record("dp", ["memoization"])
+    real_replace = _os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError(13, "held by another process")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(fsutil, "_replace", flaky)
+    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    topic_index.record("graphs", ["bfs"])
+    assert "bfs" in json.loads(idx_path.read_text(encoding="utf-8"))["all"]
+    assert [p.name for p in idx_path.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_record_leaves_no_tmp_when_the_write_finally_fails(idx_path, monkeypatch):
+    import fsutil
+
+    def locked(src, dst):
+        raise PermissionError(13, "locked")
+
+    monkeypatch.setattr(fsutil, "_replace", locked)
+    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    topic_index.record("graphs", ["bfs"])  # best-effort: must not raise
+    assert [p.name for p in idx_path.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_corrupt_index_is_preserved_as_corrupt_copy_not_overwritten(idx_path):
+    idx_path.write_text("{definitely not json", encoding="utf-8")
+    topic_index.record("dp", ["memoization"])
+    corrupt = [p for p in idx_path.parent.iterdir() if ".corrupt-" in p.name]
+    assert len(corrupt) == 1
+    assert corrupt[0].name.startswith("topic_index.json.corrupt-")
+    assert corrupt[0].read_text(encoding="utf-8") == "{definitely not json"
+    # the index itself is usable again
+    assert "memoization" in topic_index.known_topics()
+    # a healthy rewrite later does not create another corrupt copy
+    topic_index.record("dp", ["tabulation"])
+    assert len([p for p in idx_path.parent.iterdir() if ".corrupt-" in p.name]) == 1
+
+
+def test_save_goes_through_the_atomic_helper(idx_path, monkeypatch):
+    import fsutil
+
+    seen = []
+    real = fsutil.atomic_write_text
+
+    def spy(path, text, **kw):
+        seen.append(str(path))
+        return real(path, text, **kw)
+
+    monkeypatch.setattr(fsutil, "atomic_write_text", spy)
+    topic_index.save({"by_type": {}, "all": ["x"]})
+    assert seen == [str(idx_path)]
