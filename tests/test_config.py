@@ -251,6 +251,69 @@ def test_upsert_escaped_quote_does_not_end_a_double_quoted_value(tmp_path):
     )
 
 
+# --- Cycle 11 review: an unclosed quote must not swallow the rest of the file ----
+
+def test_upsert_unclosed_quote_on_the_target_keeps_every_following_line(tmp_path):
+    env = tmp_path / ".env"
+    env.write_bytes(b'LEETCOACH_MODEL="sonnet\nOTHER=1\n# keep me\nZ=2\n')
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "haiku")
+    assert _text(env) == "LEETCOACH_MODEL=haiku\nOTHER=1\n# keep me\nZ=2\n"
+
+
+def test_upsert_unclosed_quote_on_a_later_duplicate_keeps_following_lines(tmp_path):
+    env = tmp_path / ".env"
+    env.write_bytes(b"LEETCOACH_MODEL=opus\nA=1\nLEETCOACH_MODEL='haiku\nB=2\nC=3\n")
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "haiku")
+    assert _text(env) == "LEETCOACH_MODEL=haiku\nA=1\nB=2\nC=3\n"
+
+
+def test_unclosed_quote_on_another_key_does_not_hide_a_later_assignment(tmp_path):
+    env = tmp_path / ".env"
+    env.write_bytes(b'NOTE="never closed\nLEETCOACH_MODEL=opus\nZ=2\n')
+    config.upsert_env_var(env, "LEETCOACH_MODEL", "haiku")
+    # python-dotenv skips the broken NOTE line and reads the next ones normally,
+    # so the real assignment is updated in place (not duplicated at the end)
+    assert _text(env) == 'NOTE="never closed\nLEETCOACH_MODEL=haiku\nZ=2\n'
+
+
+# Each case is a list of (line, is_target): ``is_target`` marks the lines that
+# belong to a LEETCOACH_MODEL assignment (including the continuation lines of a
+# CLOSED quoted value). Every other line must survive an upsert byte-for-byte.
+_T = "LEETCOACH_MODEL"
+_TRICKY_ENVS = [
+    [(f'{_T}="sonnet', True), ("OTHER=1", False), ("# keep me", False), ("Z=2", False)],
+    [(f"{_T}=opus", True), ("A=1", False), (f"{_T}='haiku", True), ("B=2", False),
+     ("C=3", False)],
+    [("", False), ("# head", False), (f"{_T}='x", True), ("", False),
+     ("export Q=\"unclosed", False), (f"{_T}=y", True), ("W=1", False)],
+    [('A="multi', False), (f"{_T}=inside", False), ('end"', False), (f"{_T}=opus", True),
+     ("B='also unclosed", False), ("", False), ("# tail", False)],
+    [(f'{_T}="closed', True), ('multi"', True), ("KEEP=1", False), (f'{_T}="open', True),
+     ("K2=2", False)],
+    [('A="say \\"hi\\"', False), ("still a", False), ('done"', False), (f"{_T}=\"\\\"", True),
+     ("B=1", False), ("# c", False)],
+    [("# only comments", False), ("", False), ("X='never", False), ("Y=\"never", False)],
+]
+
+
+@pytest.mark.parametrize("case", _TRICKY_ENVS)
+def test_upsert_preserves_every_non_target_line_byte_for_byte(tmp_path, case):
+    env = tmp_path / ".env"
+    env.write_bytes(("\n".join(line for line, _ in case) + "\n").encode("utf-8"))
+    config.upsert_env_var(env, _T, "haiku")
+    expected: list[str] = []
+    placed = False
+    for line, is_target in case:
+        if not is_target:
+            expected.append(line)
+        elif not placed:
+            expected.append(f"{_T}=haiku")
+            placed = True
+    if not placed:
+        expected.append(f"{_T}=haiku")
+    assert _text(env).split("\n") == [*expected, ""]
+
+
 # --- SP4 review I1: a per-run alias vs a pinned id ------------------------------
 
 def test_resolve_run_model_keeps_a_pinned_id_for_its_own_alias(monkeypatch):

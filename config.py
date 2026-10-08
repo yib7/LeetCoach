@@ -312,7 +312,9 @@ def _env_entries(text: str) -> list[tuple[str | None, list[str]]]:
     friends, which are ordinary characters in a value. An assignment whose
     value opens a quote that does not close on the same line swallows the
     following lines up to the closing quote, so text INSIDE a quoted
-    multi-line value is never mistaken for an assignment. ``key`` is ``None``
+    multi-line value is never mistaken for an assignment. A quote that never
+    closes before EOF swallows nothing: that line is an entry on its own and
+    the lines after it are parsed normally. ``key`` is ``None``
     for blanks, comments and anything else that assigns nothing.
     """
     raw_lines = text.split("\n")
@@ -331,11 +333,18 @@ def _env_entries(text: str) -> list[tuple[str | None, list[str]]]:
             if value[:1] in ("'", '"'):
                 quote = value[0]
                 if _quote_closes(value[1:], quote) < 0:
-                    while i < len(lines):
-                        group.append(lines[i])
-                        i += 1
-                        if _quote_closes(group[-1], quote) >= 0:
-                            break
+                    # Look ahead for the closing quote; only a quote that really
+                    # closes makes the following lines part of this value. One
+                    # that never closes is a malformed single line (python-dotenv
+                    # skips it and parses the next lines normally), so nothing
+                    # is consumed - otherwise an upsert would replace or drop
+                    # the rest of the file along with it.
+                    j = i
+                    while j < len(lines) and _quote_closes(lines[j], quote) < 0:
+                        j += 1
+                    if j < len(lines):
+                        group.extend(lines[i:j + 1])
+                        i = j + 1
         entries.append((key, group))
     return entries
 
