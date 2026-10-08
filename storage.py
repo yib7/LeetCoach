@@ -33,6 +33,7 @@ together, staying on one shared stem.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import threading
 import unicodedata
@@ -323,8 +324,32 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]+")
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _TOP_HEADING = re.compile(r"^ {0,3}#{1,2}(?=[ \t]|$)")
 # The verdict regex (app.verdict_from_text) keys on this exact bold label; an
-# answer that quotes it is reworded so it can never read as a verdict block.
+# answer that quotes it - in prose OR inside a code fence (SP8 fix M1: the
+# verdict regex does not know about fences) - is reworded, so an appended
+# section never contains the label and can never read as a verdict block.
 _VERIFICATION_LABEL = re.compile(r"\*\*Verification:\*\*")
+
+
+def _fence_step(line: str, fence: str | None) -> tuple[str | None, bool]:
+    """Advance the code-fence state over one line. Returns ``(fence, inside)``:
+    the opening run (```` ``` ```` / ``~~~~``) still open after the line, and
+    whether the line itself is fence content or a fence marker (not Markdown)."""
+    if fence is None:
+        m = _FENCE_OPEN.match(line)
+        return (m.group(1), True) if m else (None, False)
+    stripped = line.strip()
+    if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+        return None, True
+    return fence, True
+
+
+def open_fence(text: str) -> str | None:
+    """The code fence ``text`` leaves open at its end (its opening run), or
+    ``None`` when every fence is closed."""
+    fence = None
+    for line in (text or "").replace("\r\n", "\n").split("\n"):
+        fence, _ = _fence_step(line, fence)
+    return fence
 
 
 def followup_title(question: str) -> str:
@@ -345,24 +370,22 @@ def followup_title(question: str) -> str:
 def followup_body(answer: str) -> str:
     """The answer as it goes under its heading. Outside code fences an H1/H2
     the model wrote becomes an H3, so the follow-up stays ONE section of the
-    doc and can never open a new ``## Follow-up`` / ``## Flashcards`` section,
-    and a quoted ``**Verification:**`` label is reworded so it can never read
-    as the app's verdict block."""
+    doc and can never open a new ``## Follow-up`` / ``## Flashcards`` section.
+    A quoted ``**Verification:**`` label is reworded everywhere, inside code
+    fences too, so it can never read as the app's verdict block (SP8 fix M1),
+    and a fence the answer left open is closed so it cannot swallow the next
+    follow-up's heading (SP8 fix M3)."""
     out = []
     fence = None
     for line in (answer or "").replace("\r\n", "\n").strip("\n").split("\n"):
-        stripped = line.strip()
-        m = _FENCE_OPEN.match(line)
-        if fence is None and m:
-            fence = m.group(1)
-        elif fence is not None:
-            if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
-                fence = None
-        else:
+        fence, inside = _fence_step(line, fence)
+        if not inside:
             line = _TOP_HEADING.sub("###", line, count=1)
-            line = _VERIFICATION_LABEL.sub("**Verification**:", line)
-        out.append(line)
-    return "\n".join(out).rstrip()
+        out.append(_VERIFICATION_LABEL.sub("**Verification**:", line))
+    body = "\n".join(out).rstrip()
+    if fence is not None:
+        body += "\n" + fence
+    return body
 
 
 def followup_section(question: str, answer: str) -> str:
@@ -375,13 +398,29 @@ def append_followup(path, question: str, answer: str) -> str:
     ``path`` and return the heading line written. The read-modify-write runs
     under the library write lock and lands through the atomic helper, so a
     reader never sees half a doc and two follow-ups never lose each other.
-    Raises ``FileNotFoundError`` when the doc is gone (nothing is created)."""
+    Raises ``FileNotFoundError`` when the doc is gone (nothing is created) and
+    ``UnicodeDecodeError`` when it is not UTF-8 (nothing is written).
+
+    SP8 fix M3: a doc that ends inside an open code fence has it closed first,
+    so the heading is real Markdown. SP8 fix I1: the doc keeps its original
+    modified (and access) time - a follow-up is not a new run, and Stats
+    (legacy files) and the recent-runs list date a run by its mtime. The
+    library cache is still invalidated by the caller, and the verdict cache
+    keys on (mtime, size), which the append always changes through the size."""
     target = Path(path)
     section = followup_section(question, answer)
     with _WRITE_LOCK:
+        before = target.stat()
         text = target.read_text(encoding="utf-8")
         text = text.replace("\r\n", "\n").rstrip("\n")
+        fence = open_fence(text)
+        if fence is not None:
+            text += "\n" + fence
         fsutil.atomic_write_text(target, text + "\n\n" + section)
+        try:
+            os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        except OSError:
+            pass  # the answer landed; keeping the old date is best-effort
     return section.split("\n", 1)[0]
 
 
