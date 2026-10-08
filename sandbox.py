@@ -1218,7 +1218,12 @@ _COMPILERS = {
 
 
 def verify_answer(
-    code: str, problem_text: str, language: str, *, cancel: threading.Event | None = None
+    code: str,
+    problem_text: str,
+    language: str,
+    *,
+    cancel: threading.Event | None = None,
+    progress=None,
 ) -> VerifyResult:
     """Verify a generated solution against the problem's sample I/O.
 
@@ -1233,7 +1238,9 @@ def verify_answer(
 
     Never raises: any unexpected failure degrades to ``not_verified`` so a
     verifier bug can't break the study run. ``cancel`` is passed through to
-    :func:`verify_python` (SP4 review M2).
+    :func:`verify_python` (SP4 review M2). ``progress`` (SP5 D11), when given,
+    is called as ``progress(i, n)`` before sample ``i`` of ``n`` runs; it is
+    display-only, so an exception from it is ignored.
     """
     try:
         lang = (language or "").strip().lower()
@@ -1252,6 +1259,7 @@ def verify_answer(
                 timeout=config.verify_timeout(),
                 problem_text=problem_text,
                 cancel=cancel,
+                **({"progress": progress} if progress is not None else {}),
             )
 
         if lang in _COMPILERS:
@@ -1287,6 +1295,7 @@ def _verify_python_samples(
     timeout: float = 10.0,
     problem_text: str = "",
     cancel: threading.Event | None = None,
+    progress=None,
 ) -> VerifyResult:
     """Run ``code`` against each parsed sample and aggregate the verdict.
 
@@ -1307,6 +1316,11 @@ def _verify_python_samples(
     # without the parameter keeps working.
     extra = {"cancel": cancel} if cancel is not None else {}
     for idx, s in enumerate(samples, start=1):
+        if progress is not None:
+            try:
+                progress(idx, total)
+            except Exception:  # noqa: BLE001 - progress is display-only
+                logger.debug("verify progress callback failed", exc_info=True)
         r = verify_python(
             code, s.stdin, s.expected_stdout, timeout=timeout, problem_text=problem_text,
             **extra,
