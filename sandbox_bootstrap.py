@@ -20,14 +20,15 @@ so ``sys.orig_argv`` does not reveal it), the go byte, then the sample input.
      creating dirs) anywhere outside the run dir;
    * opening or listing anything under a known secret path (the parent
      passes the list: ``~/.claude``, the repo ``.env``, credential stores...);
-   * network: ``socket.connect`` / ``bind`` / ``sendto`` / ``sendmsg`` and
-     name resolution. The one exception is the shape of
-     ``socket.socketpair()`` on Windows (bind a STREAM socket to an EPHEMERAL
-     port on 127.0.0.1 / ::1 and listen, then connect ONE socket of the same
-     family and type to that same listener of this process), which asyncio's
-     Proactor loop needs for its self-pipe. The allowance is spent by that
-     first connect; any other bind (UDP included) or connect, including to
-     another local service, is refused;
+   * network, with no exceptions: ``socket.bind`` / ``connect`` / ``sendto``
+     / ``sendmsg`` and name resolution, whatever the address (loopback
+     included). That also rules out ``socket.socketpair()`` on Windows (it
+     binds a loopback listener), so asyncio, whose Windows event loop needs
+     one for its self-pipe, is unavailable: ``asyncio.run`` ends the run as
+     "blocked by sandbox (socket.bind)". An earlier socketpair allowance was
+     dropped after it was bypassed three times (the last by a socket subclass
+     faking ``getsockname``); LeetCode solutions need neither sockets nor
+     asyncio;
    * SQLite entirely (``sqlite3.connect``, extension loading): ``ATTACH
      DATABASE`` writes wherever it is told without an audited ``open``, and
      extensions are native code, so no per-path check could hold;
@@ -75,7 +76,6 @@ import runpy
 import stat
 import sys
 import traceback
-import weakref
 
 # The go byte. ``sandbox.py`` imports this constant, so parent and child can
 # never disagree on it.
@@ -104,9 +104,6 @@ _MAX_CONFIG_BYTES = 1 << 20
 # CPU / disk caps.
 _RLIMITS = {"AS": True, "CPU": True, "FSIZE": True, "NPROC": False}
 
-# asyncio's Windows self-pipe (``socket.socketpair``) binds here, port 0.
-_LOOPBACK = frozenset({"127.0.0.1", "::1"})
-
 # POSIX names that are aliases of an already-open fd rather than files.
 _STD_ALIASES = frozenset({"/dev/stdin", "/dev/stdout", "/dev/stderr"})
 _FD_ALIAS_DIRS = ("/dev/fd/", "/proc/self/fd/")
@@ -119,10 +116,10 @@ _ALWAYS_BLOCKED = frozenset({
     "subprocess.Popen", "_winapi.CreateProcess", "os.system", "os.exec",
     "os.spawn", "os.posix_spawn", "os.fork", "os.forkpty", "os.startfile",
     "os.kill", "os.killpg", "pty.spawn",
-    # network (incl. DNS, which can exfiltrate on its own). socket.bind and
-    # socket.connect are refused too, except the socketpair shape (on_bind /
-    # on_connect in install_audit_hook).
-    "socket.sendto", "socket.sendmsg",
+    # network, loopback included (DNS too: it can exfiltrate on its own).
+    # No socketpair allowance: it was bypassed three times, so asyncio (which
+    # binds one on Windows) is simply unavailable in the sandbox.
+    "socket.bind", "socket.connect", "socket.sendto", "socket.sendmsg",
     "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyname_ex",
     "socket.gethostbyaddr", "socket.getnameinfo",
     # ctypes: loading libraries, resolving symbols, poking memory
@@ -211,12 +208,6 @@ def is_stream_alias(raw: str, resolved: str, fd_probe=None) -> bool:
     return resolved.startswith("/dev/pts/") or resolved in ("/dev/tty", "/dev/null")
 
 
-def _socket_mod():
-    """The ``_socket`` C module. Every socket.bind / connect event comes from
-    it, so it is already imported whenever the hook asks (never imports)."""
-    return sys.modules.get("_socket")
-
-
 def install_audit_hook(run_dir: str, secret_paths: list) -> None:
     """Install the C6 hook. Called before any untrusted code exists."""
     normcase, realpath, fsdecode = os.path.normcase, os.path.realpath, os.fsdecode
@@ -233,7 +224,6 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
     devnull = normcase(os.devnull)
     posix = os.name != "nt"
     local = _thread._local()  # per-thread re-entrancy guard (realpath -> events)
-    own_listeners = weakref.WeakSet()  # STREAM sockets bound to an ephemeral loopback port
 
     def path_of(arg):
         """A normalized path, or None for an fd / None / non-path argument."""
@@ -276,65 +266,9 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
             if path is not None and not path.startswith("\\\\.\\pipe\\"):
                 check_inside_run(event, path)
 
-    def kind_of(sock):
-        """``(family, type)`` of a socket object, or None."""
-        try:
-            return (sock.family, sock.type)
-        except (AttributeError, OSError, ValueError):
-            return None
-
-    def is_listening(sock) -> bool:
-        mod = _socket_mod()
-        sol = getattr(mod, "SOL_SOCKET", None)
-        acceptconn = getattr(mod, "SO_ACCEPTCONN", None)
-        if sol is None or acceptconn is None:
-            return False  # cannot tell: fail closed
-        try:
-            return bool(sock.getsockopt(sol, acceptconn))
-        except (OSError, ValueError, TypeError):
-            return False
-
-    def on_bind(event: str, args) -> None:
-        sock = args[0] if args else None
-        addr = args[1] if len(args) > 1 else None
-        kind = kind_of(sock)
-        stream = getattr(_socket_mod(), "SOCK_STREAM", None)
-        if (kind is not None and stream is not None and kind[1] == stream
-                and isinstance(addr, tuple) and len(addr) >= 2
-                and addr[0] in _LOOPBACK and addr[1] == 0):
-            # An OS-assigned free loopback port for a STREAM socket: the
-            # listening half of socketpair(). Nothing else may bind (a UDP
-            # socket's port space is separate from TCP's, so "this process
-            # holds port P" would prove nothing about a TCP connect to P).
-            own_listeners.add(sock)
-            return
-        _deny(event)
-
-    def on_connect(event: str, args) -> None:
-        sock = args[0] if args else None
-        addr = args[1] if len(args) > 1 else None
-        kind = kind_of(sock)
-        if (kind is not None and isinstance(addr, tuple) and len(addr) >= 2
-                and addr[0] in _LOOPBACK):
-            target = (addr[0], addr[1])
-            for listener in list(own_listeners):
-                try:
-                    if (kind_of(listener) == kind
-                            and tuple(listener.getsockname()[:2]) == target
-                            and is_listening(listener)):
-                        # The other half of this process's own socketpair.
-                        # Single use: the allowance is spent here.
-                        own_listeners.discard(listener)
-                        return
-                except (OSError, ValueError, TypeError):
-                    continue  # closed / detached: no longer ours to talk to
-        _deny(event)
-
     handlers = {
         "open": on_open,
         "_winapi.CreateFile": on_create_file,
-        "socket.bind": on_bind,
-        "socket.connect": on_connect,
     }
 
     def hook(event: str, args) -> None:

@@ -61,12 +61,13 @@ best-effort. What the sandbox does:
   - opening or listing known secret locations: `~/.claude` and `~/.claude.json`,
     this repo's `.env`, `~/.ssh`, `~/.aws`, git and GitHub CLI credentials, and
     the Windows credential stores under `%APPDATA%` / `%LOCALAPPDATA%`;
-  - network connections and DNS lookups. The single exception is a socket pair
-    inside the process itself (bind a TCP socket to a free port on `127.0.0.1`
-    and listen, then connect one socket of the same kind to that same listener),
-    which `asyncio` needs on Windows. The allowance is used up by that one
-    connect; any other bind (UDP included) and any connection to another
-    address, local services included, is still refused;
+  - all network use: every socket bind, connect and send, and DNS lookups,
+    whatever the address (`127.0.0.1` and other local services included). There
+    are no exceptions, so `asyncio` is not available in the sandbox: on Windows
+    its event loop needs a loopback socket pair, so `asyncio.run(...)` stops the
+    run as "blocked by sandbox (socket.bind)". (An earlier exception for that
+    socket pair was removed after it was bypassed three times; LeetCode
+    solutions need neither sockets nor `asyncio`.)
   - starting processes (`subprocess`, `os.system`, `os.exec*`, `os.spawn*`,
     `multiprocessing`);
   - loading libraries through `ctypes`, and walking the heap with

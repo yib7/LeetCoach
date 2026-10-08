@@ -481,15 +481,37 @@ class _StdinFeeder(threading.Thread):
                 pass
 
 
+_TB_HEADER = "Traceback (most recent call last):"
+
+
+def _final_exception_line(lines: list) -> str | None:
+    """The exception line of the LAST traceback in ``lines`` (non-blank
+    stderr lines) that is not an "Exception ignored ..." report: the first
+    unindented line after its header. Such reports (a half-built object's
+    ``__del__`` at shutdown, e.g. asyncio's loop after its socketpair was
+    refused) and warnings can follow the uncaught traceback. With no such
+    header (e.g. a SyntaxError, printed without one) it is the last line."""
+    start = None
+    for i, ln in enumerate(lines):
+        if ln.rstrip() == _TB_HEADER and not (i and lines[i - 1].startswith("Exception ignored")):
+            start = i
+    if start is not None:
+        for ln in lines[start + 1:]:
+            if not ln[:1].isspace():
+                return ln
+    return lines[-1] if lines else None
+
+
 def _exit_note(returncode: int, stderr: str) -> str:
     """The note for a nonzero exit of the SOLUTION: "blocked by sandbox
     (<what>)" when the audit hook's PermissionError is what ended the run,
-    else the bare exit code. Only the final exception line (the last
-    non-blank line of stderr) is looked at, so a solution that caught the
-    sandbox's error and raised something else is not blamed on the sandbox
-    (M-2)."""
+    else the bare exit code. Only the final exception line of the uncaught
+    traceback is looked at (:func:`_final_exception_line`), so a solution
+    that caught the sandbox's error and raised something else is not blamed
+    on the sandbox (M-2)."""
     lines = [ln for ln in (stderr or "").splitlines() if ln.strip()]
-    m = _BLOCKED_RE.search(lines[-1]) if lines else None
+    last = _final_exception_line(lines)
+    m = _BLOCKED_RE.search(last) if last else None
     if m:
         what = m.group("event")
         if m.group("why"):
