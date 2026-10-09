@@ -28,6 +28,18 @@ import subprocess
 import sys
 
 
+def _taskkill_exe() -> str:
+    """``%SystemRoot%\\System32\\taskkill.exe`` (3A C14). A bare ``taskkill``
+    goes through CreateProcess's search order, which tries the application
+    directory and the current directory before System32 - a planted
+    ``taskkill.exe`` there would run instead. The bare name is only the
+    fallback when ``SystemRoot`` is unset."""
+    root = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT")
+    if root:
+        return os.path.join(root, "System32", "taskkill.exe")
+    return "taskkill"
+
+
 def kill_process_tree(proc: subprocess.Popen[str], *, group: bool = False) -> bool:
     """Best-effort kill of `proc` AND its descendants. Returns True if a
     tree-kill mechanism was invoked (not necessarily that it succeeded).
@@ -48,7 +60,7 @@ def kill_process_tree(proc: subprocess.Popen[str], *, group: bool = False) -> bo
     if sys.platform == "win32":
         try:
             subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                [_taskkill_exe(), "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
                 check=False,
                 timeout=10,
