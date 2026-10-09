@@ -1765,17 +1765,26 @@
     });
   }
 
+  // 3A W6: click A then B - if A answers last it must not replace B (and the
+  // notes / flashcards / follow-up box must not attach to A). Only the newest
+  // open may show; closing the viewer drops whatever is in flight.
+  var fileSeq = core.makeRequestSeq();
   function openFile(relPath) {
+    var token = fileSeq.start(relPath);
     return fetch("/library/file?path=" + encodeURIComponent(relPath))
       .then(function (resp) {
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         return resp.text();
       })
       .then(function (text) {
+        if (!fileSeq.isCurrent(token)) return;
+        fileSeq.done(token);
         showFile(relPath, text);
         markTreeActive(relPath);
       })
       .catch(function (e) {
+        if (!fileSeq.isCurrent(token)) return;
+        fileSeq.done(token);
         notify("Could not open " + relPath.split("/").pop() + " (" + ((e && e.message) || "error") +
           "). It may have been moved or deleted.", "error");
       });
@@ -1852,13 +1861,22 @@
     });
   }
 
+  // 3A W6: overlapping refreshes (a run finishing while the Library view
+  // opens, a delete, ...) - an older listing that answers last must not
+  // overwrite a newer one. A stale call resolves with the newest load, so a
+  // caller chaining on it (openSavedDoc) sees the fresh listing.
+  var libSeq = core.makeRequestSeq();
+  var libNewest = null;
   function loadLibrary() {
-    return fetch("/library")
+    var token = libSeq.start();
+    var load = fetch("/library")
       .then(function (resp) {
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         return resp.json();
       })
       .then(function (data) {
+        if (!libSeq.isCurrent(token)) return libNewest;
+        libSeq.done(token);
         libLoaded = true;
         libListed = true;
         libFiles = (data && data.files) || [];
@@ -1872,6 +1890,8 @@
         return loadStats();
       })
       .catch(function (e) {
+        if (!libSeq.isCurrent(token)) return libNewest;
+        libSeq.done(token);
         libLoaded = true;
         var why = (e && e.message) || "network error";
         // SP5 fix R5: a refresh that fails keeps the library the page already
@@ -1893,9 +1913,12 @@
           libTree.appendChild(el("div", "grp-h", "Could not load the library (" + why + ")."));
         }
       });
+    libNewest = load;
+    return load;
   }
 
   function closeViewer() {
+    fileSeq.invalidate(); // 3A W6: an open still in flight must not reopen it
     resetViewerExtras();
     closeFollowupBox(); // SP8 / D6: stops a follow-up in flight
     libViewer.hidden = true;
@@ -2643,6 +2666,10 @@
       fuInput.value = "";
       fuClearAnswer();
       fuSetStatus(msg, "ok");
+      // 3A W6: the learner already clicked another file that is still
+      // loading - reloading this doc now would win over their click.
+      var opening = fileSeq.pending();
+      if (opening !== null && opening !== fu.path) return;
       // Re-render the doc so the appended section shows, and bring it into view.
       openFile(fu.path).then(function () {
         if (currentViewPath !== fu.path) return;
