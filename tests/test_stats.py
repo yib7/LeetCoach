@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 import stats
 
-NOW = datetime(2026, 10, 8, 18, 0)  # local, naive
+NOW = datetime(2026, 10, 8, 18, 0).astimezone()  # local zone, aware
 
 
 def _day(n_ago: int, hour: int = 10) -> datetime:

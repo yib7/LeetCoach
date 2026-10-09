@@ -68,7 +68,7 @@ def test_real_runner_feeds_stdin_without_newline_translation():
     assert not t.is_alive()
     if "exc" in out:
         raise out["exc"]
-    received = eval(out["lines"][0].strip())  # noqa: S307 - our own repr() of bytes
+    received = eval(out["lines"][0].strip())  # our own repr() of bytes
     assert received == prompt.encode("utf-8")
     assert b"\r\n" not in received
 

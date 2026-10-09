@@ -231,15 +231,12 @@ def _locked(meta: Path):
     interleave a log line or lose a record update)."""
     with _LOCK:
         meta.mkdir(parents=True, exist_ok=True)
-        fh = open(meta / LOCK_FILE, "a+b")
-        try:
+        with open(meta / LOCK_FILE, "a+b") as fh:
             _os_lock(fh)
             try:
                 yield
             finally:
                 _os_unlock(fh)
-        finally:
-            fh.close()
 
 
 def _os_lock(fh) -> None:
@@ -830,7 +827,7 @@ def local_today(now: datetime | None = None) -> date:
     """The machine-local calendar day of ``now`` (a naive datetime counts as
     local already; an aware one is converted to the local zone)."""
     if now is None:
-        return datetime.now().date()
+        return datetime.now().astimezone().date()
     if now.tzinfo is None:
         return now.date()
     return now.astimezone().date()

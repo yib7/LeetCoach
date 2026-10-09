@@ -72,8 +72,7 @@ class Call:
         self.cancelled = threading.Event()
 
     def __iter__(self):
-        for chunk in self._chunks:
-            yield chunk
+        yield from self._chunks
         if self._error is not None:
             raise self._error
 
@@ -226,7 +225,7 @@ def _ok_lines(text="Short answer.", sid="new-session"):
 def test_resume_argv_isolation_flags_and_neutral_cwd(root, tmp_path):
     rel = _seed(root, session_id="11111111-2222-4333-8444-555566667777")
     run_fn, seen = _real_run_fn(lambda argv: _ok_lines())
-    _, (text, events) = _ask(_client(run_fn), rel)
+    _, (_text, events) = _ask(_client(run_fn), rel)
     assert events[-1][0] == "done" and events[-1][1]["source"] == "resume"
     (call,) = seen
     argv = call["argv"]

@@ -57,6 +57,7 @@ working with whatever subset it supports.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -66,9 +67,10 @@ import tempfile
 import threading
 import time
 from collections import deque
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, Iterable, Iterator, NamedTuple, Optional
+from typing import NamedTuple
 
 import config
 
@@ -168,7 +170,7 @@ def clear_flag_cache() -> None:
         _flag_cache.clear()
 
 
-def _probe_help_text(argv: list[str]) -> Optional[str]:
+def _probe_help_text(argv: list[str]) -> str | None:
     """Run ``claude --help`` (bounded, tree-killed on timeout) and return its
     stdout, or ``None`` on a nonzero exit. Runs in the neutral cwd (A7, SP2 M4)
     like every other `claude` spawn. May raise; the caller degrades."""
@@ -224,9 +226,9 @@ def build_argv(
     *,
     model: str,
     flags: frozenset,
-    system_prompt: Optional[str],
+    system_prompt: str | None,
     persist_session: bool,
-    resume: Optional[str] = None,
+    resume: str | None = None,
 ) -> list[str]:
     """The `claude -p` argv for one call, isolation flags gated on ``flags``.
 
@@ -276,14 +278,14 @@ class ClaudeRun:
     """
 
     def __init__(self) -> None:
-        self.session_id: Optional[str] = None
-        self.model: Optional[str] = None
+        self.session_id: str | None = None
+        self.model: str | None = None
         self._lock = threading.Lock()
         self._cancelled = False
-        self._killer: Optional[Callable[[], None]] = None
+        self._killer: Callable[[], None] | None = None
         self._gen: Iterator[str] = iter(())
 
-    def __iter__(self) -> "ClaudeRun":
+    def __iter__(self) -> ClaudeRun:
         return self
 
     def __next__(self) -> str:
@@ -309,7 +311,7 @@ class ClaudeRun:
         if killer is not None:
             killer()
 
-    def _attach_killer(self, killer: Optional[Callable[[], None]]) -> None:
+    def _attach_killer(self, killer: Callable[[], None] | None) -> None:
         """Called by the real runner once the process exists (and with
         ``None`` when it is done). A cancel that raced ahead fires now."""
         with self._lock:
@@ -321,7 +323,7 @@ class ClaudeRun:
 
 # --- availability --------------------------------------------------------
 
-def is_available(*, which: Callable[[str], Optional[str]] = shutil.which) -> bool:
+def is_available(*, which: Callable[[str], str | None] = shutil.which) -> bool:
     """Return True if the configured `claude` binary is resolvable on PATH.
 
     `which` is injectable purely so tests can exercise both branches without
@@ -354,7 +356,7 @@ def _spawn_kwargs() -> dict:
     return {"start_new_session": True}
 
 
-def _kill_claude_tree(proc: "subprocess.Popen", job=None, *, pid_ok: bool = True) -> None:
+def _kill_claude_tree(proc: subprocess.Popen, job=None, *, pid_ok: bool = True) -> None:
     """Kill a `claude` process and everything it spawned (A6/C5).
 
     Windows: ``taskkill /T`` (walks live parent links), then the kill-on-close
@@ -368,19 +370,15 @@ def _kill_claude_tree(proc: "subprocess.Popen", job=None, *, pid_ok: bool = True
     process by now; only the job (still open, the caller guarantees) is used.
     """
     if pid_ok:
-        try:
+        with contextlib.suppress(Exception):  # keep going with the other mechanisms
             _kill_process_tree(proc, group=True)
-        except Exception:  # noqa: BLE001 - keep going with the other mechanisms
-            pass
     proc_util.terminate_job(job)
     if pid_ok:
-        try:
+        with contextlib.suppress(Exception):  # already exited / reaped
             proc.kill()
-        except Exception:  # noqa: BLE001 - already exited / reaped
-            pass
 
 
-def _run_bounded(argv: list[str], *, timeout: float, cwd: Optional[str] = None):
+def _run_bounded(argv: list[str], *, timeout: float, cwd: str | None = None):
     """Run a short `claude` subcommand (``--help``, ``auth status``) to
     completion and return ``(returncode, stdout)``.
 
@@ -439,8 +437,8 @@ def _default_auth_runner(argv: list[str]):
 
 def auth_status(
     *,
-    run: Optional[Callable[[list[str]], object]] = None,
-    which: Callable[[str], Optional[str]] = shutil.which,
+    run: Callable[[list[str]], object] | None = None,
+    which: Callable[[str], str | None] = shutil.which,
 ) -> AuthStatus:
     """Probe whether the `claude` CLI is installed and signed in.
 
@@ -720,8 +718,8 @@ def _real_runner(
     argv: list[str],
     stdin_text: str,
     *,
-    cwd: Optional[str] = None,
-    handle: Optional["ClaudeRun"] = None,
+    cwd: str | None = None,
+    handle: ClaudeRun | None = None,
 ) -> Iterator[str]:
     """Spawn `claude`, feed `stdin_text`, and yield stdout lines as they arrive.
 
@@ -743,7 +741,7 @@ def _real_runner(
     # block reading stdout). A file has no such limit; we read it back only if
     # the child exits nonzero. Binary file -> decode manually (text= applies to
     # the stdin/stdout pipes, not a redirected file handle).
-    stderr_file = tempfile.TemporaryFile()
+    stderr_file = tempfile.TemporaryFile()  # noqa: SIM115 - outlives this frame; closed in the finally below
     popen_kwargs: dict = {
         "stdin": subprocess.PIPE,
         "stdout": subprocess.PIPE,
@@ -810,7 +808,7 @@ def _real_runner(
             reaped = True
             return False
 
-    def _reap(timeout: Optional[float]) -> int:
+    def _reap(timeout: float | None) -> int:
         """``proc.wait(timeout)``, but every reap attempt holds the kill lock."""
         deadline = None if timeout is None else time.monotonic() + timeout
         delay = 0.005
@@ -830,7 +828,7 @@ def _real_runner(
     stopped_after_result = False  # ...and had to kill a lingering CLI
     stdin_ok = True       # False -> the child died before consuming stdin (P2-3)
     disconnected = False  # True -> consumer close()d us (SSE client went away)
-    stdin_thread: Optional[threading.Thread] = None  # daemon feeding stdin (P1-1)
+    stdin_thread: threading.Thread | None = None  # daemon feeding stdin (P1-1)
     stdout_tail: deque[str] = deque(maxlen=12)  # last stdout lines, for error reporting
 
     # Wall-clock watchdog (audit6 P2-2, A6): a hung `claude` (network stall,
@@ -1054,7 +1052,7 @@ def _is_error_result(obj: dict) -> bool:
 
 
 def _iter_text_deltas(
-    lines: Iterable[str], state: Optional["ClaudeRun"] = None
+    lines: Iterable[str], state: ClaudeRun | None = None
 ) -> Iterator[str]:
     """Parse newline-delimited stream-json `lines` into visible text deltas.
 
@@ -1106,9 +1104,9 @@ def _iter_text_deltas(
             # A7: remember the session id (system/init carries it first; the
             # result event repeats it) so a later follow-up can --resume.
             sid = obj.get("session_id")
-            if state is not None and isinstance(sid, str) and sid:
-                if kind in ("system", "result") or state.session_id is None:
-                    state.session_id = sid
+            if (state is not None and isinstance(sid, str) and sid
+                    and (kind in ("system", "result") or state.session_id is None)):
+                state.session_id = sid
 
             # SP5: the concrete model id behind an alias (system/init first;
             # an assistant message's own `model` only if init never said).
@@ -1177,13 +1175,13 @@ def _iter_text_deltas(
 def run(
     prompt: str,
     *,
-    model: Optional[str] = None,
-    runner: Optional[Callable[..., Iterable[str]]] = None,
-    which: Callable[[str], Optional[str]] = shutil.which,
-    system_prompt: Optional[str] = None,
+    model: str | None = None,
+    runner: Callable[..., Iterable[str]] | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+    system_prompt: str | None = None,
     persist_session: bool = False,
-    flags: Optional[frozenset] = None,
-    resume: Optional[str] = None,
+    flags: frozenset | None = None,
+    resume: str | None = None,
 ) -> ClaudeRun:
     """Stream Claude's answer to `prompt` as a sequence of text deltas.
 

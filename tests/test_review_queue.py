@@ -20,7 +20,10 @@ def root(tmp_path):
     return out
 
 
-def _record(root, paste=PASTE, *, now=datetime(2026, 1, 10, 9, 0)):
+_RECORD_NOW = datetime(2026, 1, 10, 9, 0).astimezone()
+
+
+def _record(root, paste=PASTE, *, now=_RECORD_NOW):
     return ps.record_run(
         paste, mode="answer", language="python", tier="normal", model="m",
         verdict="pass", paths=[root / "answers/x/two_sum__normal.md"], session_id=None,
@@ -78,13 +81,14 @@ def test_date_arithmetic_across_month_and_year_ends(today, box, grade, due):
 
 
 def test_local_today_uses_the_local_calendar_day():
-    late = datetime(2026, 1, 31, 23, 59, 59)          # naive = local already
-    early = datetime(2026, 2, 1, 0, 0, 1)
+    late = datetime(2026, 1, 31, 23, 59, 59).astimezone()   # aware, local zone
+    early = datetime(2026, 2, 1, 0, 0, 1).astimezone()
+    # a naive datetime counts as local wall time already
+    assert ps.local_today(late.replace(tzinfo=None)) == date(2026, 1, 31)
+    assert ps.local_today(early.replace(tzinfo=None)) == date(2026, 2, 1)
+    # an aware datetime is converted to the local zone first
     assert ps.local_today(late) == date(2026, 1, 31)
     assert ps.local_today(early) == date(2026, 2, 1)
-    # an aware datetime is converted to the local zone first
-    aware = late.astimezone()
-    assert ps.local_today(aware) == date(2026, 1, 31)
 
 
 # --- grading a record ----------------------------------------------------------------
@@ -98,13 +102,13 @@ def test_a_new_record_starts_in_box_one_due_the_next_day(root):
 
 def test_grading_moves_the_box_and_due_date_and_keeps_history(root):
     pid = _record(root)
-    t1 = datetime(2026, 1, 31, 23, 59)
+    t1 = datetime(2026, 1, 31, 23, 59).astimezone()
     res = ps.grade_problem(pid, "solo", now=t1, root=root)
     assert res["id"] == pid
     assert res["previous"] == {"box": 1, "due": "2026-01-11"}
     assert res["review"]["box"] == 2 and res["review"]["due"] == "2026-02-03"
     # one minute later is the next local day
-    t2 = datetime(2026, 2, 1, 0, 0)
+    t2 = datetime(2026, 2, 1, 0, 0).astimezone()
     res = ps.grade_problem(pid, "solo", now=t2, root=root,
                            attempt={"language": "python", "passed": 2, "total": 2})
     assert res["review"]["box"] == 3 and res["review"]["due"] == "2026-02-08"
@@ -125,7 +129,7 @@ def test_grading_moves_the_box_and_due_date_and_keeps_history(root):
 
 def test_box_is_capped_after_many_solo_grades(root):
     pid = _record(root)
-    day = datetime(2026, 5, 1, 12, 0)
+    day = datetime(2026, 5, 1, 12, 0).astimezone()
     for _ in range(8):
         res = ps.grade_problem(pid, "solo", now=day, root=root)
     assert res["review"]["box"] == 5
@@ -136,7 +140,7 @@ def test_history_is_capped(root, monkeypatch):
     monkeypatch.setattr(ps, "REVIEW_HISTORY_CAP", 3)
     pid = _record(root)
     for _ in range(5):
-        ps.grade_problem(pid, "hints", now=datetime(2026, 5, 1), root=root)
+        ps.grade_problem(pid, "hints", now=datetime(2026, 5, 1).astimezone(), root=root)
     assert len(_read(root, pid)["review"]["history"]) == 3
 
 
@@ -152,9 +156,9 @@ def test_grade_through_an_alias_updates_the_merged_record(root):
     ps.record_run("Two Sum\n\nGiven nums", mode="learning", language="python", tier=None,
                   model=None, verdict=None, paths=[root / "learning/a/two_sum.md"],
                   session_id=None, duration_s=None, pattern="hash_map",
-                  now=datetime(2026, 1, 1), root=root)
+                  now=datetime(2026, 1, 1).astimezone(), root=root)
     _record(root)  # the numbered paste folds `two_sum` into `1-two_sum`
-    res = ps.grade_problem("two_sum", "solo", now=datetime(2026, 1, 20), root=root)
+    res = ps.grade_problem("two_sum", "solo", now=datetime(2026, 1, 20).astimezone(), root=root)
     assert res["id"] == "1-two_sum"
     assert _read(root, "1-two_sum")["review"]["box"] == 2
 
@@ -165,7 +169,7 @@ def test_a_legacy_record_without_review_can_be_graded(root):
     rec = json.loads(path.read_text("utf-8"))
     del rec["review"]
     path.write_text(json.dumps(rec), "utf-8")
-    res = ps.grade_problem(pid, "solo", now=datetime(2026, 6, 1), root=root)
+    res = ps.grade_problem(pid, "solo", now=datetime(2026, 6, 1).astimezone(), root=root)
     assert res["previous"] == {"box": 1, "due": None}
     assert res["review"]["box"] == 2 and res["review"]["due"] == "2026-06-04"
 
@@ -197,7 +201,7 @@ def test_summary_lists_due_problems_and_counts(root):
     _set_review(root, a, box=2, due="2026-03-01")
     _set_review(root, b, box=1, due="2026-03-05")
     _set_review(root, c, box=4, due="2026-03-20")
-    now = datetime(2026, 3, 5, 8, 0)
+    now = datetime(2026, 3, 5, 8, 0).astimezone()
     ps.grade_problem(c, "hints", now=now, root=root)   # reviewed today, stays not due
     s = ps.review_summary(now=now, root=root)
     assert s["today"] == "2026-03-05"
@@ -214,20 +218,20 @@ def test_summary_lists_due_problems_and_counts(root):
 def test_summary_due_boundary_is_the_local_day(root):
     pid = _record(root)
     _set_review(root, pid, due="2026-02-01")
-    assert ps.review_summary(now=datetime(2026, 1, 31, 23, 59), root=root)["counts"]["due"] == 0
-    assert ps.review_summary(now=datetime(2026, 2, 1, 0, 0), root=root)["counts"]["due"] == 1
+    assert ps.review_summary(now=datetime(2026, 1, 31, 23, 59).astimezone(), root=root)["counts"]["due"] == 0
+    assert ps.review_summary(now=datetime(2026, 2, 1, 0, 0).astimezone(), root=root)["counts"]["due"] == 1
 
 
 def test_summary_treats_a_missing_or_bad_due_as_due(root):
     pid = _record(root)
     _set_review(root, pid, due=None, box="x")
-    s = ps.review_summary(now=datetime(2026, 1, 1), root=root)
+    s = ps.review_summary(now=datetime(2026, 1, 1).astimezone(), root=root)
     assert s["due"][0]["id"] == pid and s["due"][0]["due"] is None
     assert s["due"][0]["box"] == 1
 
 
 def test_summary_of_an_empty_store(root):
-    s = ps.review_summary(now=datetime(2026, 1, 1), root=root)
+    s = ps.review_summary(now=datetime(2026, 1, 1).astimezone(), root=root)
     assert s["due"] == [] and s["next_due"] is None
     assert s["counts"] == {"due": 0, "reviewed_today": 0, "scheduled": 0,
                            "by_box": {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}}
@@ -238,7 +242,7 @@ def test_summary_of_an_empty_store(root):
 def test_notes_persist_in_the_record(root):
     pid = _record(root)
     rec = ps.set_notes(pid, "remember: check before insert\n✓ unicode",
-                       now=datetime(2026, 1, 2, 3, 4), root=root)
+                       now=datetime(2026, 1, 2, 3, 4).astimezone(), root=root)
     assert rec["notes"].startswith("remember")
     stored = _read(root, pid)
     assert stored["notes"] == "remember: check before insert\n✓ unicode"

@@ -318,7 +318,7 @@ class _CappedReader(threading.Thread):
         self.overflowed = threading.Event()
         self.start()
 
-    def run(self) -> None:  # noqa: D102 - thread body
+    def run(self) -> None:  # thread body
         try:
             fd = self._stream.fileno()
             while True:
@@ -469,7 +469,7 @@ class _StdinFeeder(threading.Thread):
         """Close stdin without a go byte (no-op after :meth:`release`)."""
         self._gate.set()
 
-    def run(self) -> None:  # noqa: D102 - thread body
+    def run(self) -> None:  # thread body
         try:
             self._pipe.write(self._preamble)
             self._pipe.flush()
@@ -554,7 +554,7 @@ class _ReadyWaiter(threading.Thread):
         self.data: bytes | None = None
         self.start()
 
-    def run(self) -> None:  # noqa: D102 - thread body
+    def run(self) -> None:  # thread body
         try:
             self.data = os.read(self._stream.fileno(), len(_READY))
         except (OSError, ValueError):
@@ -962,9 +962,9 @@ def verify_python(
         # mean everything the solution printed is already captured anyway.
         out_reader.join(timeout=0.2)
         err_reader.join(timeout=0.2)
-        if out_reader.is_alive() or err_reader.is_alive():
-            if not terminate_job(job_handle) and os.name != "nt":
-                kill_process_tree(proc, group=True)
+        if ((out_reader.is_alive() or err_reader.is_alive())
+                and not terminate_job(job_handle) and os.name != "nt"):
+            kill_process_tree(proc, group=True)
 
         # Bounded join: if a leaked write handle keeps a pipe open the daemon
         # readers may never see EOF, and we must not hang on them.
@@ -1319,7 +1319,7 @@ def _verify_python_samples(
         if progress is not None:
             try:
                 progress(idx, total)
-            except Exception:  # noqa: BLE001 - progress is display-only
+            except Exception:  # progress is display-only
                 logger.debug("verify progress callback failed", exc_info=True)
         r = verify_python(
             code, s.stdin, s.expected_stdout, timeout=timeout, problem_text=problem_text,

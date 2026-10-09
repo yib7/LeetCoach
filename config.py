@@ -320,7 +320,7 @@ def _env_entries(text: str) -> list[tuple[str | None, list[str]]]:
     raw_lines = text.split("\n")
     if raw_lines and raw_lines[-1] == "":
         raw_lines.pop()  # the final newline ends the last line, no extra one
-    lines = [ln[:-1] if ln.endswith("\r") else ln for ln in raw_lines]
+    lines = [ln.removesuffix("\r") for ln in raw_lines]
     entries: list[tuple[str | None, list[str]]] = []
     i = 0
     while i < len(lines):

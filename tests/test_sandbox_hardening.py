@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -366,8 +367,8 @@ def test_default_secret_paths_cover_claude_credentials_and_the_repo_env():
     [
         "import socket\ns = socket.socket()\ns.settimeout(2)\ns.connect(('127.0.0.1', 9))",
         "import socket\nsocket.create_connection(('127.0.0.1', 9), timeout=2)",
-        "import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
-        "s.sendto(b'x', ('127.0.0.1', 9))",
+        ("import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+         "s.sendto(b'x', ('127.0.0.1', 9))"),
         "import urllib.request\nurllib.request.urlopen('http://127.0.0.1:9/', timeout=2)",
     ],
 )
@@ -595,7 +596,7 @@ def test_app_startup_sweeps_stale_run_dirs(monkeypatch):
     monkeypatch.setattr(app_module, "_existing_instance_url", lambda host, port, **kw: None)
     monkeypatch.setattr(app_module, "_choose_port", lambda preferred, host: 5007)
     monkeypatch.setattr(app_module, "_sweep_sandbox_temp", lambda: swept.append(1) or 0)
-    monkeypatch.setattr(app_module.storage, "migrate_tier_suffixes", lambda: [])
+    monkeypatch.setattr(app_module.storage, "migrate_tier_suffixes", list)
     assert app_module.main(open_browser=lambda url: None, serve=lambda port: None) == 0
     assert swept == [1]
 
@@ -607,7 +608,7 @@ def _reader_on_pipe():
     """A _CappedReader draining the read end of a fresh OS pipe; returns
     (reader, write_fd)."""
     r_fd, w_fd = os.pipe()
-    reader = sandbox._CappedReader(open(r_fd, "rb"))
+    reader = sandbox._CappedReader(open(r_fd, "rb"))  # noqa: SIM115 - the reader owns + closes it
     return reader, w_fd
 
 
@@ -639,7 +640,7 @@ def test_capped_reader_decodes_once_at_the_end():
     """A UTF-8 character split across two writes decodes cleanly, and bytes
     that are not UTF-8 become U+FFFD instead of raising."""
     reader, w_fd = _reader_on_pipe()
-    e_acute = "é".encode("utf-8")
+    e_acute = "é".encode()
     os.write(w_fd, b"a" + e_acute[:1])
     assert _wait_for(lambda: reader._kept == 2)  # first half already read
     os.write(w_fd, e_acute[1:] + b"b\xff\xfe")
@@ -715,7 +716,8 @@ def test_stdin_feeder_writes_the_go_byte_only_when_released():
     all (the bootstrap then exits without running anything)."""
     for released in (True, False):
         r_fd, w_fd = os.pipe()
-        feeder = sandbox._StdinFeeder(open(w_fd, "wb"), b"CFG", b"sample\n")
+        stdin_w = open(w_fd, "wb")  # noqa: SIM115 - the feeder owns + closes it
+        feeder = sandbox._StdinFeeder(stdin_w, b"CFG", b"sample\n")
         assert os.read(r_fd, 3) == b"CFG"
         if released:
             feeder.release()
@@ -819,7 +821,7 @@ def test_rmtree_retry_keeps_going_when_an_inner_entry_vanished(tmp_path, monkeyp
 
 
 def _make_junction(link, target) -> None:
-    import _winapi  # noqa: PLC0415 - Windows-only
+    import _winapi  # Windows-only
 
     _winapi.CreateJunction(str(target), str(link))
 
@@ -948,7 +950,7 @@ def test_go_constant_is_an_explicit_escape_shared_with_the_bootstrap():
     assert sandbox._GO is sandbox_bootstrap.GO
     assert sandbox_bootstrap.GO == b"\x01"
     for mod in (sandbox, sandbox_bootstrap):
-        raw = open(mod.__file__, "rb").read()
+        raw = Path(mod.__file__).read_bytes()
         bad = [b for b in raw if b < 0x20 and b not in (0x09, 0x0A, 0x0D)]
         assert bad == [], f"raw control bytes in {mod.__file__}: {bad}"
 
@@ -1037,9 +1039,9 @@ def test_every_bind_is_blocked(body):
         # SP3 re-review I-2: an in-memory db could ATTACH a file anywhere on
         # disk (sqlite does that write itself, no audited open), and
         # enable_load_extension would load native code.
-        "import sqlite3\n"
-        "sqlite3.connect(':memory:').execute(f\"ATTACH DATABASE '{arg}' AS x\")\n"
-        "sqlite3.connect(':memory:').execute('create table x.t(v)')",
+        ("import sqlite3\n"
+         "sqlite3.connect(':memory:').execute(f\"ATTACH DATABASE '{arg}' AS x\")\n"
+         "sqlite3.connect(':memory:').execute('create table x.t(v)')"),
         "import sqlite3\nc = sqlite3.connect(':memory:')\nc.enable_load_extension(True)",
         "import sqlite3\nc = sqlite3.connect(':memory:')\nc.load_extension('nope')",
     ],
@@ -1095,7 +1097,7 @@ def test_a_udp_bind_does_not_unlock_a_tcp_connect_to_a_foreign_listener(tmp_path
             go_file.write_text("x")  # the bind itself was refused: nothing to serve
             return
         time.sleep(0.05)
-        port = int(open(port_file).read())
+        port = int(Path(port_file).read_text())
         with socket.socket() as srv:
             srv.bind(("127.0.0.1", port))
             srv.listen(1)

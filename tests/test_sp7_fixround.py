@@ -53,8 +53,8 @@ def test_tsv_export_keeps_its_header_and_neutralizes_cells():
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ('  File "C:\\Users\\Jo Smith\\AppData\\Local\\Temp\\leetcoach_run_0knjqxj5\\solution.py", '
-     'line 2', '  File "solution.py", line 2'),
+    (('  File "C:\\Users\\Jo Smith\\AppData\\Local\\Temp\\leetcoach_run_0knjqxj5\\solution.py", '
+      'line 2'), '  File "solution.py", line 2'),
     ('  File "/tmp/leetcoach_run_ab_12/solution.py", line 7, in <module>',
      '  File "solution.py", line 7, in <module>'),
     ("can't open file 'C:\\Temp\\leetcoach_run_x1\\solution.py'", "can't open file 'solution.py'"),

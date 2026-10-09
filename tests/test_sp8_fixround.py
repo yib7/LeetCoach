@@ -83,7 +83,7 @@ def test_legacy_doc_stats_date_is_unchanged_by_a_followup(root):  # noqa: F811
     after = c.get("/stats").get_json()
     assert after == before
     assert after["today"] == 0 and after["sources"]["legacy"] == 1
-    day = (datetime.now() - timedelta(days=10)).date().isoformat()
+    day = (datetime.now().astimezone() - timedelta(days=10)).date().isoformat()
     assert {h["date"]: h["count"] for h in after["heatmap"]}[day] == 1
 
 

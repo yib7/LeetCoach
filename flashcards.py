@@ -92,7 +92,7 @@ def _items(section: str) -> list[str]:
 
 def _clean(text: str) -> str:
     text = _TRAIL_SEP_RE.sub("", text.strip())
-    text = re.sub(r"^(?:\*\*|__)(.*)(?:\*\*|__)$", r"\1", text, flags=re.S).strip()
+    text = re.sub(r"^(?:\*\*|__)(.*)(?:\*\*|__)$", r"\1", text, flags=re.DOTALL).strip()
     for mark in ("**", "__"):  # an unbalanced wrapper left by a split label
         if text.count(mark) % 2:
             if text.endswith(mark):

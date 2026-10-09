@@ -36,8 +36,7 @@ def make_recording_runner(lines, *, terminal_result=True):
 
     def runner(argv, stdin_text, **kwargs):  # kwargs: cwd / handle (A7)
         calls.append({"argv": list(argv), "stdin": stdin_text})
-        for line in lines:
-            yield line
+        yield from lines
 
     return runner, calls
 
@@ -646,8 +645,8 @@ def test_error_from_stream_extracts_stdout_failure():
     lines = [
         '{"type":"system","subtype":"init"}\n',
         '{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}\n',
-        '{"type":"result","subtype":"success","is_error":true,'
-        '"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}\n',
+        ('{"type":"result","subtype":"success","is_error":true,'
+         '"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}\n'),
     ]
     assert claude_cli._error_from_stream(lines) == (
         "Failed to authenticate: OAuth session expired and could not be refreshed"

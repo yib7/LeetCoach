@@ -48,6 +48,7 @@ def _parse_ps1_with_powershell(path):
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _PARSE_CHECK_SCRIPT],
         capture_output=True,
         text=True,
+        check=False,
         timeout=30,
         env=env,
     )
@@ -158,6 +159,7 @@ def _run_ensure_script(claude_bin, extra_env=None):
         ],
         capture_output=True,
         text=True,
+        check=False,
         timeout=30,
         env=env,
     )
@@ -248,6 +250,7 @@ def test_bare_name_with_both_ps1_and_cmd_shims_on_path_resolves_to_the_cmd(tmp_p
         ],
         capture_output=True,
         text=True,
+        check=False,
         timeout=30,
         env=env,
     )

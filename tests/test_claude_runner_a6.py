@@ -174,7 +174,7 @@ def test_cancel_before_spawn_kills_immediately():
     script = "import sys, time\nsys.stdin.read()\ntime.sleep(40)\n"
     handle = claude_cli.ClaudeRun()
     handle.cancel()  # raced ahead of the spawn
-    lines, exc, elapsed, finished = _drive(
+    _lines, exc, elapsed, finished = _drive(
         [sys.executable, "-c", script], "ping", handle=handle
     )
     assert finished and elapsed < 10
