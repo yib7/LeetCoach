@@ -382,13 +382,65 @@ def test_deleting_or_moving_files_outside_the_run_dir_is_blocked(tmp_path, body)
     assert target.read_text(encoding="utf-8") == "original"
 
 
-def test_reading_a_non_secret_file_outside_the_run_dir_is_allowed(tmp_path):
-    """Reads are NOT blanket-blocked (imports need them) — only secret paths."""
-    plain = tmp_path / "plain.txt"
-    plain.write_text("hello", encoding="utf-8")
-    code = "import sys\nprint(open(sys.stdin.readline().strip()).read())\n"
-    r = sandbox.verify_python(code, str(plain) + "\n", "hello")
+@pytest.mark.parametrize(
+    "body",
+    [
+        "open(arg).read()",
+        "open(arg, 'rb').read()",
+        "import os\nos.open(arg, os.O_RDONLY)",
+        "import pathlib\npathlib.Path(arg).read_text()",
+        # linecache swallows the refusal; re-raise it when nothing was read
+        ("import linecache\nif not linecache.getline(arg, 1):\n"
+         "    raise PermissionError('LeetCoach sandbox: open is blocked')"),
+        "import os\nos.listdir(os.path.dirname(arg))",
+        "import os\nlist(os.scandir(os.path.dirname(arg)))",
+        ("import os\nopen(os.path.join('..', os.path.basename(os.path.dirname(arg)),"
+         " os.path.basename(arg))).read()"),
+    ],
+)
+def test_reading_a_plain_file_outside_the_run_dir_is_blocked(tmp_path, body):
+    # Phase 4: reads used to be blocked only under the known secret paths, so a
+    # prompt-injected solution could read anything else you can (another
+    # project's .env, a browser profile). Outside the run dir and the Python
+    # installation, every read and listing is now refused.
+    plain_dir = tmp_path / "elsewhere"
+    plain_dir.mkdir()
+    plain = plain_dir / "plain.txt"
+    plain.write_text("not yours", encoding="utf-8")
+    r = _run_probe(body, str(plain))
     assert r.status == "pass", r
+
+
+def test_reading_inside_the_run_dir_and_the_stdlib_still_works():
+    code = (
+        "import inspect, json, os, sys, heapq\n"
+        "here = open(__file__).read()\n"
+        "assert 'inspect' in here\n"
+        "assert os.listdir(os.path.dirname(os.path.abspath(__file__)))\n"
+        "assert 'def heappush' in inspect.getsource(heapq)\n"
+        "open('scratch.txt', 'w').write('x')\n"
+        "print(open('scratch.txt').read() + sys.stdin.readline().strip())\n"
+    )
+    r = sandbox.verify_python(code, "y\n", "xy")
+    assert r.status == "pass", r
+
+
+def test_a_traceback_still_shows_the_failing_source_line():
+    code = "import json\ndef boom():\n    raise ValueError('kaboom marker')\nboom()\n"
+    r = sandbox.verify_python(code, "", "never")
+    assert r.status in ("fail", "error"), r
+    stderr = "".join(str(d.get("stderr", "")) for d in (r.detail or []))
+    assert "raise ValueError('kaboom marker')" in stderr, r
+
+
+def test_python_read_roots_cover_the_interpreter():
+    import sandbox_bootstrap
+
+    roots = {os.path.normcase(os.path.realpath(p))
+             for p in sandbox_bootstrap.python_read_roots()}
+    stdlib = os.path.normcase(os.path.realpath(os.path.dirname(os.__file__)))
+    assert any(stdlib == r or stdlib.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
+    assert os.path.normcase(os.path.realpath(sys.base_prefix)) in roots
 
 
 @pytest.fixture

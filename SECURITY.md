@@ -85,8 +85,12 @@ best-effort. What the sandbox does:
   - SQLite altogether (`sqlite3.connect`, `enable_load_extension`,
     `load_extension`): even an in-memory database can `ATTACH` a file anywhere
     on disk, and extensions are native code, so no path check could hold;
-  - opening or listing known secret locations: `~/.claude` and `~/.claude.json`,
-    this repo's `.env`, `~/.ssh`, `~/.aws`, git and GitHub CLI credentials, the
+  - reading or listing anything outside the throwaway directory and the Python
+    installation (its prefixes and `sys.path`), so imports and tracebacks work
+    but your other files (another project's `.env`, a browser profile) can't be
+    read;
+  - opening or listing known secret locations, wherever they are: `~/.claude`
+    and `~/.claude.json`, this repo's `.env`, `~/.ssh`, `~/.aws`, git and GitHub CLI credentials, the
     npm, PyPI, Docker, Kubernetes and GnuPG stores (`~/.npmrc`, `~/.pypirc`,
     `~/.docker/config.json`, `~/.kube`, `~/.gnupg`), and the Windows credential
     stores under `%APPDATA%` / `%LOCALAPPDATA%`;
