@@ -261,6 +261,41 @@ def test_running_instance_accepts_only_leetcoach(monkeypatch):
     assert run_fake.running_instance(5057, opener=refused) is None
 
 
+def test_seed_dates_runs_by_local_calendar_days(tmp_path, monkeypatch):
+    # 3A W9: seeded at 00:30 four days after a US DST change, "N days ago" as
+    # N * 86400 s put the 4-day-old run on the wrong date (a gap in the streak).
+    from datetime import date, datetime, timedelta
+
+    import problem_store
+    import stats
+
+    run_fake = _load_run_fake()
+    frozen = datetime(2026, 3, 12, 0, 30).astimezone()
+    monkeypatch.setattr(run_fake.time, "time", lambda: frozen.timestamp())
+    out = tmp_path / "output"
+    run_fake.seed(out)
+    today = date(2026, 3, 12)
+    # every log line sits on its own calendar day (10 minutes before the
+    # seeding time of day, 00:20, so still that day)
+    by_age = {age: pid for age, pid, *_ in run_fake.LOG}
+    entries = problem_store.read_runs(root=out)
+    for e in entries:
+        day = datetime.fromisoformat(e["ts"]).astimezone().date()
+        assert (today - day).days in by_age, (e["ts"], e["problem_id"])
+    ages = sorted({(today - datetime.fromisoformat(e["ts"]).astimezone().date()).days
+                   for e in entries})
+    assert ages == sorted(set(by_age))
+    # and the legacy files' mtimes agree with their seeded ages
+    for rel, _content, age_days in run_fake.SEED:
+        mtime = (out / rel).stat().st_mtime
+        assert datetime.fromtimestamp(mtime).astimezone().date() == today - timedelta(
+            days=age_days), rel
+    files = [{"path": p.relative_to(out).as_posix(), "mtime": p.stat().st_mtime}
+             for p in out.rglob("*") if p.is_file() and ".leetcoach" not in p.parts]
+    s = stats.compute_stats(entries, files, now=frozen)
+    assert s["today"] >= 3
+
+
 def test_running_instance_survives_a_non_http_listener():
     # 3A S12: a non-HTTP listener on 5057 makes urllib raise BadStatusLine (an
     # http.client.HTTPException, not OSError); that is "not LeetCoach", not a crash.

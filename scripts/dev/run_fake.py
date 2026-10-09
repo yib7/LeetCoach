@@ -49,8 +49,6 @@ SHIM = ROOT / "scripts" / "dev" / ("fake_claude.cmd" if os.name == "nt" else "fa
 PORT = 5057
 MARKER = ".leetcoach-fake"
 
-DAY = 86400
-
 PY_TWO_SUM = """\
 import sys
 
@@ -257,6 +255,16 @@ def _iso(stamp: float) -> str:
     return datetime.fromtimestamp(stamp).astimezone().isoformat(timespec="seconds")
 
 
+def _ago(now: float, days: int, seconds: float = 0) -> float:
+    """Epoch seconds ``days`` local calendar days (and ``seconds``) before
+    ``now``, by wall-clock arithmetic: ``days * 86400`` real seconds lands on
+    the neighbouring date near midnight when a 23 h / 25 h DST day lies in
+    between (3A W9)."""
+    # naive on purpose: local wall-clock arithmetic
+    local = datetime.fromtimestamp(now) - timedelta(days=days, seconds=seconds)  # noqa: DTZ006
+    return local.timestamp()
+
+
 def _review_state(pid: str, now: float) -> tuple[dict, str] | None:
     """The seeded ``review`` block + notes for ``pid`` (None: the default)."""
     if pid not in REVIEW_STATE:
@@ -268,7 +276,7 @@ def _review_state(pid: str, now: float) -> tuple[dict, str] | None:
     for ago, grade, from_box, to_box in grades:
         day = today - timedelta(days=ago)
         history.append({
-            "ts": _iso(now - ago * DAY), "day": day.isoformat(), "grade": grade,
+            "ts": _iso(_ago(now, ago)), "day": day.isoformat(), "grade": grade,
             "from_box": from_box, "box": to_box,
             "due": (day + timedelta(days=intervals[to_box - 1])).isoformat(),
         })
@@ -285,7 +293,7 @@ def _seed_metadata(output: Path, now: float) -> None:
     lines = []
     records: dict[str, dict] = {}
     for age, pid, mode, lang, tier, verdict, files in sorted(LOG, key=lambda e: -e[0]):
-        stamp = now - age * DAY - 600
+        stamp = _ago(now, age, 600)
         number, title, difficulty, pattern, statement = PROBLEMS[pid]
         lines.append(json.dumps({
             "ts": _iso(stamp), "problem_id": pid, "mode": mode, "language": lang,
@@ -331,7 +339,7 @@ def seed(output: Path) -> None:
         path = output / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8", newline="\n")
-        stamp = now - age_days * DAY - 600
+        stamp = _ago(now, age_days, 600)
         os.utime(path, (stamp, stamp))
     _seed_metadata(output, now)
 
