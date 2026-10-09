@@ -261,6 +261,19 @@ def test_running_instance_accepts_only_leetcoach(monkeypatch):
     assert run_fake.running_instance(5057, opener=refused) is None
 
 
+def test_running_instance_survives_a_non_http_listener():
+    # 3A S12: a non-HTTP listener on 5057 makes urllib raise BadStatusLine (an
+    # http.client.HTTPException, not OSError); that is "not LeetCoach", not a crash.
+    import http.client
+
+    run_fake = _load_run_fake()
+
+    def garbage(u, timeout):
+        raise http.client.BadStatusLine("-ERR unknown command")
+
+    assert run_fake.running_instance(5057, opener=garbage) is None
+
+
 # ---- SP6: the fake's docs follow the D2 contract ------------------------------
 
 def _doc(flags, mode, problem=TWO_SUM, *, language="python", crlf=False):

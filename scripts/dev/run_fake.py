@@ -32,6 +32,7 @@ URL and exits: it never re-seeds (wipes) the library of a running instance.
 """
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import json
 import os
@@ -364,7 +365,8 @@ def running_instance(port: int = PORT, *, timeout: float = 1.0, opener=None) -> 
     try:
         with opener(url + "healthz", timeout=timeout) as resp:
             data = json.loads(resp.read(4096).decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
+        # 3A S12: a non-HTTP listener raises BadStatusLine (not an OSError).
         return None
     return url if isinstance(data, dict) and data.get("app") == "leetcoach" else None
 
