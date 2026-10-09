@@ -61,11 +61,15 @@ best-effort. What the sandbox does:
   **fails closed**: the child is killed before the go signal, none of the
   generated code runs, a warning is logged, and the result is "not verified"
   ("sandbox caps unavailable"). It never falls back to an uncapped run;
-- on POSIX, the equivalent memory/CPU/file-size/process resource limits, set by
-  the bootstrap before the go signal. If a required limit cannot be set, the
+- on POSIX, the equivalent memory/CPU/file-size resource limits, set by the
+  bootstrap before the go signal. If a required limit cannot be set, the
   generated code does not run and the result is "not verified". macOS often
   refuses the address-space (memory) limit; there it is skipped with a note on
-  stderr, so the memory cap is best-effort on macOS only;
+  stderr, so the memory cap is best-effort on macOS only. The process limit
+  (`RLIMIT_NPROC`) counts every process of your user (every thread, on Linux),
+  not just the run's, so it is set to what you already run plus 128; when that
+  count cannot be taken it is left unset and process creation is refused by the
+  audit hook alone;
 - the bootstrap tells the app it is ready right before it waits for the go
   signal, and the app only sends go after that. If the bootstrap stops before
   that point (limits that could not be set, a malformed config), none of the
@@ -92,7 +96,10 @@ best-effort. What the sandbox does:
     socket pair was removed after it was bypassed three times; LeetCode
     solutions need neither sockets nor `asyncio`.)
   - starting processes (`subprocess`, `os.system`, `os.exec*`, `os.spawn*`,
-    `multiprocessing`);
+    `multiprocessing`). On POSIX that includes `_posixsubprocess.fork_exec`,
+    which raises no audit event of its own: `multiprocessing` calls it directly
+    to start spawn-method children, so the bootstrap replaces it with a refusal
+    before any generated code runs;
   - loading libraries through `ctypes`, and walking the heap with
     `gc.get_objects` / `get_referrers` / `get_referents`;
   - creating symlinks or junctions, and writing to the registry.

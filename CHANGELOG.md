@@ -129,6 +129,16 @@ follow-up questions on a saved doc.
   rows, focus traps, better contrast, a sidebar drawer below 900 px, and dead CSS removed.
 
 ### Security
+- **`multiprocessing` can no longer start an unhooked child on Linux or macOS.**
+  `_posixsubprocess.fork_exec` raises no audit event, and `multiprocessing`'s spawn
+  start method (the macOS default) and its resource tracker call it directly, so a
+  solution could start a Python child without the sandbox's audit hook. The bootstrap
+  now replaces it with a refusal before the solution runs.
+- **The POSIX process limit no longer breaks threads on a busy desktop.** `RLIMIT_NPROC`
+  counts every process of the user (every thread on Linux), so the fixed cap of 64
+  stopped a solution from starting even one thread once the desktop ran more than that.
+  It is now the user's current count plus 128 (from `/proc` on Linux, `ps` elsewhere),
+  and is left unset when that count cannot be taken.
 - **Sandbox start-up (A5).** The sandbox child is the real interpreter running a trusted
   bootstrap. The bootstrap waits for a go byte that is sent only after the Job Object is
   assigned, and the sandbox fails closed.
