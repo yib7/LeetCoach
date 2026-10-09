@@ -1366,7 +1366,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     _attempts[test_id] = cancel
             try:
                 result = practice.run_cases(code, cases, problem_text=statement, cancel=cancel)
-            except Exception as exc:  # noqa: BLE001 - 3A W5: answer in JSON, never an HTML 500
+            except Exception as exc:  # 3A W5: answer in JSON, never an HTML 500
                 # Like /run's _verify_code: a sandbox that cannot even start
                 # (most often a full / unwritable temp dir) is reported, not raised.
                 app.logger.exception("test run failed (problem=%s)", pid)
