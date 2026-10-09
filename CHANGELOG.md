@@ -121,6 +121,9 @@ follow-up questions on a saved doc.
   - CRLF text is saved with single line breaks, so an identical re-run reuses its file.
   - A paste whose first line is generic ("Description", "Problem:") is saved under the
     problem's title instead of `description.md`, `description__2.md` and so on.
+  - `GET /problems` checks which run files still exist against the cached library
+    listing instead of resolving every path on every call: about 300 ms down to about
+    40 ms on a library of 500 problems.
 - **Ship audit: runner and sandbox.**
   - On Linux and macOS, helper processes the CLI leaves behind are killed with its
     process group when a run ends.
