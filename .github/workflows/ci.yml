@@ -120,7 +120,6 @@ jobs:
     defaults:
       run:
         shell: powershell
-        working-directory: ${{ runner.temp }}
     steps:
       - name: "Prerequisite check: Python 3.12+ via the py launcher"
         run: |
@@ -128,6 +127,7 @@ jobs:
           py -3 --version
 
       - name: "Step 1: get the code (git clone)"
+        working-directory: ${{ runner.temp }}
         run: |
           git clone --quiet "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git" LeetCoach
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -197,11 +197,9 @@ jobs:
     # fake claude CLI (scripts/dev/fake_claude.py), then ask /healthz.
     name: README setup (linux, clean runner)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ runner.temp }}
     steps:
       - name: "Step 1: get the code (git clone)"
+        working-directory: ${{ runner.temp }}
         run: |
           python3 --version
           git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" LeetCoach
