@@ -8,13 +8,17 @@ runtime CDN. Everything else in the repo is original to this project.
 
 | File(s) | Library | Version | License | Used for |
 | --- | --- | --- | --- | --- |
-| `marked.min.js` | [marked](https://github.com/markedjs/marked) | 12.0.2 | MIT (plus the original Markdown BSD-style notice) | Rendering Claude's markdown answer in the browser |
-| `highlight.min.js`, `hljs-python.min.js`, `hljs-cpp.min.js`, `hljs-java.min.js` | [highlight.js](https://github.com/highlightjs/highlight.js) | 11.9.0 | BSD-3-Clause | Syntax highlighting (core + the `python`, `cpp`, `java` grammars) |
-| `highlight-github-dark.min.css` | highlight.js `github-dark` theme | 11.9.0 | BSD-3-Clause (ships with highlight.js) | Code-block colours |
+| `marked.min.js` | [marked](https://github.com/markedjs/marked) | 18.1.0 | MIT (plus the original Markdown BSD-style notice) | Rendering Claude's markdown answer in the browser |
+| `highlight.min.js`, `hljs-python.min.js`, `hljs-cpp.min.js`, `hljs-java.min.js` | [highlight.js](https://github.com/highlightjs/highlight.js) | 11.12.0 | BSD-3-Clause | Syntax highlighting (core + the `python`, `cpp`, `java` grammars) |
+| `highlight-github-dark.min.css` | highlight.js `github-dark` theme | 11.12.0 | BSD-3-Clause (ships with highlight.js) | Code-block colours |
 
-The vendored files are unmodified minified builds. Both licenses permit redistribution
-on condition that the copyright notices and license texts travel with the code, so the
-full texts are reproduced under [License texts](#license-texts) below.
+The vendored files are the libraries' published minified builds, taken from the npm
+registry tarballs (integrity hashes checked): `marked.min.js` is `lib/marked.umd.js` from
+`marked`, with only its trailing `sourceMappingURL` comment removed (the map is not
+shipped); the highlight.js files are `highlight.min.js`, `languages/{python,cpp,java}.min.js`
+and `styles/github-dark.min.css` from `@highlightjs/cdn-assets`, unmodified. Both licenses
+permit redistribution on condition that the copyright notices and license texts travel
+with the code, so the full texts are reproduced under [License texts](#license-texts) below.
 
 ## Original assets
 
