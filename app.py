@@ -198,12 +198,20 @@ def _json_object() -> tuple[dict, Response | None]:
     parses to ``None`` and is treated as ``{}`` (unchanged: every field is then
     "missing", handled by each route's own validation) since it's
     indistinguishable from an explicit JSON ``null``.
+
+    3A W2: ``silent=True`` only swallows ``ValueError``; a body of a few hundred
+    thousand nested ``[`` makes the decoder raise ``RecursionError``, which
+    would otherwise be an HTML 500 from every JSON route.
     """
-    data = request.get_json(silent=True)
+    not_object = (jsonify({"error": "Request body must be a JSON object."}), 400)
+    try:
+        data = request.get_json(silent=True)
+    except RecursionError:
+        return {}, not_object
     if data is None:
         return {}, None
     if not isinstance(data, dict):
-        return {}, (jsonify({"error": "Request body must be a JSON object."}), 400)
+        return {}, not_object
     return data, None
 
 

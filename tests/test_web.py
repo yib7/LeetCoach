@@ -260,6 +260,32 @@ def test_config_model_rejects_non_object_json_body(client, payload):
     assert not (tmp_path / ".env").exists()
 
 
+# --- 3A W2: a deeply nested JSON body -> the same clean 400, not an HTML 500 --
+
+DEEP_JSON = "[" * 200_000  # ~200 KB, well under MAX_CONTENT_LENGTH
+
+
+@pytest.mark.parametrize("method,path", [
+    ("post", "/run"),
+    ("post", "/ask"),
+    ("post", "/config/model"),
+    ("post", "/attempt/test"),
+    ("post", "/followup"),
+    ("put", "/problems/two-sum/notes"),
+    ("post", "/problems/two-sum/grade"),
+    ("post", "/run/cancel"),
+])
+def test_json_routes_reject_a_deeply_nested_body(client, method, path):
+    # json.loads raises RecursionError, which get_json(silent=True) does not
+    # swallow; every JSON route must still answer with its JSON 400.
+    c, tmp_path = client
+    resp = getattr(c, method)(path, data=DEEP_JSON, content_type="application/json")
+    assert resp.status_code == 400
+    assert resp.is_json
+    assert "JSON object" in resp.get_json()["error"]
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
 # --- B24: no extracted code -> no empty code file lands in the library -----
 
 NO_CODE_ANSWER_MARKDOWN = (
