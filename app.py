@@ -1201,7 +1201,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         for rec in problem_store.list_problems():
             item = {k: rec.get(k) for k in PROBLEM_SUMMARY_FIELDS}
             runs = _existing_runs(rec.get("runs"))
-            aliases = rec.get("aliases") if isinstance(rec.get("aliases"), list) else []
+            # 3A W3: a hand-edited record may hold non-string aliases; an
+            # unhashable one would crash the set below, so keep strings only.
+            raw_aliases = rec.get("aliases")
+            aliases = ([a for a in raw_aliases if isinstance(a, str)]
+                       if isinstance(raw_aliases, list) else [])
             item["runs"] = runs
             item["aliases"] = aliases
             item["run_count"] = sum(counts.get(i, 0) for i in {rec.get("id"), *aliases})
