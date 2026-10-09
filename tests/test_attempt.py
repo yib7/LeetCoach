@@ -253,6 +253,52 @@ def test_second_concurrent_test_is_409_and_cancel_stops_the_first(application, r
     assert _test(client, pid, GOOD).status_code == 200
 
 
+# --- 3A W5: a sandbox that cannot start -> a JSON error, not an HTML 500 ------------
+
+@pytest.mark.parametrize("exc", [
+    OSError(28, "No space left on device"),
+    PermissionError(13, "Access is denied"),
+    RuntimeError("unexpected"),
+])
+def test_a_sandbox_failure_is_a_json_error_and_frees_the_slot(
+        client, root, monkeypatch, caplog, exc):
+    pid = _seed(root)
+
+    def boom(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(practice, "run_cases", boom)
+    with caplog.at_level("ERROR"):
+        resp = _test(client, pid, GOOD, test_id="t-boom")
+    assert resp.status_code == 500
+    assert resp.is_json
+    error = resp.get_json()["error"]
+    assert "temp" in error.lower() and "could not" in error.lower()
+    assert any("test run failed" in r.getMessage() for r in caplog.records)
+    # the slot and the cancel registry are released
+    assert client.post("/attempt/cancel", json={"test_id": "t-boom"}).status_code == 404
+    monkeypatch.setattr(practice, "run_cases", lambda *a, **k: {"status": "pass"})
+    assert _test(client, pid, GOOD).status_code == 200
+
+
+def test_an_unwritable_temp_dir_is_a_json_error(client, root, monkeypatch):
+    # the real path: sandbox.verify_python's mkdtemp fails (full / read-only temp)
+    import sandbox
+
+    pid = _seed(root)
+
+    def no_temp(*a, **k):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(sandbox.tempfile, "mkdtemp", no_temp)
+    resp = _test(client, pid, GOOD)
+    assert resp.is_json
+    data = resp.get_json()
+    # either the route's guard (500 + error) or a sandbox that degrades on its
+    # own (200 + a not-verified / error status) - never an HTML 500
+    assert ("error" in data) if resp.status_code == 500 else resp.status_code == 200
+
+
 # --- practice.run_cases aggregation (no sandbox) ----------------------------------------
 
 def _fake(results):
