@@ -153,6 +153,7 @@ FLAG_PROBE_FAILURE_TTL = 60.0   # a failed probe is retried after this long
 
 _monotonic = time.monotonic     # indirection so tests can drive the clock
 _flag_cache: dict = {}          # resolved binary -> (flags, expires_at|None)
+_flag_failure: dict = {}        # resolved binary -> why its last probe failed
 _flag_lock = threading.Lock()
 
 # SP2 M4: only a flag in the OPTION COLUMN counts (an indented line starting
@@ -178,6 +179,7 @@ def clear_flag_cache() -> None:
     """Forget cached help-probe results (tests; or after a CLI upgrade)."""
     with _flag_lock:
         _flag_cache.clear()
+        _flag_failure.clear()
 
 
 class HelpProbeError(RuntimeError):
@@ -224,9 +226,10 @@ def cli_supported_flags() -> frozenset:
     binary); a failed one (missing binary, timeout, crash, nonzero exit)
     yields an empty set - "pass no optional flags", the pre-A7 behaviour - and
     is retried after :data:`FLAG_PROBE_FAILURE_TTL`. A timeout is retried once
-    immediately, and a failure is logged as a WARNING with its reason (3A C2):
-    runs then go out WITHOUT the isolation flags, which must never be silent.
-    Never raises: the probe must never break a run. The lock is held across
+    immediately, and a failure is logged as a WARNING with its reason (3A C2)
+    and kept for :func:`flag_probe_failure`. Never raises; :func:`run` is the
+    one that refuses to start a call after a failed probe (Phase 4: never run
+    without the isolation flags). The lock is held across
     the probe so concurrent first calls (study run + background classifier)
     spawn it only once.
     """
@@ -239,16 +242,28 @@ def cli_supported_flags() -> frozenset:
             return hit[0]
         text, reason = _probe_help_with_retry(binary)
         flags = parse_help_flags(text) if text else frozenset()
-        if not flags:
+        if flags:
+            _flag_failure.pop(key, None)
+        else:
+            _flag_failure[key] = reason or "no options listed"
             with contextlib.suppress(Exception):  # logging must never break a run
                 logger.warning(
-                    "`%s --help` probe failed (%s): running WITHOUT the isolation "
-                    "flags (--safe-mode, --tools \"\", --strict-mcp-config, "
+                    "`%s --help` probe failed (%s): claude calls are refused until "
+                    "it works, since they would run WITHOUT the isolation flags "
+                    "(--safe-mode, --tools \"\", --strict-mcp-config, "
                     "--no-session-persistence); retrying in %g s.",
-                    binary, reason or "no options listed", FLAG_PROBE_FAILURE_TTL,
+                    binary, _flag_failure[key], FLAG_PROBE_FAILURE_TTL,
                 )
         _flag_cache[key] = (flags, None if flags else now + FLAG_PROBE_FAILURE_TTL)
         return flags
+
+
+def flag_probe_failure() -> str:
+    """Why the cached ``claude --help`` probe of the configured binary failed,
+    or ``""`` when it has not failed (or has not run)."""
+    binary = config.claude_bin()
+    with _flag_lock:
+        return _flag_failure.get(shutil.which(binary) or binary, "")
 
 
 _mkdtemp_cwd: str | None = None  # 3A C6: the last-resort dir, made once per process
@@ -1449,6 +1464,18 @@ def _run_gen(
 
     if flags is None:
         flags = cli_supported_flags()
+        if not flags:
+            # Phase 4: fail closed. Without the probe there is no --tools "",
+            # --safe-mode or --strict-mcp-config, and a prompt-injected problem
+            # could reach the tools the user's own Claude Code settings allow.
+            raise ClaudeUnavailableError(
+                f"`{config.claude_bin()} --help` could not be read "
+                f"({flag_probe_failure() or 'no options listed'}), so LeetCoach "
+                "cannot confirm the CLI's isolation flags (no tools, no MCP "
+                "servers, safe mode) and did not start the call. Try again in a "
+                f"minute; if it keeps failing, check that `{config.claude_bin()} "
+                "--help` works in a terminal."
+            )
     if resume is not None:
         if not isinstance(resume, str) or not SESSION_ID_RE.fullmatch(resume):
             raise ResumeUnsupportedError("The saved session id is not resumable.")
