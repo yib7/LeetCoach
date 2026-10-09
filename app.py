@@ -52,6 +52,7 @@ import contextlib
 import http.client
 import inspect
 import io
+import ipaddress
 import json
 import os
 import queue
@@ -272,6 +273,18 @@ def _attempt_summary(value) -> tuple[dict | None, str | None]:
     if "passed" in out and "total" in out and out["passed"] > out["total"]:
         return None, "Attempt passed cannot exceed total."
     return (out or None), None
+
+
+def _is_loopback_peer(addr: str | None) -> bool:
+    """Phase 4: whether the TCP peer (``request.remote_addr``) is this machine.
+    An IPv4-mapped IPv6 peer (``::ffff:127.0.0.1``) counts by its IPv4 form.
+    A missing or unparseable address is not loopback (fail closed)."""
+    try:
+        ip = ipaddress.ip_address((addr or "").strip())
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return (mapped or ip).is_loopback
 
 
 def _hostname(host: str) -> str:
@@ -1056,6 +1069,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # executing generated code in the sandbox). The browser still sends the
         # attacker's hostname in Host, so rejecting non-loopback hostnames
         # blocks the attack for every route.
+        # Phase 4: and the peer itself must be this machine. `python app.py`
+        # binds 127.0.0.1, but `flask run --host 0.0.0.0` or a WSGI server on
+        # a LAN address would expose every route, and a LAN client can send
+        # `Host: 127.0.0.1` itself - the Host check alone does not stop it.
+        if not _is_loopback_peer(request.remote_addr):
+            return jsonify({"error": "LeetCoach only serves this computer."}), 403
         if _hostname(request.host) not in ALLOWED_HOSTNAMES:
             return jsonify({"error": "Forbidden host."}), 403
         # C2: a hostile page on another origin can still POST to loopback
