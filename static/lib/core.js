@@ -852,6 +852,53 @@
     return "";
   }
 
+  // 3A W6: "only the newest request may update the page". start(tag) issues a
+  // token; done(token) / isCurrent(token) say whether that response is still
+  // the newest (a stale one is dropped, so clicking A then B never shows A
+  // when A answers last). pending() is the tag of the newest request while it
+  // is in flight (null when idle); invalidate() drops everything in flight.
+  function makeRequestSeq() {
+    var latest = 0;
+    var inFlight = false;
+    var tag = null;
+    return {
+      start: function (t) {
+        latest++;
+        inFlight = true;
+        tag = t == null ? "" : String(t);
+        return latest;
+      },
+      isCurrent: function (token) { return token === latest; },
+      done: function (token) {
+        if (token !== latest) return false;
+        inFlight = false;
+        tag = null;
+        return true;
+      },
+      pending: function () { return inFlight ? tag : null; },
+      invalidate: function () {
+        latest++;
+        inFlight = false;
+        tag = null;
+      },
+    };
+  }
+
+  // 3A W8: the first `n` characters of `text`, counted in code points like
+  // the server's Python slice (an astral character is never split in half).
+  function clipChars(text, n) {
+    text = text == null ? "" : String(text);
+    if (text.length <= n) return text;
+    var out = 0;
+    var count = 0;
+    while (out < text.length && count < n) {
+      var c = text.charCodeAt(out);
+      out += c >= 0xd800 && c <= 0xdbff && out + 1 < text.length ? 2 : 1;
+      count++;
+    }
+    return text.slice(0, out);
+  }
+
   // SP7 fix: one save queue per problem's notes, shared by every notes editor
   // of that problem. One request at a time; text pushed while a save is in
   // flight waits (only the newest is kept) and is sent when it lands - even if
@@ -1058,6 +1105,8 @@
     wrapIndex: wrapIndex,
     notesStatus: notesStatus,
     makeSaveQueue: makeSaveQueue,
+    makeRequestSeq: makeRequestSeq,
+    clipChars: clipChars,
     reviewToday: reviewToday,
   };
 });
