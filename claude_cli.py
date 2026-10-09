@@ -69,7 +69,6 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -727,16 +726,16 @@ def _compose_error(headline: str, detail: str) -> str:
     return "\n".join(parts)
 
 
-def failure_message(returncode: int, stderr: str, stream_detail: str = "") -> str:
+def failure_message(returncode: int, stderr: str) -> str:
     """The user-facing message for a `claude` run that exited nonzero (B2).
 
-    The headline is the CLI's real error: its stderr, or - since `claude`
-    reports auth / API failures on stdout - the ``is_error`` result text.
-    "Sign in" guidance is added only when that text carries an auth marker.
+    The headline is the CLI's real error (its stderr). "Sign in" guidance is
+    added only when that text carries an auth marker. An ``is_error`` result
+    the CLI reports on stdout never reaches this: the stream parser raises
+    :func:`result_error_message` on it and stops the runner before the exit
+    code is ever looked at (3A C4).
     """
-    stderr = (stderr or "").strip()
-    stream_detail = (stream_detail or "").strip()
-    detail = "\n".join(d for d in (stderr, stream_detail) if d)
+    detail = (stderr or "").strip()
     binary = config.claude_bin()
     if not detail:
         return (
@@ -764,33 +763,6 @@ def result_error_message(obj: dict) -> str:
     text = text.strip()
     headline = f"`{config.claude_bin()}` reported an error: {_first_line(text)}"
     return _compose_error(headline, text)
-
-
-def _error_from_stream(lines: Iterable[str]) -> str:
-    """Extract a human-readable failure reason from `claude`'s stream-json stdout.
-
-    `claude` reports auth / API failures on STDOUT as a terminal ``result`` line
-    flagged ``is_error`` (its stderr is often empty for these), so the nonzero-exit
-    handler below reads it back to show the real cause — e.g. "Failed to
-    authenticate: OAuth session expired" — instead of a bare exit code. Returns the
-    ``result`` message of the last such line, or "" when none is present.
-    """
-    reason = ""
-    for raw in lines:
-        raw = raw.strip()
-        if not raw.startswith("{"):
-            continue
-        try:
-            obj = json.loads(raw)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(obj, dict):
-            continue
-        if obj.get("type") == "result" and obj.get("is_error"):
-            msg = obj.get("result")
-            if isinstance(msg, str) and msg.strip():
-                reason = msg.strip()
-    return reason
 
 
 # --- subprocess runner (the only real-IO part) ---------------------------
@@ -948,7 +920,6 @@ def _real_runner(
     stdin_ok = True       # False -> the child died before consuming stdin (P2-3)
     disconnected = False  # True -> consumer close()d us (SSE client went away)
     stdin_thread: threading.Thread | None = None  # daemon feeding stdin (P1-1)
-    stdout_tail: deque[str] = deque(maxlen=12)  # last stdout lines, for error reporting
 
     # Wall-clock watchdog (audit6 P2-2, A6): a hung `claude` (network stall,
     # stuck auth prompt, wedged node) - or a grandchild still holding the
@@ -1020,7 +991,6 @@ def _real_runner(
         stdin_thread = threading.Thread(target=_feed_stdin, daemon=True)
         stdin_thread.start()
         for line in proc.stdout:
-            stdout_tail.append(line)
             if _is_result_line(line):
                 # A6: the answer is complete. Stop reading - a straggler that
                 # still holds stdout (a helper grandchild, or the CLI lingering
@@ -1119,14 +1089,13 @@ def _real_runner(
                     ),
                     returncode=returncode,
                     stderr_file=stderr_file,
-                    stdout_tail=stdout_tail,
                 )
         finally:
             stderr_file.close()
 
 
 def _raise_for_outcome(
-    *, cancelled, timed_out, timeout_s, failed, returncode, stderr_file, stdout_tail
+    *, cancelled, timed_out, timeout_s, failed, returncode, stderr_file
 ) -> None:
     """Turn how a run ended into the right exception (or none).
 
@@ -1151,9 +1120,7 @@ def _raise_for_outcome(
     if failed:
         stderr_file.seek(0)
         stderr = stderr_file.read().decode("utf-8", "replace").strip()
-        raise ClaudeUnavailableError(
-            failure_message(returncode, stderr, _error_from_stream(stdout_tail))
-        )
+        raise ClaudeUnavailableError(failure_message(returncode, stderr))
 
 
 # --- stream-json parsing -------------------------------------------------

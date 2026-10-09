@@ -32,19 +32,19 @@ def _text_line(text):
 
 # --- B2: failure headline ---------------------------------------------------
 
-@pytest.mark.parametrize("stderr, stream", [
-    ("", "Claude AI usage limit reached|1760000000"),
-    ("Error: invalid model name 'claude-nope'", ""),
-    ("", "Prompt is too long"),
-    ("node: internal error in module xyz", ""),
+@pytest.mark.parametrize("stderr", [
+    "Claude AI usage limit reached|1760000000",
+    "Error: invalid model name 'claude-nope'",
+    "Prompt is too long",
+    "node: internal error in module xyz",
 ])
-def test_non_auth_failures_are_not_headlined_as_signed_out(stderr, stream):
-    msg = claude_cli.failure_message(1, stderr, stream)
+def test_non_auth_failures_are_not_headlined_as_signed_out(stderr):
+    msg = claude_cli.failure_message(1, stderr)
     lowered = msg.lower()
     assert "signed out" not in lowered
     assert "auth login" not in lowered
     headline = msg.splitlines()[0]
-    assert (stderr or stream).split("|")[0] in headline  # the real reason leads
+    assert stderr.split("|")[0] in headline  # the real reason leads
     assert "1" in headline  # exit code still named
 
 
@@ -55,21 +55,21 @@ def test_non_auth_failures_are_not_headlined_as_signed_out(stderr, stream):
     "API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}",
 ])
 def test_auth_failures_carry_sign_in_guidance(detail):
-    msg = claude_cli.failure_message(1, "", detail)
+    msg = claude_cli.failure_message(1, detail)
     assert detail.splitlines()[0][:40] in msg
     assert "claude auth login" in msg
     assert "sign in" in msg.lower()
 
 
 def test_failure_without_any_detail_says_so_without_guessing():
-    msg = claude_cli.failure_message(3, "", "")
+    msg = claude_cli.failure_message(3, "")
     assert "code 3" in msg
     assert "signed out" not in msg.lower()
     assert "no error details" in msg.lower()
 
 
 def test_usage_limit_gets_a_specific_hint():
-    msg = claude_cli.failure_message(1, "", "Claude AI usage limit reached")
+    msg = claude_cli.failure_message(1, "Claude AI usage limit reached")
     assert "usage limit" in msg.lower()
     assert "signed out" not in msg.lower()
 
@@ -171,6 +171,28 @@ def test_real_runner_nonzero_exit_headline_is_the_stderr_text():
     msg = str(info.value)
     assert "model claude-nope not found" in msg.splitlines()[0]
     assert "signed out" not in msg.lower()
+
+
+def test_stdout_auth_error_with_nonzero_exit_surfaces_through_run():
+    """`claude` reports an auth failure on STDOUT (stderr empty) and exits
+    nonzero. Through the production path (run -> parser -> real runner) the
+    parser raises on the is_error result before the exit code is looked at
+    (3A C4), so the real reason and the sign-in hint still reach the user."""
+    script = (
+        "import sys, json\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':True,"
+        "'result':'Failed to authenticate: OAuth session expired'}))\n"
+        "sys.exit(1)\n"
+    )
+
+    def runner(argv, stdin_text, **kwargs):
+        return claude_cli._real_runner([sys.executable, "-c", script], stdin_text, **kwargs)
+
+    with pytest.raises(claude_cli.ClaudeUnavailableError) as info:
+        list(claude_cli.run("x", runner=runner, flags=frozenset()))
+    assert "OAuth session expired" in str(info.value).splitlines()[0]
+    assert "claude auth login" in str(info.value)
 
 
 # --- B3: is_error result raises, exit code 0 or not --------------------------
