@@ -930,27 +930,48 @@
   }
 
   // ---- hardened marked renderer (KEEP the policy; moved here for tests) ---------
-  // Claude's output is untrusted markdown rendered via innerHTML. marked v12
-  // dropped `sanitize`, so raw HTML is escaped (visible as text), links must be
+  // Claude's output is untrusted markdown rendered via innerHTML. marked has no
+  // `sanitize` option, so raw HTML is escaped (visible as text), links must be
   // http(s), and images must be inline data:image/ URIs (no network fetch).
+  // marked >= 15 hands each renderer a token object and leaves ALL escaping to
+  // the renderer: link text is rendered from its inline tokens by marked's own
+  // (escaping) inline renderer, and autolink text and image alt text are
+  // escaped here. Titles are dropped.
   function hardenedRenderer() {
+    function attr(s) {
+      return escapeHtml(s).replace(/"/g, "&quot;");
+    }
+    function linkText(self, t) {
+      if (t.autolink || !t.tokens || !self || !self.parser) {
+        return escapeHtml(unescapeEntities(String(t.text || "")));
+      }
+      return self.parser.parseInline(t.tokens);
+    }
+    function altText(self, t) {
+      if (t.tokens && self && self.parser) {
+        return self.parser.parseInline(t.tokens, self.parser.textRenderer);
+      }
+      return String(t.text || "");
+    }
     return {
       html: function (token) {
         var raw = typeof token === "string" ? token : (token && token.text) || "";
         return escapeHtml(raw);
       },
-      link: function (href, title, text) {
-        var h = unescapeEntities(String(href || ""));
+      link: function (token) {
+        var t = token || {};
+        var h = unescapeEntities(String(t.href || ""));
+        var text = linkText(this, t);
         if (!/^https?:/i.test(h)) return text || escapeHtml(h);
-        var attr = escapeHtml(h).replace(/"/g, "&quot;");
-        return '<a href="' + attr + '" rel="noopener" target="_blank">' +
+        return '<a href="' + attr(h) + '" rel="noopener" target="_blank">' +
           (text || escapeHtml(h)) + "</a>";
       },
-      image: function (href, title, text) {
-        var h = unescapeEntities(String(href || ""));
-        if (!/^data:image\//i.test(h)) return text || "";
-        var attr = escapeHtml(h).replace(/"/g, "&quot;");
-        return '<img src="' + attr + '" alt="' + (text || "") + '">';
+      image: function (token) {
+        var t = token || {};
+        var h = unescapeEntities(String(t.href || ""));
+        var alt = altText(this, t);
+        if (!/^data:image\//i.test(h)) return escapeHtml(alt);
+        return '<img src="' + attr(h) + '" alt="' + attr(alt) + '">';
       },
     };
   }
