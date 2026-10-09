@@ -94,14 +94,8 @@ _DIFFICULTY_LINE = re.compile(
 _DOC_TITLE = re.compile(r"^#\s+(\d{1,5})\.\s+\S")
 _DOC_DIFFICULTY = re.compile(r"\bDifficulty:\s*(easy|medium|hard)\b", re.IGNORECASE)
 _ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,99}")
-# M2: first lines that name no problem - skipped when looking for the title.
-_GENERIC_LINE = re.compile(
-    r"^(?:(?:the\s+)?problem(?:\s+(?:statement|description))?|description|question|title"
-    r"|untitled|statement)\s*[:.\-]?\s*$",
-    re.IGNORECASE,
-)
-_LABELED_TITLE = re.compile(r"^(?:problem|title|question)\s*[:\-]\s*(\S.*)$", re.IGNORECASE)
-_NO_WORD = re.compile(r"^[\W_]*$")
+# M2: first lines that name no problem are skipped when looking for the
+# title - :func:`storage.title_line`, shared with the saved file's name (3A S6).
 _HASH_LEN = 6
 
 _LOCK = threading.Lock()
@@ -122,10 +116,6 @@ def _difficulty(word: str | None) -> str | None:
     return word.capitalize() if word else None
 
 
-def _generic(line: str) -> bool:
-    return bool(_GENERIC_LINE.match(line)) or bool(_NO_WORD.match(line))
-
-
 def parse_problem(text: str) -> ParsedProblem:
     """Number, title and difficulty of a pasted problem (all best-effort).
 
@@ -141,22 +131,11 @@ def parse_problem(text: str) -> ParsedProblem:
     lines = [ln for ln in lines if ln]
     if not lines:
         return ParsedProblem(None, "", None)
-    start = None
-    first = ""
-    for i, line in enumerate(lines):
-        cand = line.lstrip("#").strip()
-        if _generic(cand):
-            continue
-        m = _LABELED_TITLE.match(cand)
-        if m:
-            cand = m.group(1).strip()
-            if _generic(cand):
-                continue
-        start, first = i, cand
-        break
-    if start is None:
+    found = storage.title_line(lines)
+    if found is None:
         digest = hashlib.sha1(" ".join(lines).encode("utf-8")).hexdigest()[:_HASH_LEN]
         return ParsedProblem(None, "", None, generic=True, digest=digest)
+    start, first = found
     number = None
     m = _NUMBERED_TITLE.match(first)
     if m:

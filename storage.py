@@ -146,6 +146,41 @@ def slug(name: str) -> str:
     return s
 
 
+# M2 (problem ids) / 3A S6 (file names): first lines that name no problem -
+# ``Description``, ``Problem:``, punctuation-only - and the ``Problem: <title>``
+# / ``Title - <title>`` label. Shared with ``problem_store.parse_problem`` so a
+# paste's file name and its problem id pick the SAME title line.
+_GENERIC_LINE = re.compile(
+    r"^(?:(?:the\s+)?problem(?:\s+(?:statement|description))?|description|question|title"
+    r"|untitled|statement)\s*[:.\-]?\s*$",
+    re.IGNORECASE,
+)
+_LABELED_TITLE = re.compile(r"^(?:problem|title|question)\s*[:\-]\s*(\S.*)$", re.IGNORECASE)
+_NO_WORD = re.compile(r"^[\W_]*$")
+
+
+def generic_line(line: str) -> bool:
+    """True for a (``#``-stripped) line that names no problem."""
+    return bool(_GENERIC_LINE.match(line)) or bool(_NO_WORD.match(line))
+
+
+def title_line(lines) -> tuple[int, str] | None:
+    """``(index, title text)`` of the first of ``lines`` (stripped, non-blank)
+    that names the problem: markdown ``#`` stripped, generic lines skipped, a
+    ``Problem: <title>`` label dropped. ``None`` when no line does."""
+    for i, line in enumerate(lines):
+        cand = line.lstrip("#").strip()
+        if generic_line(cand):
+            continue
+        m = _LABELED_TITLE.match(cand)
+        if m:
+            cand = m.group(1).strip()
+            if generic_line(cand):
+                continue
+        return i, cand
+    return None
+
+
 def _problem_name(problem: str) -> str:
     """A short, clean filename stem for a pasted problem.
 
@@ -153,11 +188,25 @@ def _problem_name(problem: str) -> str:
     so a full multi-line paste saves as e.g. ``two_sum.md`` instead of a name
     built from the entire description. ``slug`` caps the length either way, which
     is what stops a giant paste from overflowing the OS path limit.
+
+    3A S6: when that first line names no problem (``Description``,
+    ``Problem:``, ``---``) or is a ``Problem: <title>`` label, the stem comes
+    from the line :func:`title_line` picks instead - the one the problem id
+    is built from - so pastes that all start with ``Description`` no longer
+    pile up as ``description.md``, ``description__2.md``, ... Every paste
+    whose first line already names the problem keeps its old file name (an
+    existing library's re-runs still land on their own files).
     """
-    for line in (problem or "").splitlines():
-        if line.strip():
-            return slug(line)
-    return slug(problem)
+    first = next((line for line in (problem or "").splitlines() if line.strip()), None)
+    if first is None:
+        return slug(problem)
+    cand = first.strip().lstrip("#").strip()
+    if generic_line(cand) or _LABELED_TITLE.match(cand):
+        lines = [ln.strip() for ln in problem.replace("\r\n", "\n").split("\n")]
+        found = title_line([ln for ln in lines if ln])
+        if found is not None:
+            return slug(found[1])
+    return slug(first)
 
 
 def _same_content(path: Path, body: str) -> bool:
