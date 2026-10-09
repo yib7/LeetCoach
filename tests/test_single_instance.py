@@ -96,6 +96,45 @@ def test_probe_ignores_a_non_json_answer(served):
     assert app_module._existing_instance_url("127.0.0.1", port) is None
 
 
+@pytest.fixture
+def garbage_listener():
+    """A raw TCP listener that answers any connection with a non-HTTP line
+    (like a Redis server would); yields its port."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.recv(4096)
+                    conn.sendall(b"-ERR unknown command\r\n")
+                except OSError:
+                    pass
+
+    threading.Thread(target=serve, daemon=True).start()
+    yield srv.getsockname()[1]
+    stop.set()
+    srv.close()
+
+
+def test_probe_of_a_non_http_listener_is_none(garbage_listener):
+    # 3A W1: urllib raises http.client.BadStatusLine (an HTTPException, not an
+    # OSError) for a non-HTTP reply; the probe must treat it as "not LeetCoach"
+    # instead of crashing the launch with a traceback.
+    assert app_module._existing_instance_url("127.0.0.1", garbage_listener, timeout=2) is None
+
+
+def test_find_existing_instance_survives_a_non_http_listener(garbage_listener):
+    assert app_module._find_existing_instance("127.0.0.1", garbage_listener, span=0) is None
+
+
 def test_probe_of_a_closed_port_is_none():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
