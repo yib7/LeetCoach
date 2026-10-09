@@ -109,6 +109,23 @@ def test_falls_back_and_logs_when_the_claude_call_raises(caplog):
     assert "claude exited 1" in rec.getMessage() and rec.exc_info is not None
 
 
+def test_a_cancelled_call_falls_back_quietly(caplog):
+    # 3A C12: a cancel (client disconnect, expired join) is normal, not a
+    # WARNING with a traceback.
+    import claude_cli
+
+    def run_fn(prompt, **kwargs):
+        raise claude_cli.ClaudeCancelledError("The `claude` run was cancelled.")
+        yield  # pragma: no cover - makes this a generator like claude_cli.run
+
+    with caplog.at_level(logging.DEBUG, logger="classifier"):
+        result = classifier.classify("text", run_fn=run_fn)
+    assert result == classifier.Classification("uncategorized", [])
+    records = [r for r in caplog.records if r.name == "classifier"]
+    assert records and all(r.levelno == logging.DEBUG for r in records)
+    assert all(r.exc_info is None for r in records)
+
+
 def test_falls_back_when_json_has_no_problem_type():
     run_fn, _ = make_run_fn(json_deltas({"topics": ["arrays"]}))
     result = classifier.classify("text", run_fn=run_fn)
