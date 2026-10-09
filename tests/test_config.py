@@ -212,7 +212,7 @@ def test_upsert_splits_only_on_newlines(tmp_path):
     env = tmp_path / ".env"
     # U+2028, U+0085 and form feed are NOT line breaks in a dotenv file
     other = "NOTE=a\u2028b\x85c\x0cd"
-    env.write_bytes(f"{other}\r\nLEETCOACH_MODEL=opus\r\n".encode("utf-8"))
+    env.write_bytes(f"{other}\r\nLEETCOACH_MODEL=opus\r\n".encode())
     config.upsert_env_var(env, "LEETCOACH_MODEL", "haiku")
     text = _text(env)
     assert text.split("\n") == [other, "LEETCOACH_MODEL=haiku", ""]

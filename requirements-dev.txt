@@ -2,8 +2,7 @@
 #   pip install -r requirements-dev.txt
 -r requirements.txt
 pytest>=8,<10
-# Capped <0.16: ruff 0.16 expanded its DEFAULT lint rule set (BLE001/ISC004/UP045/
-# D102/S110/…), which flags 31 pre-existing findings and breaks the ruff-clean
-# baseline + CI lint job. Adopting 0.16 needs a triage pass before the cap
-# is lifted; until then CI must install a 0.15.x that matches requirements.lock.
-ruff>=0.6,<0.16
+# Ruff is capped to one minor series: a new minor can change the DEFAULT rule
+# set (0.16 did), so moving to the next one is a deliberate triage, not a
+# side effect of a fresh install. CI installs the same series as requirements.lock.
+ruff>=0.16,<0.17

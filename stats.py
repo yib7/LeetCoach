@@ -112,7 +112,7 @@ def _count(mapping: dict, key: str) -> None:
 
 
 def compute_stats(entries, files, *, now: datetime | None = None) -> dict:
-    now = now or datetime.now()
+    now = now or datetime.now().astimezone()
     today = now.date() if isinstance(now, datetime) else now
     acts, n_log = _activities(entries, files)
     by_mode: dict = {}
@@ -127,7 +127,7 @@ def compute_stats(entries, files, *, now: datetime | None = None) -> dict:
         if key:
             problems.add(key)
         try:
-            d = datetime.fromtimestamp(ts).date()
+            d = datetime.fromtimestamp(ts).astimezone().date()
         except (OverflowError, OSError, ValueError):
             continue
         days[d] = days.get(d, 0) + 1

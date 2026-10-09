@@ -28,7 +28,7 @@ def _build(mode, lang="python", tier="normal", problem=PROBLEM, meta=None):
 def _outside_fence(prompt: str) -> str:
     """The prompt with the fenced (pasted) problem text cut out."""
     return re.sub(r"--- BEGIN PROBLEM [0-9a-f]+ ---\n.*?\n--- END PROBLEM [0-9a-f]+ ---",
-                  "", prompt, flags=re.S)
+                  "", prompt, flags=re.DOTALL)
 
 
 @pytest.mark.parametrize("mode", ["learning", "guided", "answer"])

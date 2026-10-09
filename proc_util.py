@@ -21,13 +21,14 @@ dependency (pywin32/psutil) is pulled in.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
 import sys
 
 
-def kill_process_tree(proc: "subprocess.Popen[str]", *, group: bool = False) -> bool:
+def kill_process_tree(proc: subprocess.Popen[str], *, group: bool = False) -> bool:
     """Best-effort kill of `proc` AND its descendants. Returns True if a
     tree-kill mechanism was invoked (not necessarily that it succeeded).
 
@@ -231,7 +232,7 @@ def _create_job(*, memory_bytes, active_processes):
         return None
 
 
-def assign_to_job(job_handle, proc: "subprocess.Popen[str]") -> bool:
+def assign_to_job(job_handle, proc: subprocess.Popen[str]) -> bool:
     """Assign a just-spawned ``proc`` to a job from :func:`create_job_with_caps`.
 
     One ``AssignProcessToJobObject`` syscall — everything slow (the one-time
@@ -273,10 +274,8 @@ def close_job(job_handle) -> None:
     terminates anything still running inside the job. Never raises."""
     if not job_handle or _job_api is None:
         return
-    try:
+    with contextlib.suppress(Exception):  # cleanup must never raise
         _job_api.CloseHandle(job_handle)
-    except Exception:  # noqa: BLE001 - cleanup must never raise
-        pass
 
 
 def terminate_job(job_handle) -> bool:

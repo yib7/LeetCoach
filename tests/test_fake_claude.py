@@ -41,7 +41,7 @@ def _fake(*args: str, stdin: str = "", env: dict | None = None) -> subprocess.Co
     full_env.update(env or {})
     return subprocess.run(
         [sys.executable, str(FAKE), *args], input=stdin.encode("utf-8"),
-        capture_output=True, env=full_env, timeout=60,
+        capture_output=True, env=full_env, check=False, timeout=60,
     )
 
 
@@ -286,7 +286,7 @@ def test_fake_doc_has_the_contract_header_and_sections(flags, mode):
     assert lines[0] == "# Two Sum"
     assert lines[1].startswith("Pattern: Arrays & Hashing · Difficulty: ")
     assert _h2(text) == list(prompts.doc_sections(mode))
-    prose = re.sub(r"```.*?```", "", text.split("## Flashcards")[0], flags=re.S)
+    prose = re.sub(r"```.*?```", "", text.split("## Flashcards")[0], flags=re.DOTALL)
     assert "?" not in prose.replace("?a=1", "")  # no questions to the reader
 
 

@@ -48,6 +48,7 @@ then {"phase": "saving"}), a terminal ``done`` {"path", "source", "resumed",
 """
 from __future__ import annotations
 
+import contextlib
 import inspect
 import io
 import json
@@ -358,10 +359,8 @@ def _iter_with_heartbeat(iterable):
             if stop.is_set():
                 close = getattr(it, "close", None)
                 if callable(close):
-                    try:
+                    with contextlib.suppress(Exception):  # best-effort teardown
                         close()
-                    except Exception:  # noqa: BLE001 - best-effort teardown
-                        pass
         q.put((_DONE, None))
 
     threading.Thread(target=pump, name="leetcoach-stream-pump", daemon=True).start()
@@ -385,10 +384,8 @@ def _iter_with_heartbeat(iterable):
             stop.set()
             cancel = getattr(iterable, "cancel", None)
             if callable(cancel):
-                try:
+                with contextlib.suppress(Exception):  # best-effort teardown
                     cancel()
-                except Exception:  # noqa: BLE001 - best-effort teardown
-                    pass
 
 
 def _call_with_heartbeat(fn, *, on_abandon=None, updates=None):
@@ -444,10 +441,8 @@ def _call_with_heartbeat(fn, *, on_abandon=None, updates=None):
             yield from drain()
     finally:
         if not done.is_set() and on_abandon is not None:
-            try:
+            with contextlib.suppress(Exception):  # best-effort teardown
                 on_abandon()
-            except Exception:  # noqa: BLE001 - best-effort teardown
-                pass
     if "error" in box:
         raise box["error"]
     return box["value"]
@@ -954,7 +949,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         if callable(cancel):
             try:
                 cancel()
-            except Exception:  # noqa: BLE001 - cancelling is best-effort
+            except Exception:  # cancelling is best-effort
                 app.logger.exception("could not cancel the quick ask call")
 
     def _release_run(run_id: str, state: _RunState) -> None:
@@ -1552,7 +1547,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             if callable(cancel):
                 try:
                     cancel()
-                except Exception:  # noqa: BLE001 - cancelling is best-effort
+                except Exception:  # cancelling is best-effort
                     app.logger.exception("could not cancel the %s", what)
 
         def _classifier_run_fn(prompt, **kwargs):
@@ -1583,7 +1578,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         def _record_topics(cls) -> None:
             try:
                 topic_index.record(cls.problem_type, cls.topics, language=language)
-            except Exception:  # noqa: BLE001 - recording is best-effort
+            except Exception:  # recording is best-effort
                 app.logger.exception("could not record topics")
 
         def _save_with_fallback(save, fallback_body):
@@ -1651,7 +1646,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     pattern=cls.problem_type,
                     doc=doc,
                 )
-            except Exception:  # noqa: BLE001 - metadata is best-effort
+            except Exception:  # metadata is best-effort
                 app.logger.exception("could not record the run (mode=%s)", mode)
                 return None
 
@@ -1681,7 +1676,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                             run_fn=_classifier_run_fn,
                             model=config.classifier_model(),
                         )
-                    except Exception:  # noqa: BLE001 - fallback already seeded above
+                    except Exception:  # fallback already seeded above
                         app.logger.exception("background classification failed")
 
                 cls_thread = threading.Thread(
@@ -1865,7 +1860,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 if problem_id:
                     done_payload["problem_id"] = problem_id
                 yield _sse_event("done", done_payload)
-            except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
+            except Exception as exc:  # last-resort: always close cleanly
                 if state.cancelled:
                     # B14: Stop -> POST /run/cancel. Whatever the killed call
                     # raised (ClaudeCancelledError, _RunCancelled), say so -
@@ -1999,7 +1994,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     with _inflight_lock:
                         if _asks.get(ask_id) is entry:
                             del _asks[ask_id]
-        except Exception as exc:  # noqa: BLE001 - surface as a clean 502, log the rest
+        except Exception as exc:  # surface as a clean 502, log the rest
             if cancelled.is_set():
                 return jsonify({"error": "Quick Ask cancelled."}), 409
             app.logger.exception("quick ask failed")
@@ -2093,7 +2088,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         doc_text = doc_text.replace("\r\n", "\n").replace("\r", "\n")
         try:
             logged = problem_store.session_for_doc(rel_path)
-        except Exception:  # noqa: BLE001 - no log: a legacy doc, use the fallback
+        except Exception:  # no log: a legacy doc, use the fallback
             app.logger.exception("could not read the run log for %s", rel_path)
             logged = None
         logged = logged or {}
@@ -2210,7 +2205,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         model=run_meta.get("model") or model or config.model(),
                         duration_s=time.monotonic() - started,
                     )
-                except Exception:  # noqa: BLE001 - the doc already holds the answer
+                except Exception:  # the doc already holds the answer
                     app.logger.exception("could not log the follow-up on %s", rel_path)
                 _invalidate_library_cache()
                 done = {"path": rel_path, "source": source, "resumed": source == "resume",
@@ -2220,7 +2215,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 if run_meta.get("model"):
                     done["model"] = run_meta["model"]
                 yield _sse_event("done", done)
-            except Exception as exc:  # noqa: BLE001 - last-resort: always close cleanly
+            except Exception as exc:  # last-resort: always close cleanly
                 if state.cancelled:
                     yield _sse_event("cancelled", "Follow-up cancelled.")
                 else:

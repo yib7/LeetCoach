@@ -404,7 +404,7 @@ def test_memory_cap_applies_on_first_call_in_fresh_interpreter():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = subprocess.run(
         [sys.executable, "-c", probe],
-        capture_output=True, text=True, timeout=45,
+        capture_output=True, text=True, check=False, timeout=45,
         cwd=repo_root,   # `-c` puts the cwd on sys.path -> `import sandbox` works
     )
     assert out.returncode == 0, (out.stdout, out.stderr)

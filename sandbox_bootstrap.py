@@ -262,9 +262,9 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
         path = path_of(args[0])
         check_secret(event, path)
         access = args[1] if len(args) > 1 else 0
-        if isinstance(access, int) and access & _GENERIC_WRITE_ACCESS:
-            if path is not None and not path.startswith("\\\\.\\pipe\\"):
-                check_inside_run(event, path)
+        if (isinstance(access, int) and access & _GENERIC_WRITE_ACCESS
+                and path is not None and not path.startswith("\\\\.\\pipe\\")):
+            check_inside_run(event, path)
 
     handlers = {
         "open": on_open,
@@ -319,7 +319,7 @@ def read_config(fd: int = 0) -> dict:
         raise ValueError(f"bootstrap config too large ({size} bytes)")
     cfg = json.loads(_read_exact(fd, size).decode("utf-8"))
     if not isinstance(cfg, dict):
-        raise ValueError("bootstrap config is not an object")
+        raise TypeError("bootstrap config is not an object")
     return cfg
 
 
@@ -335,7 +335,7 @@ def apply_rlimits(limits: dict, resource_mod=None) -> None:
     and AS stays required on Linux (Windows' cap is the parent's Job
     Object)."""
     if resource_mod is None:
-        import resource as resource_mod  # noqa: PLC0415 - POSIX only
+        import resource as resource_mod  # POSIX only
     for name, value in limits.items():
         required = _RLIMITS.get(name)
         if required is None:

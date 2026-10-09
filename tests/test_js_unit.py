@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is not on PATH")
 def _node(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [NODE, *args], cwd=ROOT, capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=120,
+        encoding="utf-8", errors="replace", check=False, timeout=120,
     )
 
 

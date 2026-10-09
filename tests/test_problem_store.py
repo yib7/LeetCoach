@@ -130,13 +130,13 @@ NOW = datetime(2026, 10, 8, 14, 30).astimezone()
 
 
 def _record(root, paste=LC_PASTE, **kw):
-    args = dict(
-        mode="answer", language="python", tier="normal", model="claude-opus-5-5",
-        verdict="pass", paths=[str(root / "answers/hash_map/1_two_sum__normal.md"),
+    args = {
+        "mode": "answer", "language": "python", "tier": "normal", "model": "claude-opus-5-5",
+        "verdict": "pass", "paths": [str(root / "answers/hash_map/1_two_sum__normal.md"),
                                str(root / "answers/hash_map/1_two_sum__normal.py")],
-        session_id="sess-1", duration_s=12.345, pattern="hash_map", doc="",
-        now=NOW, root=root,
-    )
+        "session_id": "sess-1", "duration_s": 12.345, "pattern": "hash_map", "doc": "",
+        "now": NOW, "root": root,
+    }
     args.update(kw)
     return ps.record_run(paste, **args)
 

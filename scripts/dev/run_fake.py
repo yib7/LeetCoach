@@ -114,8 +114,8 @@ SEED = [
      _doc("215. Kth Largest Element in an Array", "## Solution\n\nA size-k min-heap.",
           "✓ Sample tests PASS (2/2 samples)"), 4),
     ("answers/heap/215_kth_largest_element_in_an_array__optimal.py",
-     "import heapq\n\n\nclass Solution:\n    def findKthLargest(self, nums, k):\n"
-     "        return heapq.nlargest(k, nums)[-1]\n", 4),
+     ("import heapq\n\n\nclass Solution:\n    def findKthLargest(self, nums, k):\n"
+      "        return heapq.nlargest(k, nums)[-1]\n"), 4),
     ("answers/two_pointers/42_trapping_rain_water__optimal.md",
      _doc("42. Trapping Rain Water", "## Solution\n\nTwo pointers from both ends.",
           "⚠ not auto-verified (C++ answers are not run)"), 6),
@@ -261,7 +261,7 @@ def _review_state(pid: str, now: float) -> tuple[dict, str] | None:
     if pid not in REVIEW_STATE:
         return None
     box, due_in, grades, notes = REVIEW_STATE[pid]
-    today = datetime.fromtimestamp(now).date()
+    today = datetime.fromtimestamp(now).astimezone().date()
     intervals = (1, 3, 7, 14, 30)
     history = []
     for ago, grade, from_box, to_box in grades:
@@ -295,7 +295,7 @@ def _seed_metadata(output: Path, now: float) -> None:
         }, ensure_ascii=False, separators=(",", ":")))
         rec = records.get(pid)
         if rec is None:
-            due = (datetime.fromtimestamp(stamp).date() + timedelta(days=1)).isoformat()
+            due = (datetime.fromtimestamp(stamp).astimezone().date() + timedelta(days=1)).isoformat()
             rec = records[pid] = {
                 "id": pid, "number": number, "title": title, "difficulty": difficulty,
                 "pattern": pattern, "statement": statement, "created": _iso(stamp),
@@ -379,7 +379,7 @@ def main(argv: list[str], *, probe=running_instance) -> int:
     output = configure(scratch, keep="--keep" in argv)
     sys.path.insert(0, str(ROOT))
     os.chdir(ROOT)
-    import app  # noqa: E402 - env must be set first
+    import app  # env must be set first
 
     app.PORT = PORT
     print("LeetCoach FAKE mode - the claude CLI is scripts/dev/fake_claude (never real Claude).")

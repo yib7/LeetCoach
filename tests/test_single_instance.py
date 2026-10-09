@@ -152,7 +152,7 @@ def test_main_serves_when_no_instance_is_running(monkeypatch):
     monkeypatch.setattr(app_module, "_existing_instance_url", lambda host, port, **kw: None)
     monkeypatch.setattr(app_module, "_choose_port", lambda preferred, host: 5007)
     monkeypatch.setattr(app_module, "_sweep_sandbox_temp", lambda: 0)
-    monkeypatch.setattr(app_module.storage, "migrate_tier_suffixes", lambda: [])
+    monkeypatch.setattr(app_module.storage, "migrate_tier_suffixes", list)
     rc = app_module.main(open_browser=lambda url: None, serve=served_ports.append)
     assert rc == 0
     assert served_ports == [5007]

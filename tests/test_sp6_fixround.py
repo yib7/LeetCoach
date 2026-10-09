@@ -25,11 +25,11 @@ def root(tmp_path):
 
 
 def _record(root, paste, rel="answers/hash_map/two_sum__normal.md", **kw):
-    args = dict(
-        mode="answer", language="python", tier="normal", model="m", verdict="pass",
-        paths=[str(root / rel)], session_id=None, duration_s=1.0,
-        pattern="hash_map", doc="", now=NOW, root=root,
-    )
+    args = {
+        "mode": "answer", "language": "python", "tier": "normal", "model": "m", "verdict": "pass",
+        "paths": [str(root / rel)], "session_id": None, "duration_s": 1.0,
+        "pattern": "hash_map", "doc": "", "now": NOW, "root": root,
+    }
     args.update(kw)
     return ps.record_run(paste, **args)
 

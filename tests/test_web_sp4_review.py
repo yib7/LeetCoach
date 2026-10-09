@@ -98,7 +98,7 @@ def test_stop_cancel_request_has_a_short_timeout():
     """An unresponsive server must not leave Stop hanging: the cancel POST is
     aborted after ~3 s and the stream is then aborted as before."""
     js = _app_js()
-    m = re.search(r"function cancelRun\(runId\) \{(.*?)\n  \}\n", js, re.S)
+    m = re.search(r"function cancelRun\(runId\) \{(.*?)\n  \}\n", js, re.DOTALL)
     assert m, "cancelRun not found"
     body = m.group(1)
     assert "new AbortController()" in body
@@ -408,7 +408,7 @@ def test_failed_cancel_logs_the_study_call(env, caplog):
         return BadCancelRun()
 
     c = _client(run_fn)
-    t, box = _in_thread(
+    t, _box = _in_thread(
         lambda: c.post("/run", json={**RUN, "run_id": "m12"}).get_data(as_text=True))
     assert started.wait(5)
     with caplog.at_level("ERROR"):

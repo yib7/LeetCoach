@@ -303,7 +303,7 @@ def test_suffixed_slot_is_idempotent_too(out_root):
 
 
 def test_answer_rerun_identical_pair_is_idempotent(out_root):
-    kwargs = dict(tier="normal", language="python", code="code", reasoning="why")
+    kwargs = {"tier": "normal", "language": "python", "code": "code", "reasoning": "why"}
     first = storage.save_answer("Two Sum", "arrays", **kwargs)
     second = storage.save_answer("Two Sum", "arrays", **kwargs)
     assert first == second

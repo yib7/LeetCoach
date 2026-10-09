@@ -40,8 +40,8 @@ REVIEW_DOC = (
 def test_review_prompt_fences_problem_and_attempt_separately():
     p = prompts.build_review(PASTE, ATTEMPT, language="python")
     assert p.startswith("Mode: Code Review")
-    problem = re.search(r"--- BEGIN PROBLEM (\w+) ---\n(.*?)\n--- END PROBLEM \1 ---", p, re.S)
-    attempt = re.search(r"--- BEGIN ATTEMPT (\w+) ---\n(.*?)\n--- END ATTEMPT \1 ---", p, re.S)
+    problem = re.search(r"--- BEGIN PROBLEM (\w+) ---\n(.*?)\n--- END PROBLEM \1 ---", p, re.DOTALL)
+    attempt = re.search(r"--- BEGIN ATTEMPT (\w+) ---\n(.*?)\n--- END ATTEMPT \1 ---", p, re.DOTALL)
     assert problem and problem.group(2) == PASTE
     assert attempt and attempt.group(2) == ATTEMPT
     # the forged marker inside the code is not the real end line
@@ -52,7 +52,7 @@ def test_review_prompt_fences_problem_and_attempt_separately():
 
 def test_review_prompt_uses_review_sections_and_forbids_a_solution():
     p = prompts.build_review(PASTE, ATTEMPT, language="cpp")
-    titles = re.findall(r"^  ## (.+?) - ", p, re.M)
+    titles = re.findall(r"^  ## (.+?) - ", p, re.MULTILINE)
     assert titles == list(prompts.REVIEW_SECTIONS) == list(prompts.doc_sections("review"))
     assert titles[-1] == "Flashcards" and "Solution" not in titles
     assert "NEVER rewrite the attempt" in p
@@ -166,7 +166,7 @@ def test_review_run_is_saved_and_logged_with_mode_review(out, monkeypatch):
     assert rec["runs"] == ["reviews/hash_map/1_two_sum__review.md"]
     # the library lists it (problem-linked) and stats count it as Code Review
     files = client.get("/library").get_json()["files"]
-    item = [f for f in files if f["path"] == "reviews/hash_map/1_two_sum__review.md"][0]
+    item = next(f for f in files if f["path"] == "reviews/hash_map/1_two_sum__review.md")
     assert item["problem_id"] == "1-two_sum" and "verdict" not in item
     st = client.get("/stats").get_json()
     assert st["byMode"] == {"Code Review": 1}
