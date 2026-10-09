@@ -188,6 +188,36 @@ def test_write_many_restores_a_preexisting_file_on_rollback(tmp_path, monkeypatc
     assert [p.name for p in tmp_path.iterdir()] == ["s.py"]
 
 
+def test_write_many_rollback_never_unlinks_a_file_it_could_not_back_up(tmp_path, monkeypatch):
+    """3A S9: a target that EXISTED but could not be read for the rollback
+    copy (locked / unreadable) must never be deleted by the rollback - the
+    old code recorded it like a new file and unlinked it."""
+    a, b = tmp_path / "s.py", tmp_path / "s.md"
+    a.write_text("previous", encoding="utf-8")
+    real_read_bytes = fsutil.Path.read_bytes
+    real_replace = os.replace
+
+    def unreadable_a(self):
+        if self.name == "s.py":
+            raise PermissionError(13, "locked", str(self))
+        return real_read_bytes(self)
+
+    def fail_on_md(src, dst):
+        if os.fspath(dst).endswith(".md"):
+            raise OSError(5, "boom")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(fsutil.Path, "read_bytes", unreadable_a)
+    monkeypatch.setattr(fsutil, "_replace", fail_on_md)
+    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    with pytest.raises(OSError):
+        fsutil.atomic_write_many([(a, "code"), (b, "notes")])
+    monkeypatch.undo()
+    assert a.exists()  # left as swapped in - it could not be restored, never deleted
+    assert not b.exists()
+    assert _tmp_leftovers(tmp_path) == []
+
+
 # --- SP4 review M5/M6/M7 ---------------------------------------------------------
 
 def test_worst_case_wait_matches_the_real_backoff_schedule(monkeypatch, tmp_path):
