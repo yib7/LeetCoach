@@ -246,14 +246,23 @@ def default_claude_cwd(*, os_name=None, env=None, home=None) -> Path:
     ``~/AppData/Local`` when the variable is missing); elsewhere
     ``~/.local/share/leetcoach/claude-cwd``. The parameters exist only so tests
     can exercise both branches on one machine.
+
+    The home directory is looked up only on a branch that needs it (3A C5):
+    ``Path.home()`` raises ``RuntimeError`` when no home variable is set, and
+    a Windows box with ``LOCALAPPDATA`` must not trip over that. It can still
+    raise when the home is needed and unresolvable; ``ensure_claude_cwd``
+    guards that.
     """
     os_name = os.name if os_name is None else os_name
     env = os.environ if env is None else env
-    home = Path.home() if home is None else Path(home)
+
+    def _home() -> Path:
+        return Path.home() if home is None else Path(home)
+
     if os_name == "nt":
-        base = env.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        base = env.get("LOCALAPPDATA") or str(_home() / "AppData" / "Local")
         return Path(base) / "LeetCoach" / "claude-cwd"
-    return home / ".local" / "share" / "leetcoach" / "claude-cwd"
+    return _home() / ".local" / "share" / "leetcoach" / "claude-cwd"
 
 
 def claude_cwd() -> Path:
@@ -265,10 +274,19 @@ def claude_cwd() -> Path:
     empty and gives LeetCoach's persisted sessions (needed for ``--resume``)
     their own project bucket. Override with ``LEETCOACH_CLAUDE_CWD``; the
     directory is created on demand by ``claude_cli.ensure_claude_cwd``.
+
+    The override is ``~``-expanded and made absolute (3A C7): ``~/lc`` from
+    ``.env`` used to create a literal ``~`` folder under the launch directory,
+    often inside this repo, whose ``CLAUDE.md`` the CLI would then load. If
+    either step fails (no resolvable home) the value is used as written.
     """
-    override = os.environ.get("LEETCOACH_CLAUDE_CWD")
+    override = (os.environ.get("LEETCOACH_CLAUDE_CWD") or "").strip()
     if override:
-        return Path(override)
+        path = Path(override)
+        try:
+            return path.expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return path
     return default_claude_cwd()
 
 

@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -371,6 +372,114 @@ def test_claude_cwd_defaults_per_platform():
 def test_claude_cwd_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("LEETCOACH_CLAUDE_CWD", str(tmp_path / "x"))
     assert config.claude_cwd() == tmp_path / "x"
+
+
+_HOME_VARS = ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")
+
+
+def _no_home(monkeypatch):
+    """No way to resolve a home directory: Path.home() raises, as it does
+    with every home variable unset."""
+    for name in _HOME_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    def no_home(*args, **kwargs):
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "home", no_home)
+
+
+def test_default_cwd_with_localappdata_never_needs_home(monkeypatch):
+    # 3A C5: the Windows branch only falls back to ~ when LOCALAPPDATA is unset.
+    _no_home(monkeypatch)
+    got = config.default_claude_cwd(os_name="nt", env={"LOCALAPPDATA": r"C:\LAD"})
+    assert got == Path(r"C:\LAD") / "LeetCoach" / "claude-cwd"
+
+
+def test_ensure_cwd_survives_an_unresolvable_home(tmp_path, monkeypatch):
+    # 3A C5: "a run must never fail over this" - even with no home at all.
+    _no_home(monkeypatch)
+    monkeypatch.delenv("LEETCOACH_CLAUDE_CWD", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    got = Path(claude_cli.ensure_claude_cwd())
+    assert got.is_dir()
+    assert tmp_path in got.parents
+
+
+def test_claude_cwd_override_expands_user_and_resolves(monkeypatch, tmp_path):
+    # 3A C7: `~/lc` from .env must not become a literal "~" folder.
+    for name in _HOME_VARS:
+        monkeypatch.setenv(name, str(tmp_path))
+    monkeypatch.setenv("LEETCOACH_CLAUDE_CWD", "~/lc")
+    got = config.claude_cwd()
+    assert got == (tmp_path / "lc").resolve()
+    assert got.is_absolute()
+
+
+def test_claude_cwd_override_with_unresolvable_home_is_used_verbatim(monkeypatch):
+    _no_home(monkeypatch)
+    monkeypatch.setenv("LEETCOACH_CLAUDE_CWD", "~/lc")
+    assert config.claude_cwd().name == "lc"  # never raises
+
+
+def test_temp_fallback_name_is_per_user(tmp_path, monkeypatch):
+    # 3A C6: never one shared name in a multi-user temp dir.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    name = claude_cli._temp_cwd_candidate().name
+    assert name.startswith("leetcoach-claude-cwd-")
+    assert name != "leetcoach-claude-cwd-"
+    if os.name != "nt":
+        assert name.endswith(f"-{os.getuid()}")
+
+
+def _block_every_candidate(tmp_path, monkeypatch):
+    blocker = tmp_path / "a_file"
+    blocker.write_text("not a dir", encoding="utf-8")
+    monkeypatch.setenv("LEETCOACH_CLAUDE_CWD", str(blocker / "sub"))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    claude_cli._temp_cwd_candidate().write_text("squatter", encoding="utf-8")
+    monkeypatch.setattr(claude_cli, "_mkdtemp_cwd", None)
+
+
+def test_last_resort_temp_dir_is_created_once_per_process(tmp_path, monkeypatch):
+    # 3A C6: a fresh mkdtemp on every call leaked dirs and split the
+    # --resume session bucket between calls.
+    _block_every_candidate(tmp_path, monkeypatch)
+    first = claude_cli.ensure_claude_cwd()
+    second = claude_cli.ensure_claude_cwd()
+    assert first == second
+    assert Path(first).is_dir() and tmp_path in Path(first).parents
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership check")
+def test_temp_fallback_owned_by_another_user_is_refused(tmp_path, monkeypatch):
+    blocker = tmp_path / "a_file"
+    blocker.write_text("not a dir", encoding="utf-8")
+    monkeypatch.setenv("LEETCOACH_CLAUDE_CWD", str(blocker / "sub"))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(claude_cli, "_mkdtemp_cwd", None)
+    # We pretend to be uid+1, so the dir we create here under the real uid
+    # is "someone else's" squat on our per-user name.
+    real_uid = os.getuid()
+    monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+    planted = claude_cli._temp_cwd_candidate()
+    assert planted.name.endswith(f"-{real_uid + 1}")
+    planted.mkdir()
+    (planted / "CLAUDE.md").write_text("planted", encoding="utf-8")
+    got = Path(claude_cli.ensure_claude_cwd())
+    assert got != planted and got.is_dir()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_temp_fallback_is_created_private(tmp_path, monkeypatch):
+    blocker = tmp_path / "a_file"
+    blocker.write_text("not a dir", encoding="utf-8")
+    monkeypatch.setenv("LEETCOACH_CLAUDE_CWD", str(blocker / "sub"))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    got = Path(claude_cli.ensure_claude_cwd())
+    assert got == claude_cli._temp_cwd_candidate()
+    assert got.stat().st_mode & 0o777 == 0o700
 
 
 def test_neutral_cwd_falls_back_to_temp_when_uncreatable(tmp_path, monkeypatch):
