@@ -122,7 +122,8 @@ def test_solution_sees_exactly_the_sample_stdin(reader):
     read, so EVERY way a solution reads stdin (text layer, buffer, raw fd 0,
     ``open(0)``) sees the sample input and nothing else."""
     code = reader + "\nprint(repr(data))\n"
-    r = sandbox.verify_python(code, "nums = [2,7]\ntarget = 9\n", repr("nums = [2,7]\ntarget = 9\n"))
+    stdin = "nums = [2,7]\ntarget = 9\n"
+    r = sandbox.verify_python(code, stdin, repr(stdin))
     assert r.status == "pass", r
 
 
@@ -184,7 +185,8 @@ _PROBE = (
     "arg = sys.stdin.readline().strip()\n"
     "def _sandboxed(e):\n"
     "    while e is not None:\n"
-    "        if 'LeetCoach sandbox' in str(e) or 'LeetCoach sandbox' in str(getattr(e, 'reason', '')):\n"
+    "        reason = str(getattr(e, 'reason', ''))\n"
+    "        if 'LeetCoach sandbox' in str(e) or 'LeetCoach sandbox' in reason:\n"
     "            return True\n"
     "        e = e.__cause__ or e.__context__\n"
     "    return False\n"
@@ -238,8 +240,8 @@ def main():
     import tempfile
     with tempfile.TemporaryFile() as tf:
         tf.write(b'x')
-    out = [fib(30), depth(CACHED_DEPTH), plain_depth(3000), heapq.heappop(h), c.most_common(1)[0][0], i,
-           len(back), math.comb(5, 2), bool(re.match(r'\\d', '7')),
+    out = [fib(30), depth(CACHED_DEPTH), plain_depth(3000), heapq.heappop(h),
+           c.most_common(1)[0][0], i, len(back), math.comb(5, 2), bool(re.match(r'\\d', '7')),
            len(list(itertools.permutations(range(4))))]
     print(out)
 
@@ -1205,7 +1207,8 @@ def test_a_udp_bind_does_not_unlock_a_tcp_connect_to_a_foreign_listener(tmp_path
                 break
             time.sleep(0.02)
         if port_file is None:
-            go_file.write_text("x", encoding="utf-8")  # the bind itself was refused: nothing to serve
+            # the bind itself was refused: nothing to serve
+            go_file.write_text("x", encoding="utf-8")
             return
         time.sleep(0.05)
         port = int(Path(port_file).read_text(encoding="utf-8"))

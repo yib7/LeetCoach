@@ -304,7 +304,8 @@ def _seed_metadata(output: Path, now: float) -> None:
         }, ensure_ascii=False, separators=(",", ":")))
         rec = records.get(pid)
         if rec is None:
-            due = (datetime.fromtimestamp(stamp).astimezone().date() + timedelta(days=1)).isoformat()
+            created_day = datetime.fromtimestamp(stamp).astimezone().date()
+            due = (created_day + timedelta(days=1)).isoformat()
             rec = records[pid] = {
                 "id": pid, "number": number, "title": title, "difficulty": difficulty,
                 "pattern": pattern, "statement": statement, "created": _iso(stamp),

@@ -297,7 +297,8 @@ def _header(problem: str) -> tuple[str, str]:
     title = _title(problem)
     m = re.match(r"^#*\s*(\d{1,5})[.):]\s+(.+)$", title)
     head = f"# {m.group(1)}. {m.group(2).strip()}" if m else f"# {title}"
-    d = re.search(r"^\s*(?:difficulty\s*:\s*)?(easy|medium|hard)\s*$", problem, re.IGNORECASE | re.MULTILINE)
+    d = re.search(r"^\s*(?:difficulty\s*:\s*)?(easy|medium|hard)\s*$", problem,
+                  re.IGNORECASE | re.MULTILINE)
     return head, (d.group(1).capitalize() if d else "Easy")
 
 

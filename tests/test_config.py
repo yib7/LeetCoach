@@ -14,6 +14,7 @@ import config
 
 # --- model_alias ----------------------------------------------------------
 
+
 def test_model_alias_maps_default_opus_id(monkeypatch):
     monkeypatch.delenv("LEETCOACH_MODEL", raising=False)
     # the default is the generic `opus` alias -> the picker's "opus"
@@ -332,7 +333,8 @@ def test_resolve_run_model_keeps_a_pinned_id_for_its_own_alias(monkeypatch):
     ("LEETCOACH_QUICK_ASK_MODEL", config.quick_ask_model, config.DEFAULT_QUICK_ASK_MODEL),
     ("LEETCOACH_CLAUDE_BIN", config.claude_bin, config.DEFAULT_CLAUDE_BIN),
 ])
-def test_blank_string_knobs_fall_back_to_their_default(monkeypatch, env_var, getter, default, value):
+def test_blank_string_knobs_fall_back_to_their_default(
+        monkeypatch, env_var, getter, default, value):
     # `LEETCOACH_MODEL=` in .env used to reach argv as `--model ""`.
     monkeypatch.setenv(env_var, value)
     assert getter() == default

@@ -191,6 +191,7 @@ def _posix_rlimits(*, posix: bool | None = None) -> dict:
             limits["NPROC"] = current + _NPROC_HEADROOM
     return limits
 
+
 # A5: the trusted bootstrap the child runs first (see sandbox_bootstrap.py).
 # Its stdin carries the framed config, then the go byte (sent only after the
 # job object is assigned), then the sample input. The go byte is the

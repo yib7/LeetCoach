@@ -220,7 +220,8 @@ def test_tsv_download(client, out):
 
 def test_flashcards_cache_sees_an_edited_doc(client, out):
     _library(out)
-    assert client.get("/flashcards?path=answers/stack/20_valid__optimal.md").get_json()["count"] == 1
+    url = "/flashcards?path=answers/stack/20_valid__optimal.md"
+    assert client.get(url).get_json()["count"] == 1
     _write(out, "answers/stack/20_valid__optimal.md",
            _doc("- Q: stack? - A: LIFO\n- Q: queue? - A: FIFO\n"), 1_800_000_100)
-    assert client.get("/flashcards?path=answers/stack/20_valid__optimal.md").get_json()["count"] == 2
+    assert client.get(url).get_json()["count"] == 2

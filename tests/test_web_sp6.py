@@ -17,7 +17,8 @@ import claude_cli
 import problem_store
 import sandbox
 
-PASTE = "1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\nInput: nums = [2,7], target = 9\nOutput: [0,1]"
+PASTE = ("1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\n"
+         "Input: nums = [2,7], target = 9\nOutput: [0,1]")
 DOC = (
     "# 1. Two Sum\nPattern: Arrays & Hashing · Difficulty: Easy\n\n## Solution\n\n"
     "```python solution\nprint(input())\n```\n"
@@ -203,7 +204,7 @@ def test_library_verdict_and_difficulty_from_the_log(out):
     _write(out / "answers" / "stack" / "valid_parentheses__optimal.md",
            "# VP\n\n---\n\n**Verification:** ✗ Sample tests FAIL (0/1)\n", 1)
     # a fresh app has a cold listing cache
-    files ={f["path"]: f for f in _client(_run_fn()).get("/library").get_json()["files"]}
+    files = {f["path"]: f for f in _client(_run_fn()).get("/library").get_json()["files"]}
     logged = files["answers/hash_map/1_two_sum__normal.md"]
     assert logged["verdict"] == "pass"            # the log wins over the doc text
     assert logged["difficulty"] == "Easy"

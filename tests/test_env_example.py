@@ -69,7 +69,8 @@ def test_path_settings_are_commented_out_not_active():
 
 def test_non_path_settings_stay_active():
     # regression guard: don't accidentally comment out everything
-    for setting in set(KNOWN_SETTINGS) - PATH_SETTINGS - {"LEETCOACH_NO_BROWSER", "LEETCOACH_NO_DOTENV"}:
+    flags = {"LEETCOACH_NO_BROWSER", "LEETCOACH_NO_DOTENV"}
+    for setting in set(KNOWN_SETTINGS) - PATH_SETTINGS - flags:
         active = [line for line in _lines() if re.match(rf"^{setting}=", line)]
         assert active, f"{setting} should be an active example line"
 

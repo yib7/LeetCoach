@@ -6,7 +6,8 @@ forgiving: Claude often wraps JSON in prose or ```` ```json ```` fences, so we
 decode the first JSON object in the reply (``raw_decode``, B21). The type is
 normalized onto the fixed pattern list in :mod:`patterns` and the topics are
 sanitized. Anything we cannot make sense of degrades to a safe fallback
-(``uncategorized`` / no topics) rather than raising — classification is best-effort metadata, never a hard dependency.
+(``uncategorized`` / no topics) rather than raising — classification is
+best-effort metadata, never a hard dependency.
 """
 from __future__ import annotations
 
