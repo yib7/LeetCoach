@@ -40,6 +40,8 @@ style, could use tools (read ``.env``), and filed every run in the repo's
 session history. Every call therefore:
 
 * runs in a neutral working directory (``config.claude_cwd()``);
+* inherits the environment minus the variables that would make the CLI bill
+  API credits instead of the subscription (:data:`API_BILLING_ENV_VARS`);
 * passes ``--safe-mode`` (customizations off, OAuth kept - never ``--bare``,
   which drops OAuth and breaks subscription auth), ``--tools ""`` (no tools)
   and ``--strict-mcp-config`` (no MCP servers);
@@ -59,6 +61,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -78,6 +81,8 @@ import config
 # older callers) reach the tree-kill via ``claude_cli._kill_process_tree``.
 import proc_util
 from proc_util import kill_process_tree as _kill_process_tree
+
+logger = logging.getLogger(__name__)
 
 
 class ClaudeUnavailableError(RuntimeError):
@@ -344,6 +349,54 @@ class AuthStatus(NamedTuple):
     logged_in: bool
 
 
+# 3A C1: with any of these set, Claude Code in print mode authenticates with
+# (and bills) the Anthropic API key / token or a cloud provider instead of the
+# subscription login this app is built on. `load_dotenv` puts every `.env` key
+# in os.environ, so a key kept there for some other tool would silently turn
+# every run into paid API usage. They are withheld from EVERY `claude` spawn
+# (runs, follow-ups, the classifier, the help and auth probes); everything else
+# - ANTHROPIC_BASE_URL, proxies, PATH - is inherited unchanged.
+API_BILLING_ENV_VARS = frozenset({
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+})
+_withheld_logged = False
+_withheld_lock = threading.Lock()
+
+
+def child_env() -> dict[str, str]:
+    """The environment for a `claude` child: ``os.environ`` minus
+    :data:`API_BILLING_ENV_VARS` (3A C1). The first time anything is withheld
+    one WARNING names the variables (names only, never values)."""
+    env: dict[str, str] = {}
+    withheld: set[str] = set()
+    for key, value in os.environ.items():
+        # Upper-cased: Windows env names are case-insensitive (Node's
+        # process.env included).
+        if key.upper() in API_BILLING_ENV_VARS:
+            withheld.add(key)
+        else:
+            env[key] = value
+    if withheld:
+        _log_withheld(withheld)
+    return env
+
+
+def _log_withheld(names: set[str]) -> None:
+    global _withheld_logged
+    with _withheld_lock:
+        if _withheld_logged:
+            return
+        _withheld_logged = True
+    logger.warning(
+        "Not passing %s to the `claude` CLI, so runs use your Claude Code "
+        "subscription login instead of billing API credits.",
+        ", ".join(sorted(names)),
+    )
+
+
 def _spawn_kwargs() -> dict:
     """Platform Popen kwargs shared by every `claude` spawn.
 
@@ -400,6 +453,7 @@ def _run_bounded(argv: list[str], *, timeout: float, cwd: str | None = None):
             encoding="utf-8",
             errors="replace",
             cwd=cwd,
+            env=child_env(),  # 3A C1: never the API-billing variables
             **_spawn_kwargs(),
         )
     except BaseException:
@@ -751,6 +805,7 @@ def _real_runner(
         "errors": "replace",
         "bufsize": 1,  # line-buffered so deltas surface promptly
         "cwd": cwd,
+        "env": child_env(),  # 3A C1: never the API-billing variables
         # Windows: no console window; POSIX: own process group (C5).
         **_spawn_kwargs(),
     }
