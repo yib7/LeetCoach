@@ -13,6 +13,7 @@ returns an iterable of text deltas. We assert:
 from __future__ import annotations
 
 import json
+import logging
 
 import classifier
 
@@ -23,8 +24,7 @@ def make_run_fn(deltas):
 
     def run_fn(prompt, **kwargs):
         calls.append({"prompt": prompt, "kwargs": kwargs})
-        for d in deltas:
-            yield d
+        yield from deltas
 
     return run_fn, calls
 
@@ -94,6 +94,19 @@ def test_falls_back_on_empty_stream():
     result = classifier.classify("text", run_fn=run_fn)
     assert result.problem_type == "uncategorized"
     assert result.topics == []
+
+
+def test_falls_back_and_logs_when_the_claude_call_raises(caplog):
+    def run_fn(prompt, **kwargs):
+        raise RuntimeError("claude exited 1")
+        yield  # pragma: no cover - makes this a generator like claude_cli.run
+
+    with caplog.at_level(logging.WARNING, logger="classifier"):
+        result = classifier.classify("text", run_fn=run_fn)
+    assert result.problem_type == "uncategorized"
+    assert result.topics == []
+    rec = next(r for r in caplog.records if r.name == "classifier")
+    assert "claude exited 1" in rec.getMessage() and rec.exc_info is not None
 
 
 def test_falls_back_when_json_has_no_problem_type():

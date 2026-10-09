@@ -11,11 +11,14 @@ sanitized. Anything we cannot make sense of degrades to a safe fallback
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 
 import claude_cli
 import patterns
 import prompts
+
+logger = logging.getLogger(__name__)
 
 FALLBACK_TYPE = patterns.FALLBACK
 
@@ -131,9 +134,10 @@ def classify(problem: str, *, run_fn=claude_cli.run, **run_kwargs) -> Classifica
                 **run_kwargs,
             )
         )
-    except Exception:
+    except Exception as exc:
         # A flaky/missing Claude must not crash the caller; classification is
-        # best-effort metadata.
+        # best-effort metadata. Logged so a persistent failure is diagnosable.
+        logger.warning("classification failed, using the fallback: %s", exc, exc_info=True)
         return Classification(FALLBACK_TYPE, [])
 
     obj = _extract_json(text)
