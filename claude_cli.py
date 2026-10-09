@@ -770,10 +770,13 @@ def _first_line(text: str) -> str:
 
 def _compose_error(headline: str, detail: str) -> str:
     """``headline`` + the rest of ``detail`` (capped) + a hint when the text
-    carries an auth / usage-limit marker."""
+    carries an auth / usage-limit marker.
+
+    The headline already ends with the detail's first line, so only the lines
+    AFTER it follow (3A C11: the whole detail used to repeat it)."""
     parts = [headline]
-    rest = detail.strip()
-    if rest and rest != _first_line(rest):
+    rest = "\n".join(detail.strip().splitlines()[1:]).strip()
+    if rest:
         parts.append(rest[:_DETAIL_CAP])
     hint = _hint_for(detail)
     if hint:
