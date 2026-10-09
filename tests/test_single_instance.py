@@ -156,3 +156,20 @@ def test_main_serves_when_no_instance_is_running(monkeypatch):
     rc = app_module.main(open_browser=lambda url: None, serve=served_ports.append)
     assert rc == 0
     assert served_ports == [5007]
+
+
+def test_main_never_lets_flask_reload_the_dotenv(monkeypatch):
+    """3A G1: ``Flask.run`` loads ``.env`` from the cwd with python-dotenv as
+    strict UTF-8 by default. That crashed the launch on a UTF-16 ``.env`` (what
+    Windows PowerShell 5.1's ``echo X=1 > .env`` writes), which the app's own
+    loader decodes or skips with a warning (B12), and it re-read the real
+    ``.env`` even under ``LEETCOACH_NO_DOTENV``. main() must opt out."""
+    calls = []
+    monkeypatch.setenv("LEETCOACH_NO_BROWSER", "1")
+    monkeypatch.setattr(app_module, "_existing_instance_url", lambda host, port, **kw: None)
+    monkeypatch.setattr(app_module, "_choose_port", lambda preferred, host: 5007)
+    monkeypatch.setattr(app_module, "_sweep_sandbox_temp", lambda: 0)
+    monkeypatch.setattr(app_module.storage, "migrate_tier_suffixes", list)
+    monkeypatch.setattr(app_module.app, "run", lambda *a, **k: calls.append(k))
+    assert app_module.main(open_browser=lambda url: None) == 0
+    assert calls and calls[0].get("load_dotenv") is False, calls
