@@ -83,6 +83,10 @@ follow-up questions on a saved doc.
   fixed in code. The only `noqa` comments left each give a reason.
 
 ### Fixed
+- **Deep memoized recursion on Python 3.12/3.13 is explained.** Those versions cap
+  recursion through `functools.cache` / `lru_cache` at a fixed C-level depth (about 1000
+  levels on Windows) that `sys.setrecursionlimit` does not raise. A sample that dies with
+  a `RecursionError` there now says so in its verdict note; Python 3.14 has no such cap.
 - **Classifier failures are logged.** When the save-time classifier call fails, a warning
   with the error is logged before the fallback pattern is used, so a persistent failure
   can be diagnosed.

@@ -221,6 +221,9 @@ def fib(n):
 def depth(n):
     return 0 if n == 0 else 1 + depth(n - 1)
 
+def plain_depth(n):
+    return 0 if n == 0 else 1 + plain_depth(n - 1)
+
 def main():
     nums = list(map(int, sys.stdin.readline().split()))
     h = list(nums)
@@ -235,7 +238,7 @@ def main():
     import tempfile
     with tempfile.TemporaryFile() as tf:
         tf.write(b'x')
-    out = [fib(30), depth(3000), heapq.heappop(h), c.most_common(1)[0][0], i,
+    out = [fib(30), depth(CACHED_DEPTH), plain_depth(3000), heapq.heappop(h), c.most_common(1)[0][0], i,
            len(back), math.comb(5, 2), bool(re.match(r'\\d', '7')),
            len(list(itertools.permutations(range(4))))]
     print(out)
@@ -252,10 +255,84 @@ def test_normal_leetcode_solution_is_unaffected_by_the_audit_hook():
     lru_cache/cache, a raised recursion limit with a big thread stack, stdin,
     print, and scratch files INSIDE the run dir (incl. tempfile, whose TEMP
     points there)."""
+    code = NORMAL_SOLUTION.replace("CACHED_DEPTH", str(_CACHED_DEPTH))
     r = sandbox.verify_python(
-        NORMAL_SOLUTION, "5 3 1 3\n", "[832040, 3000, 1, 3, 1, 4, 10, True, 24]"
+        code, "5 3 1 3\n", f"[832040, {_CACHED_DEPTH}, 3000, 1, 3, 1, 4, 10, True, 24]"
     )
     assert r.status == "pass", r
+
+
+# CPython 3.12/3.13 also count C-level calls (each functools.cache/lru_cache
+# hop is one) against a fixed C recursion limit that sys.setrecursionlimit and
+# a big thread stack do not raise: about 1000 cached levels on Windows. 3.14
+# replaced it with a stack-based check. Pure-Python recursion is unaffected
+# (3000 levels above). The cached depth is the deepest every supported
+# interpreter allows, so this tests the sandbox, not the interpreter.
+_CACHED_DEPTH = 900 if sys.version_info < (3, 14) else 3000
+
+_CACHED_PROBE = (
+    "import sys, threading\nfrom functools import cache\nsys.setrecursionlimit(10**6)\n"
+    "@cache\ndef d(n):\n    return 0 if n == 0 else 1 + d(n - 1)\n"
+    "def main():\n    print(d(int(sys.stdin.readline())))\n"
+    "threading.stack_size(64 * 1024 * 1024)\n"
+    "t = threading.Thread(target=main); t.start(); t.join()\n"
+)
+
+
+def _bare(depth: int) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sandbox._child_python(), "-I", "-c", _CACHED_PROBE], input=f"{depth}\n",
+        capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+    )
+
+
+def test_cached_recursion_depth_matches_the_bare_interpreter():
+    """The sandbox adds no recursion limit of its own: a cached recursion
+    passes in the sandbox exactly when it passes in a bare ``python -I``
+    child of the same interpreter, both at the depth the test above uses and
+    at 3000 (past the 3.12/3.13 C limit on Windows, where both must fail)."""
+    for depth in (_CACHED_DEPTH, 3000):
+        bare = _bare(depth)
+        boxed = sandbox.verify_python(_CACHED_PROBE, f"{depth}\n", str(depth), timeout=60)
+        bare_ok = bare.returncode == 0 and bare.stdout.strip() == str(depth)
+        assert (boxed.status == "pass") == bare_ok, (depth, boxed, bare.stderr[-300:])
+    assert _bare(_CACHED_DEPTH).returncode == 0
+
+
+_RECURSION_TB = (
+    "Traceback (most recent call last):\n  File \"solution.py\", line 3, in d\n"
+    "RecursionError: maximum recursion depth exceeded\n"
+)
+
+
+def test_a_recursion_error_on_3_12_or_3_13_explains_the_c_limit(monkeypatch):
+    """A correct memoized DFS that dies at ~1000 levels on 3.12/3.13 must not
+    read as a plain crash: the note says why and what lifts it."""
+    monkeypatch.setattr(sandbox, "_C_RECURSION_CAPPED", True)
+    note = sandbox._exit_note(1, _RECURSION_TB)
+    assert note.startswith("exited with code 1 (RecursionError: ")
+    assert "functools.cache" in note and "sys.setrecursionlimit" in note and "3.14" in note
+    monkeypatch.setattr(sandbox, "_C_RECURSION_CAPPED", False)
+    assert sandbox._exit_note(1, _RECURSION_TB) == "exited with code 1"
+    monkeypatch.setattr(sandbox, "_C_RECURSION_CAPPED", True)
+    assert sandbox._exit_note(1, "ValueError: x\n") == "exited with code 1"
+
+
+def test_a_recursion_error_in_a_thread_explains_the_c_limit_too(monkeypatch):
+    """The usual LeetCode trick runs the recursion on a big-stack thread, whose
+    uncaught RecursionError leaves exit code 0 and empty stdout: a "fail",
+    which gets the same explanation."""
+    monkeypatch.setattr(sandbox, "_C_RECURSION_CAPPED", True)
+    code = (
+        "import sys, threading\n"
+        "def f(n):\n    return f(n + 1)\n"
+        "t = threading.Thread(target=f, args=(0,)); t.start(); t.join()\n"
+    )
+    r = sandbox.verify_python(code, "", "1")
+    assert r.status == "fail", r
+    assert r.note.startswith("output differed (RecursionError: "), r.note
+    monkeypatch.setattr(sandbox, "_C_RECURSION_CAPPED", False)
+    assert sandbox.verify_python(code, "", "1").note == "output differed"
 
 
 def test_write_outside_the_run_dir_is_blocked(tmp_path):
