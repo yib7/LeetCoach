@@ -128,3 +128,11 @@ def test_heatmap_covers_17_weeks_ending_today():
 def test_empty():
     s = stats.compute_stats([], [], now=NOW)
     assert s["total"] == 0 and s["currentStreak"] == 0 and len(s["heatmap"]) == 119
+
+
+def test_a_log_line_with_non_list_files_does_not_break_stats():
+    """3A S3: one hand-edited / foreign log line (``"files": 5``) must not
+    take /stats down - it still counts as a run, it just names no files."""
+    bad = {**_entry(0), "files": 5}
+    s = stats.compute_stats([bad, _entry(1)], [], now=NOW)
+    assert s["total"] == 2

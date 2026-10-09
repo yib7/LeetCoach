@@ -228,3 +228,161 @@ def test_path_index_last_entry_wins(root):
     assert hit["verdict"] == "pass"
     assert hit["problem_id"] == "1-two_sum"
     assert hit["difficulty"] == "Easy"
+
+
+# --- 3A S3: one badly-typed record field / log line never takes an endpoint down --
+
+def _problems_dir(root):
+    return root / ".leetcoach" / "problems"
+
+
+def _poke(root, pid, **fields):
+    """Hand-edit fields of a stored record (bypassing the store)."""
+    path = _problems_dir(root) / f"{pid}.json"
+    rec = json.loads(path.read_text(encoding="utf-8"))
+    for key, value in fields.items():
+        if isinstance(value, dict) and isinstance(rec.get(key), dict):
+            rec[key].update(value)
+        else:
+            rec[key] = value
+    raw = json.dumps(rec, indent=2)
+    path.write_text(raw, encoding="utf-8")
+    return raw
+
+
+def _corrupt_copies(root, pid):
+    return sorted(_problems_dir(root).glob(f"{pid}.json.corrupt-*"))
+
+
+def test_review_summary_survives_a_non_list_history(root):
+    _record(root)
+    _poke(root, "1-two_sum", review={"history": 5})
+    summary = ps.review_summary(now=NOW + timedelta(days=1), root=root)
+    assert summary["counts"]["scheduled"] == 1
+    assert [i["id"] for i in summary["due"]] == ["1-two_sum"]
+
+
+def test_grading_a_record_with_a_non_list_history_works_and_keeps_the_original(root):
+    _record(root)
+    raw = _poke(root, "1-two_sum", review={"history": 5})
+    result = ps.grade_problem("1-two_sum", "solo", now=NOW + timedelta(days=1), root=root)
+    assert result is not None and result["review"]["box"] == 2
+    rec = ps.load_problem("1-two_sum", root=root)
+    assert [h["grade"] for h in rec["review"]["history"]] == ["solo"]
+    # the hand-edited original is kept beside it, never silently dropped
+    [copy] = _corrupt_copies(root, "1-two_sum")
+    assert copy.read_text(encoding="utf-8") == raw
+
+
+def test_a_non_string_statement_no_longer_blocks_every_later_upsert(root):
+    _record(root)
+    _poke(root, "1-two_sum", statement=5)
+    _record(root, verdict="fail")
+    rec = ps.load_problem("1-two_sum", root=root)
+    assert rec["statement"] == LC_PASTE.strip()
+    assert rec["updated"] == NOW.isoformat(timespec="seconds")
+    assert _corrupt_copies(root, "1-two_sum")  # the original is preserved
+
+
+@pytest.mark.parametrize("field,value", [
+    ("runs", 5), ("aliases", 5), ("title", ["x"]), ("notes", {"a": 1}),
+    ("number", "1"), ("review", 7), ("difficulty", 3), ("pattern", 4),
+])
+def test_badly_typed_fields_are_dropped_on_read_and_repaired_on_write(root, field, value):
+    _record(root)
+    _poke(root, "1-two_sum", **{field: value})
+    rec = ps.load_problem("1-two_sum", root=root)  # readers never see the bad value
+    assert field not in rec or rec[field] != value
+    ps.record_index(root=root)
+    ps.path_index(root=root)
+    ps.review_summary(now=NOW, root=root)
+    _record(root, verdict="fail")
+    rec = ps.load_problem("1-two_sum", root=root)
+    assert rec["runs"] == ["answers/hash_map/1_two_sum__normal.md",
+                           "answers/hash_map/1_two_sum__normal.py"]
+    assert _corrupt_copies(root, "1-two_sum")
+
+
+def test_a_record_with_no_valid_id_counts_as_corrupt(root):
+    folder = _problems_dir(root)
+    folder.mkdir(parents=True)
+    (folder / "1-two_sum.json").write_text(json.dumps({"id": 5, "title": "x"}),
+                                           encoding="utf-8")
+    assert ps.list_problems(root=root) == []
+    _record(root)
+    assert ps.load_problem("1-two_sum", root=root)["title"] == "Two Sum"
+    assert _corrupt_copies(root, "1-two_sum")
+
+
+def test_good_records_are_read_and_rewritten_unchanged(root):
+    """Backward compatibility: a well-formed record (legacy fields included)
+    reads back exactly as stored and an upsert never quarantines it."""
+    _record(root)
+    path = _problems_dir(root) / "1-two_sum.json"
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    stored["review"]["last_reviewed"] = None
+    stored["number"] = None
+    stored["difficulty"] = None
+    stored["legacy_extra"] = {"anything": [1, 2]}
+    path.write_text(json.dumps(stored), encoding="utf-8")
+    assert ps.load_problem("1-two_sum", root=root) == stored
+    _record(root)
+    assert ps.load_problem("1-two_sum", root=root)["legacy_extra"] == {"anything": [1, 2]}
+    assert _corrupt_copies(root, "1-two_sum") == []
+
+
+def test_runs_for_skips_a_log_line_with_an_unhashable_problem_id(root):
+    _record(root)
+    ps.append_run({"ts": "2026-10-08T10:00:00", "problem_id": ["x"], "mode": "answer",
+                   "files": ["a.md"]}, root=root)
+    ps.append_run({"ts": "2026-10-08T10:00:00", "problem_id": {"y": 1}, "mode": "answer"},
+                  root=root)
+    log = ps.runs_for("1-two_sum", root=root)
+    assert [e["problem_id"] for e in log] == ["1-two_sum"]
+
+
+# --- 3A S4: a transient read error never replaces a good record -----------------
+
+def _lock_record_reads(monkeypatch, name):
+    """Make every read of the record file ``name`` fail like a Windows sharing
+    violation (antivirus / OneDrive holding it) - other files read normally."""
+    real_bytes, real_text = ps.Path.read_bytes, ps.Path.read_text
+
+    def guard(path):
+        if path.name == name:
+            raise PermissionError(13, "The process cannot access the file", str(path))
+
+    def read_bytes(self):
+        guard(self)
+        return real_bytes(self)
+
+    def read_text(self, *a, **kw):
+        guard(self)
+        return real_text(self, *a, **kw)
+
+    monkeypatch.setattr(ps.Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(ps.Path, "read_text", read_text)
+
+
+def test_a_locked_record_is_left_alone_and_the_run_is_still_logged(root, monkeypatch):
+    _record(root)
+    path = _problems_dir(root) / "1-two_sum.json"
+    before = path.read_bytes()
+    _lock_record_reads(monkeypatch, "1-two_sum.json")
+    later = NOW + timedelta(days=3)
+    pid = _record(root, verdict="fail", now=later)
+    monkeypatch.undo()
+    assert pid == "1-two_sum"
+    assert path.read_bytes() == before            # the good record is untouched
+    assert _corrupt_copies(root, "1-two_sum") == []
+    assert [e["verdict"] for e in ps.read_runs(root=root)] == ["pass", "fail"]
+
+
+def test_a_locked_record_reads_as_absent_for_listing_but_is_not_corrupt(root, monkeypatch):
+    _record(root)
+    _lock_record_reads(monkeypatch, "1-two_sum.json")
+    assert ps.list_problems(root=root) == []
+    assert ps.grade_problem("1-two_sum", "solo", now=NOW, root=root) is None
+    monkeypatch.undo()
+    assert _corrupt_copies(root, "1-two_sum") == []
+    assert ps.load_problem("1-two_sum", root=root)["review"]["box"] == 1

@@ -66,7 +66,9 @@ def _activities(entries, files):
             continue
         if e.get("mode") == "followup":
             continue  # SP8 / D6: a follow-up question is not a study run
-        for f in e.get("files") or ():
+        files_named = e.get("files")
+        # 3A S3: a hand-edited line's "files" may be any JSON value
+        for f in files_named if isinstance(files_named, list) else ():
             if isinstance(f, str):
                 logged_files.add(f)
         ts = _entry_time(e.get("ts"))
