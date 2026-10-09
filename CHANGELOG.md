@@ -209,6 +209,22 @@ follow-up questions on a saved doc.
   - State-changing requests from another origin are refused.
   - SSE streams send a heartbeat, and runs can be cancelled on the server.
 - **Anki export.** Cells that a spreadsheet would treat as formulas are neutralised.
+- **Only this computer is served.** Every request must come from a loopback address.
+  `python app.py` already binds `127.0.0.1`, but under `flask run --host 0.0.0.0` or a
+  WSGI server a LAN client could send `Host: 127.0.0.1` itself and use every route.
+- **The sandbox reads only its run folder and Python.** Outside the run folder and the
+  interpreter's own install (its prefixes and `sys.path`), every read and listing is
+  refused, not just the known secret paths. Imports and tracebacks still work.
+- **No `claude` call without its isolation flags.** If `claude --help` cannot be read
+  (it times out twice or fails), the call is refused with an error instead of going out
+  without `--tools ""`, `--safe-mode` and `--strict-mcp-config`.
+- **Limits on spend.** At most 4 study runs and 4 Quick Asks run at once (more get a
+  429), and a pasted problem is capped at 50,000 characters.
+- **`Referrer-Policy: no-referrer`** on every response, so a link in a study doc does not
+  tell the site it opens where it came from.
+- **Saved docs no longer name the temp folder.** A failed sample's traceback in a saved
+  Answer or Guided doc shows `solution.py` instead of the sandbox's temp path, which
+  included your OS user name.
 
 ### Notes
 - **CI and tests (C14).** CI parses every `.ps1` under Windows PowerShell 5.1. The
