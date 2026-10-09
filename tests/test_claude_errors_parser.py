@@ -61,6 +61,17 @@ def test_auth_failures_carry_sign_in_guidance(detail):
     assert "sign in" in msg.lower()
 
 
+def test_multi_line_failure_does_not_repeat_its_first_line():
+    # 3A C11: the headline already carries the first line; only the rest of
+    # the detail follows it.
+    msg = claude_cli.failure_message(1, "Error: boom\n  at foo\n  at bar")
+    assert msg.count("Error: boom") == 1
+    assert msg.splitlines()[0].endswith("Error: boom")
+    assert "at foo" in msg and "at bar" in msg
+    result_msg = claude_cli.result_error_message({"result": "Bad thing\ndetail line"})
+    assert result_msg.count("Bad thing") == 1 and "detail line" in result_msg
+
+
 def test_failure_without_any_detail_says_so_without_guessing():
     msg = claude_cli.failure_message(3, "")
     assert "code 3" in msg
