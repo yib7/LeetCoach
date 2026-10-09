@@ -330,3 +330,48 @@ test("hardened renderer: raw HTML escaped, unsafe links/images neutralised, & no
   assert.ok(html.indexOf("https://evil/p.png") === -1, html);
   assert.ok(html.indexOf('<img src="data:image/png;base64,AAAA"') !== -1, html);
 });
+
+function hardenedMarked() {
+  global.window = global.window || global;
+  var m = require(path.join(__dirname, "..", "..", "static", "vendor", "marked.min.js"));
+  var md = new m.Marked();
+  md.use({ renderer: core.hardenedRenderer() });
+  return md;
+}
+
+test("hardened renderer: link text keeps inline markdown, titles are dropped", function () {
+  var html = hardenedMarked().parse('[**bold** `c`](https://a.com/x "T")');
+  assert.ok(html.indexOf('<a href="https://a.com/x" rel="noopener" target="_blank">' +
+    "<strong>bold</strong> <code>c</code></a>") !== -1, html);
+  assert.ok(html.indexOf("title=") === -1, html);
+});
+
+test("hardened renderer: an unsafe link keeps its rendered text, never an href", function () {
+  var html = hardenedMarked().parse("[*see* <b>me</b>](javascript:alert(1)) [x](data:text/html,hi)");
+  assert.ok(html.indexOf("href") === -1, html);
+  assert.ok(html.indexOf("<em>see</em>") !== -1, html);
+  assert.ok(html.indexOf("<b>") === -1 && html.indexOf("&lt;b&gt;me&lt;/b&gt;") !== -1, html);
+  assert.ok(html.indexOf("javascript:") === -1, html);
+});
+
+test("hardened renderer: autolink and bare-URL text is escaped, never raw", function () {
+  var html = hardenedMarked().parse("<https://z.com/?a<b>&c> and https://y.com/p?q=<i>");
+  assert.ok(html.indexOf("<b>") === -1 && html.indexOf("<i>") === -1, html);
+  assert.ok(html.indexOf("&amp;amp;") === -1, html);
+});
+
+test("hardened renderer: image alt text is escaped and a refused image keeps only text", function () {
+  var md = hardenedMarked();
+  var ok = md.parse('![a "q" <b>x</b>](data:image/png;base64,AAAA)');
+  assert.ok(ok.indexOf('<img src="data:image/png;base64,AAAA" alt="') !== -1, ok);
+  assert.ok(ok.indexOf("<b>") === -1 && ok.indexOf('alt="a "q"') === -1, ok);
+  var refused = md.parse("![<b>alt</b> *e*](https://evil/p.png)");
+  assert.ok(refused.indexOf("<img") === -1 && refused.indexOf("evil") === -1, refused);
+  assert.ok(refused.indexOf("<b>") === -1 && refused.indexOf("alt") !== -1, refused);
+});
+
+test("hardened renderer: block and inline raw HTML is shown as text", function () {
+  var html = hardenedMarked().parse('<div onclick="x()">hi</div>\n\ntext <img src=x onerror=alert(1)> end');
+  assert.ok(html.indexOf("<div") === -1 && html.indexOf("&lt;div") !== -1, html);
+  assert.ok(html.indexOf("<img") === -1 && html.indexOf("&lt;img") !== -1, html);
+});
