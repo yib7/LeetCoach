@@ -12,7 +12,8 @@ import app as app_module
 import claude_cli
 import problem_store
 
-PASTE = "1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\nInput: nums = [2,7], target = 9\nOutput: [0,1]"
+PASTE = ("1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\n"
+         "Input: nums = [2,7], target = 9\nOutput: [0,1]")
 
 
 # 3A W9: the routes' "today" is frozen, so the expected dates below never

@@ -632,4 +632,3 @@ def test_study_prompts_no_longer_carry_the_persona_line():
     ):
         assert "You are a patient coding tutor" not in p
         assert "You are an expert competitive-programming assistant" not in p
-

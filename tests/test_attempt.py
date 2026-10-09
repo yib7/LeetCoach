@@ -34,7 +34,8 @@ def two_sum(nums, target):
     return []
 
 text = sys.stdin.read()
-args = {k: ast.literal_eval(v) for k, v in re.findall(r"(\\w+)\\s*=\\s*(\\[[^\\]]*\\]|-?\\d+)", text)}
+pairs = re.findall(r"(\\w+)\\s*=\\s*(\\[[^\\]]*\\]|-?\\d+)", text)
+args = {k: ast.literal_eval(v) for k, v in pairs}
 print(json.dumps(two_sum(args["nums"], args["target"]), separators=(",", ":")))
 '''
 WRONG = GOOD.replace("return [seen[target - x], i]", "return [i, seen[target - x]]")

@@ -229,4 +229,3 @@ def test_learning_requires_a_techniques_heading_after_the_hints():
 def test_answer_has_neither_fixed_heading():
     p = prompts.build_answer("1. Two Sum\n", tier="normal", language="python")
     assert "### Walkthrough" not in p and "### Techniques" not in p
-

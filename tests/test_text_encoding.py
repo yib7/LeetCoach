@@ -45,7 +45,8 @@ def text_io_without_encoding(source: str) -> list[int]:
             mode = _mode(node, 0 if path_open else 1)
             if "b" not in str(mode or "") and len(node.args) <= (2 if path_open else 3):
                 hits.append(node.lineno)
-        elif (name == "read_text" and not node.args) or (name == "write_text" and len(node.args) < 2):
+        elif ((name == "read_text" and not node.args)
+              or (name == "write_text" and len(node.args) < 2)):
             hits.append(node.lineno)
         elif owner == "subprocess" and name in ("run", "Popen", "check_output"):
             if any(k.arg in ("text", "universal_newlines") and _const(k.value) is not False

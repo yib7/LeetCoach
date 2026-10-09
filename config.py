@@ -117,7 +117,8 @@ def model_alias() -> str:
     """The picker alias that best matches the currently configured model.
 
     Maps the active :func:`model` id to one of :data:`ALLOWED_MODEL_ALIASES` by
-    substring (so both the default ``opus`` alias and a pinned ``claude-opus-5-5`` highlight ``opus``). Returns
+    substring (so both the default ``opus`` alias and a pinned
+    ``claude-opus-5-5`` highlight ``opus``). Returns
     ``""`` when the configured model matches no alias — the picker then shows no
     selection rather than a wrong one.
     """

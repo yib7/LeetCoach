@@ -8,7 +8,8 @@ import pytest
 import patterns
 import prompts
 
-PROBLEM = "1. Two Sum\nEasy\nGiven an array nums and a target...\nInput: nums = [2,7], target = 9\nOutput: [0,1]"
+PROBLEM = ("1. Two Sum\nEasy\nGiven an array nums and a target...\n"
+           "Input: nums = [2,7], target = 9\nOutput: [0,1]")
 LANGS = ("python", "cpp", "java")
 ALL_SECTIONS = (
     "Problem in brief", "Constraints → target complexity", "How to recognize this pattern",

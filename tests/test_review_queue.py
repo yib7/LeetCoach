@@ -10,7 +10,8 @@ import pytest
 
 import problem_store as ps
 
-PASTE = "1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\nInput: nums = [2,7], target = 9\nOutput: [0,1]"
+PASTE = ("1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\n"
+         "Input: nums = [2,7], target = 9\nOutput: [0,1]")
 
 
 @pytest.fixture
@@ -218,8 +219,12 @@ def test_summary_lists_due_problems_and_counts(root):
 def test_summary_due_boundary_is_the_local_day(root):
     pid = _record(root)
     _set_review(root, pid, due="2026-02-01")
-    assert ps.review_summary(now=datetime(2026, 1, 31, 23, 59).astimezone(), root=root)["counts"]["due"] == 0
-    assert ps.review_summary(now=datetime(2026, 2, 1, 0, 0).astimezone(), root=root)["counts"]["due"] == 1
+
+    def due_at(*when):
+        return ps.review_summary(now=datetime(*when).astimezone(), root=root)["counts"]["due"]
+
+    assert due_at(2026, 1, 31, 23, 59) == 0
+    assert due_at(2026, 2, 1, 0, 0) == 1
 
 
 def test_summary_treats_a_missing_or_bad_due_as_due(root):

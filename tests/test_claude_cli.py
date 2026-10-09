@@ -26,6 +26,7 @@ import proc_util
 
 # --- fakes ---------------------------------------------------------------
 
+
 def make_recording_runner(lines, *, terminal_result=True):
     """Return (runner, calls) where runner records argv + stdin and yields `lines`.
 

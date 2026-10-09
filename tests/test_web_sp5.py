@@ -241,7 +241,8 @@ def test_library_listing_carries_the_verdict(env):
         "# Two Sum\n\n---\n\n**Verification:** ✗ Sample tests FAIL (0/1 sample(s) passed)\n",
         encoding="utf-8")
     (env / "answers" / "hash_map" / "two_sum__normal.py").write_text("print(1)\n", encoding="utf-8")
-    (env / "learning" / "hash_map_learning" / "two_sum.md").write_text("# Notes\n", encoding="utf-8")
+    learning = env / "learning" / "hash_map_learning"
+    (learning / "two_sum.md").write_text("# Notes\n", encoding="utf-8")
     files = {f["path"]: f for f in _client(_run_fn()).get("/library").get_json()["files"]}
     assert files["answers/hash_map/two_sum__normal.md"]["verdict"] == "fail"
     assert "verdict" not in files["answers/hash_map/two_sum__normal.py"]
