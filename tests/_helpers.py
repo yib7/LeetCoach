@@ -119,3 +119,31 @@ def wait_dead(pid: int, timeout: float = 8.0) -> bool:
             return True
         time.sleep(0.1)
     return not pid_alive(pid)
+
+
+# --- 3A W9: wall-clock-free dates ------------------------------------------------
+# "N days ago" as N * 86400 real seconds lands on the wrong calendar day near
+# midnight when a 23 h / 25 h DST day lies in between, and a test that reads
+# the clock separately from the server can disagree with it across midnight.
+
+def local_noon(day) -> float:
+    """Epoch seconds of local noon on ``day`` (a ``datetime.date``): an mtime
+    that is unambiguously on that local calendar day."""
+    from datetime import datetime
+    from datetime import time as dtime
+
+    return datetime.combine(day, dtime(12)).timestamp()
+
+
+def freeze_stats_now(monkeypatch, now) -> None:
+    """Make ``GET /stats`` compute "today" / the streak / the heatmap at the
+    aware datetime ``now`` instead of reading the real clock."""
+    import stats
+
+    real = stats.compute_stats
+
+    def frozen(entries, files, **kwargs):
+        kwargs["now"] = now
+        return real(entries, files, **kwargs)
+
+    monkeypatch.setattr(stats, "compute_stats", frozen)

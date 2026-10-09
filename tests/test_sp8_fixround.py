@@ -10,11 +10,11 @@ import io
 import os
 import re
 import threading
-import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from _helpers import freeze_stats_now, local_noon
 from test_followup import (  # noqa: F401 - fixture
     ANSWER_DOC,
     LEARNING_DOC,
@@ -34,12 +34,14 @@ import problem_store
 import storage
 
 REPO = Path(__file__).resolve().parent.parent
-DAY = 24 * 3600
 
 
-def _age(path: Path, days: float) -> int:
-    """Back-date ``path`` by ``days``; returns the new mtime_ns."""
-    old = time.time() - days * DAY
+def _age(path: Path, days: int, *, today: date | None = None) -> int:
+    """Back-date ``path`` to local noon ``days`` calendar days before
+    ``today`` (default: the real local today); returns the new mtime_ns.
+    3A W9: calendar arithmetic, not ``days * 86400`` seconds, so a DST change
+    in between never moves it to a neighbouring date."""
+    old = local_noon((today or datetime.now().astimezone().date()) - timedelta(days=days))
     os.utime(path, (old, old))
     return path.stat().st_mtime_ns
 
@@ -72,10 +74,15 @@ def test_followup_keeps_the_docs_mtime(root):  # noqa: F811
     assert "## Follow-up — Why a hash map?" in path.read_text(encoding="utf-8")
 
 
-def test_legacy_doc_stats_date_is_unchanged_by_a_followup(root):  # noqa: F811
+def test_legacy_doc_stats_date_is_unchanged_by_a_followup(root, monkeypatch):  # noqa: F811
     rel = "guided/stack/20_valid_parentheses.md"
     path = _write(root, rel, LEARNING_DOC)  # unlogged: Stats dates it by mtime
-    _age(path, 10)
+    # 3A W9: one frozen clock for the mtime, both /stats calls and the expected
+    # day - 00:30, ten days after a US DST change (the old 10 * 86400 s helper
+    # put the doc on the wrong date in exactly this case).
+    now = datetime(2026, 3, 18, 0, 30).astimezone()
+    _age(path, 10, today=now.date())
+    freeze_stats_now(monkeypatch, now)
     c = _client(Recorder())
     before = c.get("/stats").get_json()
     _, (_, events) = _ask(c, rel)
@@ -83,7 +90,8 @@ def test_legacy_doc_stats_date_is_unchanged_by_a_followup(root):  # noqa: F811
     after = c.get("/stats").get_json()
     assert after == before
     assert after["today"] == 0 and after["sources"]["legacy"] == 1
-    day = (datetime.now().astimezone() - timedelta(days=10)).date().isoformat()
+    day = datetime.fromtimestamp(path.stat().st_mtime).astimezone().date().isoformat()
+    assert day == (now.date() - timedelta(days=10)).isoformat()
     assert {h["date"]: h["count"] for h in after["heatmap"]}[day] == 1
 
 
