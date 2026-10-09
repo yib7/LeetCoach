@@ -765,6 +765,19 @@ def _md_verdict(path: Path, stat) -> str | None:
     return verdict
 
 
+def _inside_root(path: Path, resolved_root: Path) -> bool:
+    """3A W4: whether ``path`` - with every symlink / junction on the way
+    followed - still lies inside ``resolved_root`` (an already-resolved
+    library root). ``rglob`` descends into a junction and ``is_file()``
+    follows a symlink, so without this a link inside ``output/`` would list,
+    read and export a file from anywhere. Unresolvable paths count as
+    outside. The same rule :func:`_resolve_library_file` applies to reads."""
+    try:
+        return path.resolve().is_relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def _library_files(root: Path) -> list[dict]:
     """The library listing: every allowlisted file under ``root``, as
     ``{"path": <relative, forward slashes>, "size": <bytes>, "mtime": <epoch
@@ -778,11 +791,17 @@ def _library_files(root: Path) -> list[dict]:
     files = []
     topic_index_file = _topic_index_resolved()
     log_index = _log_index(root)
+    try:
+        resolved_root = root.resolve()
+    except OSError:
+        return []
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix.lower() not in LIBRARY_EXTENSIONS:
             continue
         if _is_hidden(root, path, topic_index_file):
             continue
+        if not _inside_root(path, resolved_root):
+            continue  # 3A W4: a symlink / junction pointing out of output/
         try:
             stat = path.stat()
         except OSError:

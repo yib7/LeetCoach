@@ -4,6 +4,7 @@ Sec-Fetch-Site checks (C2), the SSE heartbeat (C3) and ``POST /run/cancel``
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 
@@ -365,3 +366,84 @@ def test_a_response_closed_before_streaming_still_frees_its_slot(env):
     resp = application.test_client().post("/run", json=RUN)
     assert resp.status_code == 200, "the abandoned run must not hold the slot"
     resp.get_data()
+
+
+# --- 3A W4: a link inside output/ never exposes files outside it -------------------
+
+SECRET_DOC = "# Secret\n\n## Flashcards\n- Q: leaked question? - A: leaked answer\n"
+
+
+def _link_out(link, target):
+    """Make ``link`` (a directory link inside the library) point at ``target``:
+    a symlink when the OS allows one, else (Windows without the privilege) an
+    NTFS junction, which needs none; skips when neither can be made."""
+    try:
+        os.symlink(target, link, target_is_directory=True)
+        return
+    except (OSError, NotImplementedError):
+        pass
+    if os.name != "nt":
+        pytest.skip("cannot create a directory symlink here")
+    import _winapi  # Windows-only
+
+    _winapi.CreateJunction(str(target), str(link))
+
+
+def test_library_listing_skips_a_link_that_leaves_the_root(env, tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "secret.md").write_text(SECRET_DOC, encoding="utf-8")
+    (env / "learning").mkdir(parents=True)
+    (env / "learning" / "mine.md").write_text(
+        "# Mine\n\n## Flashcards\n- Q: own question? - A: own answer\n", encoding="utf-8")
+    _link_out(env / "linked", outside)
+    assert (env / "linked" / "secret.md").is_file()  # the link really works
+
+    c = _client(Recorder())
+    paths = [f["path"] for f in c.get("/library").get_json()["files"]]
+    assert paths == ["learning/mine.md"]
+    cards = c.get("/flashcards").get_json()["cards"]
+    assert [card["q"] for card in cards] == ["own question?"]
+    tsv = c.get("/flashcards.tsv").get_data(as_text=True)
+    assert "leaked" not in tsv
+    assert "own question?" in tsv
+
+
+def test_library_listing_skips_a_file_symlink_that_leaves_the_root(env, tmp_path):
+    outside = tmp_path / "secret.md"
+    outside.write_text(SECRET_DOC, encoding="utf-8")
+    env.mkdir(parents=True)
+    try:
+        os.symlink(outside, env / "link.md")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"file symlinks not permitted here ({exc}); the directory "
+                    "junction test and the predicate test cover the logic")
+    paths = [f["path"] for f in _client(Recorder()).get("/library").get_json()["files"]]
+    assert paths == []
+
+
+def test_inside_root_predicate(tmp_path, monkeypatch):
+    root = (tmp_path / "out").resolve()
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "x.md").write_text("x", encoding="utf-8")
+    assert app_module._inside_root(root / "a" / "x.md", root)
+    assert app_module._inside_root(root / "a" / ".." / "a" / "x.md", root)
+    assert not app_module._inside_root(root / ".." / "other.md", root)
+    assert not app_module._inside_root(tmp_path / "out2" / "x.md", root)
+
+    # a path whose resolution lands outside (what a symlink / junction does)
+    real_resolve = type(root).resolve
+
+    def fake_resolve(self, strict=False):
+        if self.name == "x.md":
+            return tmp_path / "elsewhere" / "x.md"
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(type(root), "resolve", fake_resolve)
+    assert not app_module._inside_root(root / "a" / "x.md", root)
+
+    def broken(self, strict=False):
+        raise OSError("loop")
+
+    monkeypatch.setattr(type(root), "resolve", broken)
+    assert not app_module._inside_root(root / "a" / "x.md", root)
