@@ -206,6 +206,18 @@ def _json_object() -> tuple[dict, Response | None]:
     return data, None
 
 
+def _log_failure(logger, exc: BaseException, msg: str, *args) -> None:
+    """Log a failed run / ask / follow-up. An expected CLI failure (not
+    installed, signed out, offline: :class:`claude_cli.ClaudeUnavailableError`
+    already says what is wrong, and the page shows it) is one warning line,
+    not a traceback in the console window the launcher keeps open (3A G2);
+    anything else keeps its full traceback (audit P2-8)."""
+    if isinstance(exc, claude_cli.ClaudeUnavailableError):
+        logger.warning(msg + ": %s", *args, exc)
+    else:
+        logger.exception(msg, *args)
+
+
 def _non_string_field_error(data: dict, fields) -> str | None:
     """Return a 400-worthy message if any named field is PRESENT but not a
     string, else ``None``. ``fields`` is an iterable of ``(key, Label)`` pairs.
@@ -1860,7 +1872,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 if problem_id:
                     done_payload["problem_id"] = problem_id
                 yield _sse_event("done", done_payload)
-            except Exception as exc:  # last-resort: always close cleanly
+            except Exception as exc:  # noqa: BLE001 - last resort, logged by _log_failure
                 if state.cancelled:
                     # B14: Stop -> POST /run/cancel. Whatever the killed call
                     # raised (ClaudeCancelledError, _RunCancelled), say so -
@@ -1871,7 +1883,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 else:
                     # Keep the full traceback in the server log (audit P2-8);
                     # the client still gets only the short message below.
-                    app.logger.exception("run failed (mode=%s)", mode)
+                    _log_failure(app.logger, exc, "run failed (mode=%s)", mode)
                     yield _sse_event("error", f"Run failed: {exc}")
             finally:
                 # A6: a classifier call still running is no longer needed -
@@ -1994,10 +2006,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     with _inflight_lock:
                         if _asks.get(ask_id) is entry:
                             del _asks[ask_id]
-        except Exception as exc:  # surface as a clean 502, log the rest
+        except Exception as exc:  # noqa: BLE001 - a clean 502, logged by _log_failure
             if cancelled.is_set():
                 return jsonify({"error": "Quick Ask cancelled."}), 409
-            app.logger.exception("quick ask failed")
+            _log_failure(app.logger, exc, "quick ask failed")
             return jsonify({"error": f"Quick Ask failed: {exc}"}), 502
         if cancelled.is_set():
             return jsonify({"error": "Quick Ask cancelled."}), 409
@@ -2215,11 +2227,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 if run_meta.get("model"):
                     done["model"] = run_meta["model"]
                 yield _sse_event("done", done)
-            except Exception as exc:  # last-resort: always close cleanly
+            except Exception as exc:  # noqa: BLE001 - last resort, logged by _log_failure
                 if state.cancelled:
                     yield _sse_event("cancelled", "Follow-up cancelled.")
                 else:
-                    app.logger.exception("follow-up failed on %s", rel_path)
+                    _log_failure(app.logger, exc, "follow-up failed on %s", rel_path)
                     yield _sse_event("error", f"Follow-up failed: {exc}")
             finally:
                 _release_followup(followup_id, state)
@@ -2402,7 +2414,10 @@ def main(*, open_browser=webbrowser.open, serve=None) -> int:
     if _browser_enabled():
         threading.Timer(1.0, lambda: open_browser(url)).start()
     if serve is None:
-        app.run(host=host, port=port, debug=False, threaded=True)
+        # load_dotenv=False (3A G1): Flask would re-read .env from the cwd as
+        # strict UTF-8, crashing on a UTF-16 one that _maybe_load_dotenv
+        # handles, and ignoring LEETCOACH_NO_DOTENV.
+        app.run(host=host, port=port, debug=False, threaded=True, load_dotenv=False)
     else:
         serve(port)
     return 0
