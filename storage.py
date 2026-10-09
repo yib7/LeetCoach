@@ -214,11 +214,20 @@ def _same_content(path: Path, body: str) -> bool:
 
     An unreadable/undecodable existing file counts as *different* — when in
     doubt we suffix rather than risk clobbering something we could not read.
+
+    3A S5: compared line-ending-blind on both sides - ``read_text`` already
+    reads any CRLF / CR back as ``"\\n"`` and :mod:`fsutil` writes ``body``'s
+    CRLF / CR as one line break - so an identical re-run of a CRLF body
+    reuses its slot instead of shifting to ``__2``.
     """
     try:
-        return path.read_text(encoding="utf-8") == body
+        return path.read_text(encoding="utf-8") == _lf(body)
     except (OSError, UnicodeDecodeError):
         return False
+
+
+def _lf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _resolve_slot(folder: Path, stem: str, files: list[tuple[str, str]]) -> list[Path]:
