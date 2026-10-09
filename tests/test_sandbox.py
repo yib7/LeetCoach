@@ -740,6 +740,26 @@ def test_aggregation_all_errored_is_a_pure_error():
     assert "2/2" in r.note, r.note
 
 
+@pytest.mark.parametrize("statuses,verdict,note", [
+    # 3A S8: "error" is reserved for code that crashed on EVERY sample it ran
+    # (the same rule as the re-attempt "Test my code" summary in practice.py);
+    # any pass alongside a crash is a "fail" whose note names the crashes.
+    (["pass", "pass", "error"], "fail", "2/3 sample(s) passed, 1 errored"),
+    (["error", "fail"], "fail", "0/2 sample(s) passed, 1 errored"),
+    (["error", "error", "error"], "error", "code errored on 3/3 sample(s)"),
+    (["pass", "fail"], "fail", "1/2 sample(s) passed"),
+])
+def test_aggregation_verdict_rule_matches_its_docstring(monkeypatch, statuses, verdict, note):
+    results = iter(statuses)
+    monkeypatch.setattr(sandbox, "verify_python",
+                        lambda *a, **k: sandbox.VerifyResult(status=next(results)))
+    samples = [sandbox.Sample(stdin=f"{i}\n", expected_stdout="x") for i in range(len(statuses))]
+    r = sandbox._verify_python_samples("print(1)\n", samples, timeout=5)
+    assert (r.status, r.note) == (verdict, note)
+    doc = " ".join(sandbox._verify_python_samples.__doc__.split())
+    assert "every sample that ran crashed" in doc
+
+
 # --- B4: the per-sample error reason (timeout/crash note) survives ---------
 
 def test_aggregation_keeps_the_timeout_note_per_sample():
