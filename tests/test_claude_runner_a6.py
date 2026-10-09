@@ -334,4 +334,4 @@ def test_cli_lingering_after_result_is_killed_after_grace_through_run(tmp_path, 
     assert list(run) == []  # the stop at `result` is not an error
     elapsed = time.monotonic() - start
     assert 0.9 <= elapsed < 12, f"grace not honoured / kill too slow: {elapsed:.2f}s"
-    assert wait_dead(int(pid_file.read_text())), "a CLI lingering past the grace survived"
+    assert wait_dead(int(pid_file.read_text(encoding="utf-8"))), "a CLI lingering past the grace survived"

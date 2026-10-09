@@ -70,7 +70,7 @@ def _run(stage, extra_env=None, *, cwd=None):
     return subprocess.run(
         [str(stage / "LeetCoach.cmd")],
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         check=False,
         timeout=30,
         cwd=str(cwd or stage),
@@ -209,7 +209,7 @@ def fake_python_exe(tmp_path_factory):
     out = build_dir / "python.exe"
     result = subprocess.run(
         [str(csc), "/nologo", f"/out:{out}", str(source)],
-        capture_output=True, text=True, check=False, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=60,
     )
     if result.returncode != 0 or not out.exists():
         pytest.skip(f"could not compile fake python.exe: {result.stdout}{result.stderr}")

@@ -269,7 +269,7 @@ def test_timeout_kills_grandchildren_on_windows(tmp_path):
     assert "timed out" in r.note
 
     assert pidfile.exists(), "child never reported a grandchild PID (test setup)"
-    gc_pid = int(pidfile.read_text().strip())
+    gc_pid = int(pidfile.read_text(encoding="utf-8").strip())
     try:
         # taskkill is near-instant but asynchronous at the margins: poll briefly.
         deadline = time.monotonic() + 5
@@ -404,7 +404,7 @@ def test_memory_cap_applies_on_first_call_in_fresh_interpreter():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = subprocess.run(
         [sys.executable, "-c", probe],
-        capture_output=True, text=True, check=False, timeout=45,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=45,
         cwd=repo_root,   # `-c` puts the cwd on sys.path -> `import sandbox` works
     )
     assert out.returncode == 0, (out.stdout, out.stderr)

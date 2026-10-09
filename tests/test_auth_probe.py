@@ -90,7 +90,7 @@ def test_auth_probe_timeout_reaps_pipe_holding_grandchild(monkeypatch, tmp_path)
     )
     with pytest.raises(subprocess.TimeoutExpired):
         REAL_AUTH_RUNNER([sys.executable, "-c", script])
-    gpid = int(pid_file.read_text())
+    gpid = int(pid_file.read_text(encoding="utf-8"))
     try:
         assert wait_dead(gpid), "the probe's grandchild survived the timeout kill"
     finally:

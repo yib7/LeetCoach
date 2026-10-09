@@ -555,7 +555,7 @@ def test_stdout_is_not_lost_when_a_grandchild_holds_the_pipe(tmp_path):
     assert r.status == "pass", r
     assert elapsed < 10, f"took {elapsed:.1f}s -- blocked on the grandchild's pipe"
     if os.name == "nt" and pidfile.exists():
-        gc_pid = int(pidfile.read_text())
+        gc_pid = int(pidfile.read_text(encoding="utf-8"))
         subprocess.run(["taskkill", "/F", "/PID", str(gc_pid)], capture_output=True, check=False)
 
 
@@ -1205,15 +1205,15 @@ def test_a_udp_bind_does_not_unlock_a_tcp_connect_to_a_foreign_listener(tmp_path
                 break
             time.sleep(0.02)
         if port_file is None:
-            go_file.write_text("x")  # the bind itself was refused: nothing to serve
+            go_file.write_text("x", encoding="utf-8")  # the bind itself was refused: nothing to serve
             return
         time.sleep(0.05)
-        port = int(Path(port_file).read_text())
+        port = int(Path(port_file).read_text(encoding="utf-8"))
         with socket.socket() as srv:
             srv.bind(("127.0.0.1", port))
             srv.listen(1)
             srv.settimeout(4)
-            go_file.write_text("x")
+            go_file.write_text("x", encoding="utf-8")
             try:
                 conn, _ = srv.accept()
             except OSError:
@@ -1508,7 +1508,7 @@ def test_fd_is_stream_recognises_a_pipe_and_rejects_a_file(tmp_path):
     finally:
         os.close(r_fd)
         os.close(w_fd)
-    with open(tmp_path / "f.txt", "w") as f:
+    with open(tmp_path / "f.txt", "w", encoding="utf-8") as f:
         assert sandbox_bootstrap.fd_is_stream(f.fileno()) is False
     assert sandbox_bootstrap.fd_is_stream(987654) is False  # not open
 
