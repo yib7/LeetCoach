@@ -1087,6 +1087,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # and the model picker). X-Frame-Options covers older browsers.
         resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["X-Content-Type-Options"] = "nosniff"
+        # Phase 4: a link in a study doc (model output) opens another site;
+        # it must not learn the local URL, port or doc path from Referer.
+        resp.headers["Referrer-Policy"] = "no-referrer"
         return resp
 
     @app.get("/")
