@@ -202,7 +202,7 @@ def test_timeout_raises_the_timeout_subclass():
     with pytest.raises(claude_cli.ClaudeTimeoutError) as info:
         claude_cli._raise_for_outcome(
             cancelled=False, timed_out=True, timeout_s=5, failed=True, returncode=1,
-            stderr_file=io.BytesIO(b""), stdout_tail=[])
+            stderr_file=io.BytesIO(b""))
     assert isinstance(info.value, claude_cli.ClaudeUnavailableError)
     assert "timed out" in str(info.value)
 
