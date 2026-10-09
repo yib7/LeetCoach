@@ -106,21 +106,88 @@ _sleep = time.sleep
 # Object ProcessMemoryLimit on Windows — same number, parity by construction.
 _MEM_LIMIT_BYTES = 512 * 1024 * 1024
 
-# Windows job active-process cap. Deliberately tighter than the POSIX
-# RLIMIT_NPROC (64): NPROC counts EVERY process of the user so it has to be
-# generous, while the job counts only this child's own tree — a legitimate
-# solution needs 1 process (maybe a few for multiprocessing), so 16 is ample
-# headroom and stops a fork bomb almost immediately.
+# Windows job active-process cap. The job counts only this child's own tree:
+# a legitimate solution needs 1 process (maybe a few for multiprocessing), so
+# 16 is ample headroom and stops a fork bomb almost immediately.
 _JOB_PROCESS_CAP = 16
 
 # POSIX rlimits, applied by the bootstrap (soft == hard) before the go byte.
-# NPROC is optional there (not adjustable in some containers).
 _POSIX_RLIMITS = {
     "AS": _MEM_LIMIT_BYTES,
     "CPU": 30,
     "FSIZE": 16 * 1024 * 1024,
-    "NPROC": 64,
 }
+
+# RLIMIT_NPROC is not a per-tree cap like the job's: it counts every process
+# of the real user (on Linux every THREAD), so a fixed number is wrong both
+# ways. A desktop user already running more than it could not start even a
+# thread in the solution (Linux) or any process at all (macOS). It is set to
+# what the user runs right now plus this headroom (threads count on Linux,
+# so it is roomier than the job cap), and left unset when that cannot be
+# counted: it was always optional (not adjustable in some containers), and
+# process creation is refused by the audit hook regardless.
+_NPROC_HEADROOM = 128
+_PS_TIMEOUT_S = 5
+
+
+def _user_task_count(proc_root: str = "/proc", uid: int | None = None, run=None) -> int | None:
+    """What RLIMIT_NPROC counts for the real user right now, or None.
+
+    Linux: the threads of every process whose real uid is ``uid``, summed
+    from ``/proc/<pid>/status`` (no spawn). Where there is no such /proc
+    (macOS, the BSDs), the processes of ``uid`` from ``ps -A -o ruid=``,
+    which is what NPROC counts there. Never raises."""
+    if uid is None:
+        uid = os.getuid()
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        entries = None
+    if entries is not None:
+        total, seen = 0, False
+        for name in entries:
+            if not name.isdigit():
+                continue
+            try:
+                with open(os.path.join(proc_root, name, "status"), "rb") as f:
+                    fields = dict(
+                        line.split(b":", 1) for line in f.read().splitlines() if b":" in line
+                    )
+                if int(fields[b"Uid"].split()[0]) == uid:
+                    total += int(fields[b"Threads"].split()[0])
+                    seen = True
+            except (OSError, KeyError, ValueError, IndexError):
+                continue  # exited since the listing, or not a status we can read
+        if seen:
+            return total
+    try:
+        res = (run or subprocess.run)(
+            ["ps", "-A", "-o", "ruid="], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+            timeout=_PS_TIMEOUT_S, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    uids = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]
+    if not uids or not all(u.isdigit() for u in uids):
+        return None
+    return sum(1 for u in uids if int(u) == uid)
+
+
+def _posix_rlimits(*, posix: bool | None = None) -> dict:
+    """The rlimits the bootstrap sets: the fixed memory / CPU / file-size
+    caps, plus NPROC as headroom above the user's current count when that
+    can be taken (POSIX only; the bootstrap ignores rlimits on Windows)."""
+    if posix is None:
+        posix = os.name != "nt"
+    limits = dict(_POSIX_RLIMITS)
+    if posix:
+        current = _user_task_count()
+        if current is not None:
+            limits["NPROC"] = current + _NPROC_HEADROOM
+    return limits
 
 # A5: the trusted bootstrap the child runs first (see sandbox_bootstrap.py).
 # Its stdin carries the framed config, then the go byte (sent only after the
@@ -219,7 +286,7 @@ def _bootstrap_config(run_dir: str, script_path: str, audit: bool) -> dict:
         "run_dir": run_dir,
         "audit": bool(audit),
         "secret_paths": _secret_paths(),
-        "rlimits": dict(_POSIX_RLIMITS),
+        "rlimits": _posix_rlimits(),
     }
 
 

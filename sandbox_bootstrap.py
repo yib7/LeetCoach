@@ -34,7 +34,12 @@ so ``sys.orig_argv`` does not reveal it), the go byte, then the sample input.
      extensions are native code, so no per-path check could hold;
    * process creation: ``subprocess``, ``os.system`` / ``popen``, ``os.exec*``,
      ``os.spawn*``, ``posix_spawn``, ``fork``, ``_winapi.CreateProcess``,
-     ``os.startfile``, and ``os.kill``;
+     ``os.startfile``, and ``os.kill``; on POSIX also
+     ``_posixsubprocess.fork_exec``, which raises no audit event of its own
+     (``subprocess`` audits before calling it, but ``multiprocessing``'s spawn
+     and forkserver starters and its resource tracker call it directly, so a
+     ``multiprocessing`` solution on macOS would otherwise start an
+     interpreter without this hook);
    * ``ctypes`` library loading / symbol lookup / raw memory access, symlink /
      hardlink / junction creation, registry writes, and heap walking via
      ``gc.get_objects`` / ``get_referrers`` / ``get_referents``.
@@ -208,6 +213,22 @@ def is_stream_alias(raw: str, resolved: str, fd_probe=None) -> bool:
     return resolved.startswith("/dev/pts/") or resolved in ("/dev/tty", "/dev/null")
 
 
+def _deny_fork_exec() -> None:
+    """POSIX: swap ``_posixsubprocess.fork_exec`` for a denial before any
+    untrusted code exists. It raises no audit event, and ``multiprocessing``
+    (spawn / forkserver starters, resource tracker) calls it directly. A later
+    fresh import of the module is refused by the hook ("import" event)."""
+    try:
+        import _posixsubprocess
+    except ImportError:
+        return
+
+    def fork_exec(*_args, **_kwargs):
+        _deny("_posixsubprocess.fork_exec")
+
+    _posixsubprocess.fork_exec = fork_exec
+
+
 def install_audit_hook(run_dir: str, secret_paths: list) -> None:
     """Install the C6 hook. Called before any untrusted code exists."""
     normcase, realpath, fsdecode = os.path.normcase, os.path.realpath, os.fsdecode
@@ -274,6 +295,8 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
     def hook(event: str, args) -> None:
         if event in _ALWAYS_BLOCKED:
             _deny(event)
+        if event == "import" and args and args[0] == "_posixsubprocess":
+            _deny("_posixsubprocess.fork_exec", "fresh import")
         handler = handlers.get(event)
         if handler is None and event not in _MUTATING and event not in _LISTING:
             return
@@ -296,6 +319,8 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
         finally:
             local.busy = False
 
+    if posix:
+        _deny_fork_exec()
     sys.addaudithook(hook)
 
 

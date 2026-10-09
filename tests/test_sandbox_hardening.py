@@ -463,6 +463,16 @@ def test_network_is_blocked(body):
         "import os\nos.spawnv(os.P_WAIT, sys.executable, [sys.executable, '-c', 'pass'])",
         "import os\nos.popen('echo hi').read()",
         "import multiprocessing as mp\np = mp.Process(target=print)\np.start()\np.join()",
+        # spawn (macOS's default) and the resource tracker start their child
+        # through _posixsubprocess.fork_exec, which raises no audit event
+        (
+            "import multiprocessing as mp\nmp.set_start_method('spawn', force=True)\n"
+            "p = mp.Process(target=print)\np.start()\np.join()"
+        ),
+        pytest.param(
+            "import _posixsubprocess\n_posixsubprocess.fork_exec()",
+            marks=pytest.mark.skipif(os.name == "nt", reason="POSIX-only module"),
+        ),
     ],
 )
 def test_process_creation_is_blocked(body):
@@ -1484,7 +1494,7 @@ def test_rlimit_as_is_best_effort_on_macos_only(monkeypatch, capsys):
     while CPU / FSIZE stay required, and AS stays required elsewhere."""
     import sandbox_bootstrap
 
-    limits = sandbox._bootstrap_config("r", "r/solution.py", True)["rlimits"]
+    limits = _limits_with_nproc(monkeypatch)
     monkeypatch.setattr(sys, "platform", "darwin")
     res = _FakeResource(fail={9})
     sandbox_bootstrap.apply_rlimits(limits, res)  # no raise
@@ -1583,6 +1593,97 @@ def test_child_python_fallback_warns_inside_a_windows_venv(monkeypatch, caplog):
     assert not caplog.records
 
 
+def _limits_with_nproc(monkeypatch, current: int = 40) -> dict:
+    """The POSIX limits the parent sends when it could count the user's tasks."""
+    monkeypatch.setattr(sandbox, "_user_task_count", lambda: current)
+    return sandbox._posix_rlimits(posix=True)
+
+
+def test_nproc_is_headroom_above_what_the_user_already_runs(monkeypatch):
+    """RLIMIT_NPROC counts every process of the real user (every THREAD on
+    Linux), not this child's tree. An absolute 64 left a desktop user who
+    already ran more than that unable to start even a thread in the solution
+    (Linux) or a grandchild (macOS), so the cap is the current count plus
+    headroom."""
+    assert _limits_with_nproc(monkeypatch, current=900)["NPROC"] == 900 + sandbox._NPROC_HEADROOM
+    assert sandbox._NPROC_HEADROOM >= 64
+
+
+def test_nproc_is_left_unset_when_the_users_tasks_cannot_be_counted(monkeypatch):
+    monkeypatch.setattr(sandbox, "_user_task_count", lambda: None)
+    limits = sandbox._posix_rlimits(posix=True)
+    assert "NPROC" not in limits
+    assert {"AS", "CPU", "FSIZE"} <= set(limits)  # the required caps never depend on it
+
+
+def test_windows_sends_no_nproc_and_never_counts(monkeypatch):
+    def boom():
+        raise AssertionError("counted on Windows")
+
+    monkeypatch.setattr(sandbox, "_user_task_count", boom)
+    assert "NPROC" not in sandbox._posix_rlimits(posix=False)
+
+
+def _write_status(root, pid, uid, threads):
+    d = root / str(pid)
+    d.mkdir()
+    (d / "status").write_text(
+        f"Name:\tx\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\nThreads:\t{threads}\n",
+        encoding="utf-8",
+    )
+
+
+def test_user_task_count_sums_the_users_threads_from_proc(tmp_path):
+    _write_status(tmp_path, 1, 0, 5)
+    _write_status(tmp_path, 20, 1000, 7)
+    _write_status(tmp_path, 21, 1000, 3)
+    (tmp_path / "22").mkdir()  # exited between listdir and open
+    (tmp_path / "self").mkdir()
+    (tmp_path / "meminfo").write_text("x", encoding="utf-8")
+    assert sandbox._user_task_count(proc_root=str(tmp_path), uid=1000) == 10
+
+
+def test_user_task_count_falls_back_to_ps_where_there_is_no_proc(tmp_path):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="  501\n0\n501\n 88\n", stderr="")
+
+    n = sandbox._user_task_count(proc_root=str(tmp_path / "none"), uid=501, run=fake_run)
+    assert n == 2
+    assert calls == [["ps", "-A", "-o", "ruid="]]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [FileNotFoundError("ps"), subprocess.TimeoutExpired("ps", 5), "rc1", "garbage"],
+)
+def test_user_task_count_is_none_when_ps_cannot_tell(tmp_path, outcome):
+    def fake_run(argv, **kw):
+        if isinstance(outcome, BaseException):
+            raise outcome
+        if outcome == "rc1":
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="no")
+        return subprocess.CompletedProcess(argv, 0, stdout="ruid\nx\n", stderr="")
+
+    assert sandbox._user_task_count(proc_root=str(tmp_path / "none"), uid=501, run=fake_run) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="RLIMIT_NPROC is POSIX-only")
+def test_a_solution_thread_starts_however_many_tasks_the_user_runs():
+    """End to end: the real count is taken and the solution can still start
+    a thread and (with the hook off) a grandchild."""
+    code = (
+        "import subprocess, sys, threading\n"
+        "t = threading.Thread(target=print, args=('T',)); t.start(); t.join()\n"
+        "sys.stdout.flush()\n"
+        "subprocess.run([sys.executable, '-c', 'print(7)'])\n"
+    )
+    r = sandbox.verify_python(code, "", "T\n7", audit_hook=False)
+    assert r.status == "pass", r
+
+
 class _FakeResource:
     RLIMIT_AS, RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_NPROC = 9, 0, 1, 6
 
@@ -1596,27 +1697,29 @@ class _FakeResource:
         self.calls.append((which, limits))
 
 
-def test_bootstrap_applies_the_configured_rlimits_before_the_go_byte():
+def test_bootstrap_applies_the_configured_rlimits_before_the_go_byte(monkeypatch):
     """Minor 8: POSIX rlimits are set by the bootstrap (no ``preexec_fn`` in a
     threaded parent), soft == hard so the solution can't raise them."""
     import sandbox_bootstrap
 
     res = _FakeResource()
-    limits = sandbox._bootstrap_config("r", "r/solution.py", True)["rlimits"]
+    limits = _limits_with_nproc(monkeypatch, current=300)
     sandbox_bootstrap.apply_rlimits(limits, res)
     mem = sandbox._MEM_LIMIT_BYTES
+    nproc = 300 + sandbox._NPROC_HEADROOM
     assert sorted(res.calls) == sorted([
         (res.RLIMIT_AS, (mem, mem)),
         (res.RLIMIT_CPU, (30, 30)),
         (res.RLIMIT_FSIZE, (16 * 1024 * 1024,) * 2),
-        (res.RLIMIT_NPROC, (64, 64)),
+        (res.RLIMIT_NPROC, (nproc, nproc)),
     ])
 
 
-def test_bootstrap_rlimits_fail_closed_except_the_optional_nproc():
+def test_bootstrap_rlimits_fail_closed_except_the_optional_nproc(monkeypatch):
     import sandbox_bootstrap
 
-    limits = sandbox._bootstrap_config("r", "r/solution.py", True)["rlimits"]
+    monkeypatch.setattr(sys, "platform", "linux")  # AS is best-effort on macOS only
+    limits = _limits_with_nproc(monkeypatch)
     sandbox_bootstrap.apply_rlimits(limits, _FakeResource(fail={6}))  # NPROC: tolerated
     with pytest.raises(ValueError):
         sandbox_bootstrap.apply_rlimits(limits, _FakeResource(fail={9}))  # AS: fatal
