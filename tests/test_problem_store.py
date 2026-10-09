@@ -2,8 +2,11 @@
 the append-only run log (``output/.leetcoach/runs.jsonl``)."""
 from __future__ import annotations
 
+import errno
 import json
+import sys
 import threading
+import time
 from datetime import datetime, timedelta
 
 import pytest
@@ -386,3 +389,60 @@ def test_a_locked_record_reads_as_absent_for_listing_but_is_not_corrupt(root, mo
     monkeypatch.undo()
     assert _corrupt_copies(root, "1-two_sum") == []
     assert ps.load_problem("1-two_sum", root=root)["review"]["box"] == 1
+
+
+# --- 3A S14c: the store's OS lock is bounded on POSIX too -------------------------
+
+def test_os_lock_times_out_while_another_handle_holds_it(root, monkeypatch):
+    monkeypatch.setattr(ps, "_LOCK_TIMEOUT", 0.3)
+    lock = root / "held.lock"
+    with open(lock, "a+b") as holder, open(lock, "a+b") as waiter:
+        ps._os_lock(holder)
+        try:
+            started = time.monotonic()
+            with pytest.raises(OSError):
+                ps._os_lock(waiter)
+            assert time.monotonic() - started < 5
+        finally:
+            ps._os_unlock(holder)
+        ps._os_lock(waiter)  # free again: taken at once
+        ps._os_unlock(waiter)
+
+
+class _FakeFcntl:
+    LOCK_EX, LOCK_NB, LOCK_UN = 2, 4, 8
+
+    def __init__(self, free_after=None):
+        self.calls = []
+        self.free_after = free_after
+
+    def flock(self, fd, op):
+        self.calls.append(op)
+        if op == self.LOCK_UN:
+            return
+        if not op & self.LOCK_NB:
+            raise AssertionError("a blocking flock would wait forever")
+        if self.free_after is None or len(self.calls) <= self.free_after:
+            raise BlockingIOError(errno.EWOULDBLOCK, "Resource temporarily unavailable")
+
+
+def test_posix_os_lock_polls_non_blocking_until_the_deadline(root, monkeypatch):
+    fake = _FakeFcntl()
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    monkeypatch.setattr(ps, "_WINDOWS", False)
+    monkeypatch.setattr(ps, "_LOCK_TIMEOUT", 0.2)
+    with open(root / "x.lock", "a+b") as fh:
+        with pytest.raises(OSError):
+            ps._os_lock(fh)
+    assert len(fake.calls) > 1
+    assert all(op == fake.LOCK_EX | fake.LOCK_NB for op in fake.calls)
+
+
+def test_posix_os_lock_takes_the_lock_once_it_is_released(root, monkeypatch):
+    fake = _FakeFcntl(free_after=3)
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    monkeypatch.setattr(ps, "_WINDOWS", False)
+    with open(root / "x.lock", "a+b") as fh:
+        ps._os_lock(fh)
+        ps._os_unlock(fh)
+    assert fake.calls[-1] == fake.LOCK_UN and len(fake.calls) == 5
