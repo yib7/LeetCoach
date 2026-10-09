@@ -851,15 +851,21 @@ def _prune_verdict_cache(root: Path, files: list[dict]) -> None:
             del _verdict_cache[key]
 
 
-def _existing_runs(runs) -> list[str]:
+def _existing_runs(runs, listed: set[str] | frozenset[str] = frozenset()) -> list[str]:
     """SP8 fix M7: the paths of a problem record's ``runs`` that are still
     library files. The record on disk is never pruned (a delete in Explorer
     or a restored file is reflected either way); the response just stops
     pointing at docs that are gone, so counts and "show the solution" agree
-    with the library."""
+    with the library.
+
+    3B 3.5: ``listed`` holds the paths of the (cached, freshness-keyed)
+    library listing; a path in it is a library file without touching the
+    disk, so only a path it lacks pays :func:`_resolve_library_file`'s
+    realpath calls."""
     if not isinstance(runs, list):
         return []
-    return [p for p in runs if isinstance(p, str) and _resolve_library_file(p) is not None]
+    return [p for p in runs if isinstance(p, str)
+            and (p in listed or _resolve_library_file(p) is not None)]
 
 
 def _resolve_library_file(rel: str) -> Path | None:
@@ -1232,10 +1238,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             pid = entry.get("problem_id")
             if isinstance(pid, str):
                 counts[pid] = counts.get(pid, 0) + 1
+        listed = {f["path"] for f in _cached_library_files()}
         listing = []
         for rec in problem_store.list_problems():
             item = {k: rec.get(k) for k in PROBLEM_SUMMARY_FIELDS}
-            runs = _existing_runs(rec.get("runs"))
+            runs = _existing_runs(rec.get("runs"), listed)
             # 3A W3: a hand-edited record may hold non-string aliases; an
             # unhashable one would crash the set below, so keep strings only.
             raw_aliases = rec.get("aliases")
