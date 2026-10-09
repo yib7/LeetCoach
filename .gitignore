@@ -4,24 +4,36 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 .venv/
 venv/
 
-# Env / secrets
+# Build artifacts
+build/
+dist/
+node_modules/
+
+# Env / secrets (.env.example is the tracked template)
 .env
+.env.*
+!.env.example
+*.pem
+*.key
 
 # Generated study library (personal output; not source)
 output/
 topic_index.json
 
-# Autopilot / AI working files — kept on disk for continuity, never published
+# Local AI-assistant working files: kept on disk, never published
 .autopilot/
 CLAUDE.md
 .claude/
-# superpowers plugin work dir; absent now but ignored so a future run never commits it
 .superpowers/
+docs/superpowers/
 NEW_UPDATES.md
-# code-audit report (dev scaffolding — findings are fixed in-tree, report never ships)
 LeetCoach_Code_Audit_Report.md
 
 # IDE / editor
