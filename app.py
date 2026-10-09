@@ -49,6 +49,7 @@ then {"phase": "saving"}), a terminal ``done`` {"path", "source", "resumed",
 from __future__ import annotations
 
 import contextlib
+import http.client
 import inspect
 import io
 import json
@@ -2301,7 +2302,9 @@ def _existing_instance_url(host: str, port: int, *, timeout: float = 1.0, opener
     try:
         with opener(url + "healthz", timeout=timeout) as resp:
             data = json.loads(resp.read(4096).decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
+        # 3A W1: a non-HTTP listener (say Redis) in the probe span makes
+        # urllib raise BadStatusLine, an HTTPException rather than OSError.
         return None
     if isinstance(data, dict) and data.get("app") == "leetcoach":
         return url
