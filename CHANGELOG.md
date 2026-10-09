@@ -87,6 +87,51 @@ follow-up questions on a saved doc.
   recursion through `functools.cache` / `lru_cache` at a fixed C-level depth (about 1000
   levels on Windows) that `sys.setrecursionlimit` does not raise. A sample that dies with
   a `RecursionError` there now says so in its verdict note; Python 3.14 has no such cap.
+- **Ship audit: launch and setup.**
+  - `setup.ps1` no longer aborts under Windows PowerShell 5.1 when a native command
+    writes to stderr. A `.venv` missing packages is installed into, and one whose Python
+    is missing or cannot start is recreated with `venv --clear`.
+  - `LeetCoach.cmd` works from a folder whose path contains `!`.
+  - `ensure-claude-auth.ps1` bounds both waits on the CLI: a hung `auth status` is killed
+    after 15 s, and the app starts after 5 minutes even if the sign-in window is still
+    open (`LEETCOACH_AUTH_STATUS_TIMEOUT_MS` / `LEETCOACH_AUTH_LOGIN_TIMEOUT_MS`).
+  - A `.env` that is not UTF-8 (for example saved as UTF-16 by Notepad) no longer stops
+    the app from starting: Flask no longer loads `.env` a second time on its own.
+  - Launching no longer crashes when a non-HTTP service listens on a port in the
+    single-instance probe range.
+  - A blank `LEETCOACH_MODEL`, `LEETCOACH_CLASSIFIER_MODEL`, `LEETCOACH_QUICK_ASK_MODEL`
+    or `LEETCOACH_CLAUDE_BIN` counts as unset.
+- **Ship audit: requests and errors.**
+  - A body that is not JSON now gets "Request body must be a JSON object." instead of a
+    misleading "Problem text is required.". A deeply nested body gets the same JSON 400,
+    and a body over 2 MB gets a JSON 413 that Run and Quick Ask display.
+  - "Test my code" returns an actionable JSON error when the sandbox cannot start.
+  - An expected CLI failure (not installed, signed out, failed to start) is logged as one
+    line instead of a traceback; unexpected errors keep theirs.
+  - Multi-line CLI errors no longer repeat their first line. A failed `claude --help`
+    probe logs why and is retried once on timeout. A cancelled classification is logged
+    at DEBUG.
+- **Ship audit: records and files.**
+  - A problem record or run-log line with a wrongly typed field no longer breaks
+    `/problems`, `/review`, `/stats`, grading or later saves. Bad fields are dropped, and
+    the original is kept as `<name>.corrupt-<ts>` before the repaired record is written.
+  - A record that briefly cannot be read (antivirus or OneDrive holding it) is skipped,
+    not replaced. On Linux and macOS the record lock gives up after 10 s, as on Windows.
+  - A rollback never deletes a file it could not back up.
+  - CRLF text is saved with single line breaks, so an identical re-run reuses its file.
+  - A paste whose first line is generic ("Description", "Problem:") is saved under the
+    problem's title instead of `description.md`, `description__2.md` and so on.
+- **Ship audit: runner and sandbox.**
+  - On Linux and macOS, helper processes the CLI leaves behind are killed with its
+    process group when a run ends.
+  - The neutral working folder no longer fails a run when no home folder resolves;
+    `LEETCOACH_CLAUDE_CWD` expands `~`, and the temp fallback is made once per process.
+  - An explicit `uncategorized` classification is kept. A deeply nested stdout line no
+    longer crashes the runner, and an emoji split across two stream deltas is rejoined.
+  - A sandbox that cannot create its run folder reports `not_verified` with the reason.
+- **Ship audit: front end.** The library viewer ignores out-of-order responses, so
+  opening A then B always shows B. Quick Ask sends only the 6,000 characters of the
+  problem the server reads. Unused helpers are gone from `static/lib/core.js`.
 - **Classifier failures are logged.** When the save-time classifier call fails, a warning
   with the error is logged before the fallback pattern is used, so a persistent failure
   can be diagnosed.
@@ -139,6 +184,17 @@ follow-up questions on a saved doc.
   stopped a solution from starting even one thread once the desktop ran more than that.
   It is now the user's current count plus 128 (from `/proc` on Linux, `ps` elsewhere),
   and is left unset when that count cannot be taken.
+- **`claude` never sees an API key.** Child processes no longer inherit
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` or
+  `CLAUDE_CODE_USE_VERTEX`, so every call uses the Claude Code subscription instead of
+  billed API credits. A one-time warning names any variable it withheld.
+- **Neutral folder fallback is per user.** The temp-folder fallback is
+  `leetcoach-claude-cwd-<uid>`, created `0o700` on POSIX, and one owned by another user is
+  refused. `taskkill` runs from `%SystemRoot%\System32`, never a bare name.
+- **Library containment.** The library listing, verdicts and flashcard export skip
+  symlinks and junctions inside `output/` that point outside it.
+- **More secret paths.** The audit hook also denies `~/.npmrc`, `~/.pypirc`,
+  `~/.docker/config.json`, `~/.kube` and `~/.gnupg`.
 - **Sandbox start-up (A5).** The sandbox child is the real interpreter running a trusted
   bootstrap. The bootstrap waits for a go byte that is sent only after the Job Object is
   assigned, and the sandbox fails closed.
@@ -158,6 +214,12 @@ follow-up questions on a saved doc.
     Ubuntu on 3.12 and 3.14, and macOS on 3.14, and runs the node tests in each job.
   - Two clean-runner jobs (Windows and Linux) follow the README's setup steps literally
     against the fake `claude` CLI, and check that `/healthz` and `/` return 200.
+- **Line endings and encodings.** `.gitattributes` names every text type the repo
+  ships (LF, with CRLF for `.cmd`/`.bat`/`.ps1`) and marks media as binary. A test fails
+  on any tracked Python file that opens text without `encoding=`, and another fails on
+  any `LEETCOACH_*` variable missing from `.env.example`.
+- **Tests no longer depend on the clock.** Review and Stats tests freeze "now", so they
+  pass across midnight and DST changes.
 - **Docs (C13).** README, ARCHITECTURE, SECURITY and this changelog are up to date.
 - **Existing libraries.** Existing `output/` libraries keep working with no migration:
   legacy files count in Stats and open in the viewer. Follow-ups on them use the fallback

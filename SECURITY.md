@@ -86,8 +86,10 @@ best-effort. What the sandbox does:
     `load_extension`): even an in-memory database can `ATTACH` a file anywhere
     on disk, and extensions are native code, so no path check could hold;
   - opening or listing known secret locations: `~/.claude` and `~/.claude.json`,
-    this repo's `.env`, `~/.ssh`, `~/.aws`, git and GitHub CLI credentials, and
-    the Windows credential stores under `%APPDATA%` / `%LOCALAPPDATA%`;
+    this repo's `.env`, `~/.ssh`, `~/.aws`, git and GitHub CLI credentials, the
+    npm, PyPI, Docker, Kubernetes and GnuPG stores (`~/.npmrc`, `~/.pypirc`,
+    `~/.docker/config.json`, `~/.kube`, `~/.gnupg`), and the Windows credential
+    stores under `%APPDATA%` / `%LOCALAPPDATA%`;
   - all network use: every socket bind, connect and send, and DNS lookups,
     whatever the address (`127.0.0.1` and other local services included). There
     are no exceptions, so `asyncio` is not available in the sandbox: on Windows
@@ -134,7 +136,14 @@ call (`claude_cli.build_argv`):
   - `--bare` is never passed, because it drops the subscription login.
 - Every call runs in a neutral working directory (`LEETCOACH_CLAUDE_CWD`, by default
   under `%LOCALAPPDATA%\LeetCoach` or `~/.local/share/leetcoach`), never in this repo.
-  The CLI cannot pick up the repo's `CLAUDE.md`, settings or `.env` from its cwd.
+  The CLI cannot pick up the repo's `CLAUDE.md`, settings or `.env` from its cwd. If
+  that folder cannot be created, the fallback under the temp folder is per user
+  (`leetcoach-claude-cwd-<uid>`); on Linux and macOS it is created `0o700` and one
+  owned by another user is refused, so a shared `/tmp` cannot plant a `CLAUDE.md`.
+- **Subscription only.** `claude` children never inherit `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX`, from
+  the shell or `.env`, so a stray key cannot switch runs to billed API credits. The
+  first call logs a warning naming any variable it withheld.
 - **Session persistence.** Study runs (`/run`) keep their session, because a later
   follow-up resumes it with `claude -p --resume <session_id>`. That session lives in the
   neutral directory's project bucket, not in your own projects' history. A session id
