@@ -20,6 +20,12 @@ so ``sys.orig_argv`` does not reveal it), the go byte, then the sample input.
      creating dirs) anywhere outside the run dir;
    * opening or listing anything under a known secret path (the parent
      passes the list: ``~/.claude``, the repo ``.env``, credential stores...);
+   * opening or listing anything for READING outside the run dir and the
+     Python installation (``sys.prefix`` / ``base_prefix`` / ``exec_prefix``
+     and the ``sys.path`` entries, taken before any untrusted code exists):
+     imports and tracebacks keep working, but a solution cannot read your
+     other files (browser profiles, other projects' ``.env``) just because
+     they are missing from the secret list (Phase 4);
    * network, with no exceptions: ``socket.bind`` / ``connect`` / ``sendto``
      / ``sendmsg`` and name resolution, whatever the address (loopback
      included). That also rules out ``socket.socketpair()`` on Windows (it
@@ -229,8 +235,20 @@ def _deny_fork_exec() -> None:
     _posixsubprocess.fork_exec = fork_exec
 
 
-def install_audit_hook(run_dir: str, secret_paths: list) -> None:
-    """Install the C6 hook. Called before any untrusted code exists."""
+def python_read_roots() -> list:
+    """The interpreter's own trees: its prefixes and every ``sys.path`` entry
+    (stdlib, its zip, DLLs, site-packages). Reads there are allowed, so
+    imports, ``linecache`` and tracebacks work. Taken when the hook is
+    installed, before any untrusted code can change ``sys.path``."""
+    roots = [sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix]
+    roots += [p for p in sys.path if isinstance(p, str)]
+    return [r for r in roots if r]
+
+
+def install_audit_hook(run_dir: str, secret_paths: list, read_roots=None) -> None:
+    """Install the C6 hook. Called before any untrusted code exists.
+    ``read_roots`` defaults to :func:`python_read_roots`; the run dir is
+    always readable."""
     normcase, realpath, fsdecode = os.path.normcase, os.path.realpath, os.fsdecode
     sep = os.sep
 
@@ -242,6 +260,9 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
 
     run = norm(run_dir)
     secrets = tuple(norm(p) for p in secret_paths if p)
+    if read_roots is None:
+        read_roots = python_read_roots()
+    readable = (run,) + tuple(norm(p) for p in read_roots if p)
     devnull = normcase(os.devnull)
     posix = os.name != "nt"
     local = _thread._local()  # per-thread re-entrancy guard (realpath -> events)
@@ -268,6 +289,10 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
         if path is not None and not under(path, run):
             _deny(event, "outside the run directory")
 
+    def check_readable(event: str, path) -> None:
+        if path is not None and not any(under(path, r) for r in readable):
+            _deny(event, "outside the run directory and Python")
+
     def on_open(event: str, args) -> None:
         path = path_of(args[0])
         check_secret(event, path)
@@ -278,14 +303,19 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
         )
         if writing:
             check_inside_run("open for writing", path)
+        else:
+            check_readable(event, path)
 
     def on_create_file(event: str, args) -> None:  # _winapi.CreateFile
         path = path_of(args[0])
         check_secret(event, path)
         access = args[1] if len(args) > 1 else 0
-        if (isinstance(access, int) and access & _GENERIC_WRITE_ACCESS
-                and path is not None and not path.startswith("\\\\.\\pipe\\")):
+        if path is None or path.startswith("\\\\.\\pipe\\"):
+            return
+        if isinstance(access, int) and access & _GENERIC_WRITE_ACCESS:
             check_inside_run(event, path)
+        else:
+            check_readable(event, path)
 
     handlers = {
         "open": on_open,
@@ -315,7 +345,9 @@ def install_audit_hook(run_dir: str, secret_paths: list) -> None:
             else:
                 i = _LISTING[event]
                 if i < len(args):
-                    check_secret(event, path_of(args[i]))
+                    path = path_of(args[i])
+                    check_secret(event, path)
+                    check_readable(event, path)
         finally:
             local.busy = False
 
