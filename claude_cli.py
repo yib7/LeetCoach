@@ -949,7 +949,9 @@ def _real_runner(
             # (macOS before 3.13) the kill follows the reap instead: any
             # leftover still reserves the group id, so only an already EMPTY
             # group whose id was recycled in that instant is at risk.
-            group_kill = _POSIX_GROUP_CLEANUP
+            # Already reaped elsewhere (Popen.kill() polls first) means a
+            # kill path reaped it - and that path killed the group already.
+            group_kill = _POSIX_GROUP_CLEANUP and proc.returncode is None
             if group_kill:
                 exited = proc_util.child_exited_unreaped(proc.pid)
                 if exited is False:
