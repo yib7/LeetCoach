@@ -914,7 +914,19 @@ def verify_python(
     """
     if cancel is not None and cancel.is_set():
         return VerifyResult(status="not_verified", note=_CANCELLED_NOTE)
-    run_dir = tempfile.mkdtemp(prefix=_RUN_DIR_PREFIX)
+    try:
+        run_dir = tempfile.mkdtemp(prefix=_RUN_DIR_PREFIX)
+    except OSError as exc:
+        # 3A S14a: this sat outside the try below, so a temp dir that is full
+        # or unwritable RAISED despite "never raises" (verify_answer caught
+        # it, /attempt/test did not). Like the caps being unavailable, the
+        # sandbox could not be set up and no solution code ran: not_verified
+        # (which also stops the remaining samples), with the reason.
+        logger.warning("sandbox: could not create a run directory: %s", exc)
+        return VerifyResult(
+            status="not_verified",
+            note=f"could not create the sandbox's temporary folder: {exc}",
+        )
     job_handle = None
     feeder = None
     try:

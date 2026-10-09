@@ -439,6 +439,24 @@ def test_default_secret_paths_cover_claude_credentials_and_the_repo_env():
         assert os.path.normcase(os.path.abspath(must)) in paths, must
 
 
+def test_verify_python_reports_a_failed_run_dir_instead_of_raising(monkeypatch):
+    """3A S14a: verify_python "never raises" - a run dir that can't be
+    created (temp dir full / unwritable) is an infrastructure failure like
+    the caps being unavailable: not_verified with a clear note, and nothing
+    is spawned."""
+    def no_temp(*a, **k):
+        raise PermissionError(13, "Access is denied", "C:\\Temp\\leetcoach_run_x")
+
+    monkeypatch.setattr(sandbox.tempfile, "mkdtemp", no_temp)
+    monkeypatch.setattr(sandbox.subprocess, "Popen", lambda *a, **k: pytest.fail("spawned"))
+    r = sandbox.verify_python("print(1)\n", "", "1")
+    assert r.status == "not_verified", r
+    assert "temporary" in r.note and "Access is denied" in r.note, r.note
+    samples = [sandbox.Sample(stdin="1\n", expected_stdout="1")]
+    agg = sandbox._verify_python_samples("print(1)\n", samples)
+    assert agg.status == "not_verified" and agg.samples_total == 1
+
+
 @pytest.mark.parametrize(
     "body",
     [
