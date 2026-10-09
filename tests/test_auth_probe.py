@@ -201,6 +201,37 @@ def test_signed_out_result_is_rechecked_quickly_in_the_background(monkeypatch, c
     assert _wait_for(lambda: claude_cli.cached_auth_status().logged_in)
 
 
+def _join_refresh_threads(timeout=5.0):
+    for t in threading.enumerate():
+        if t.name == "leetcoach-auth-refresh":
+            t.join(timeout)
+            assert not t.is_alive(), "a background auth refresh did not finish"
+
+
+class _CountingEvent(threading.Event):
+    """An Event that counts the callers blocked in :meth:`wait`."""
+
+    def __init__(self):
+        super().__init__()
+        self._count_lock = threading.Lock()
+        self.waiters = 0
+
+    def wait(self, timeout=None):
+        with self._count_lock:
+            self.waiters += 1
+        return super().wait(timeout)
+
+
+class _CountingThreading:
+    """Stands in for ``claude_cli.threading``: the real module, except that
+    the events it creates count their waiters."""
+
+    Event = _CountingEvent
+
+    def __getattr__(self, name):
+        return getattr(threading, name)
+
+
 def _blocking_probe(monkeypatch, result):
     """A probe that blocks until ``release`` is set; counts its calls."""
     calls = []
@@ -240,14 +271,18 @@ def test_stale_result_never_probes_synchronously_and_refreshes_once(
         assert len(out) == 8
         assert all(s == status and dt < 1.0 for s, dt in out), out  # no one blocked
         assert _wait_for(lambda: len(calls) == 1)
-        time.sleep(0.1)
-        assert len(calls) == 1  # one in-flight refresh, not eight
     finally:
         release.set()
+    # 3A C17: count only once every refresh these page loads started has
+    # finished (Thread.start() returns once the thread runs, so each one is
+    # listed or already done) - a sleep could pass vacuously on a slow runner.
+    _join_refresh_threads()
+    assert len(calls) == 1  # one in-flight refresh, not eight
 
 
 def test_first_ever_concurrent_calls_share_one_probe(monkeypatch, clock):
     calls, release = _blocking_probe(monkeypatch, claude_cli.AuthStatus(True, True))
+    monkeypatch.setattr(claude_cli, "threading", _CountingThreading())
     out = []
     threads = [
         threading.Thread(target=lambda: out.append(claude_cli.cached_auth_status()))
@@ -256,7 +291,11 @@ def test_first_ever_concurrent_calls_share_one_probe(monkeypatch, clock):
     for t in threads:
         t.start()
     assert _wait_for(lambda: len(calls) == 1)
-    time.sleep(0.1)
+    # 3A C17: release only once the other five are really waiting on the one
+    # in-flight probe (a sleep could let them arrive after it finished and
+    # pass on a plain cache hit instead).
+    inflight = next(iter(claude_cli._auth_inflight.values()))
+    assert _wait_for(lambda: inflight.waiters == 5), inflight.waiters
     release.set()
     for t in threads:
         t.join(5)
@@ -299,9 +338,12 @@ def test_refresh_finishing_after_clear_does_not_repopulate_the_cache(monkeypatch
     clock.now += claude_cli.AUTH_CACHE_TTL + 1
     claude_cli.cached_auth_status()  # starts a background refresh
     assert _wait_for(lambda: len(calls) == 1)
+    done = next(iter(claude_cli._auth_inflight.values()))
     claude_cli.clear_auth_cache()
     release.set()
-    time.sleep(0.2)
+    # 3A C17: `done` is set only after the refresh's store step, so this
+    # checks the finished refresh, not a sleep's guess at it.
+    assert done.wait(5)
     assert claude_cli._auth_cache == {}
 
 
