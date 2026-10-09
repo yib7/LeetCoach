@@ -175,12 +175,41 @@ def clear_flag_cache() -> None:
         _flag_cache.clear()
 
 
+class HelpProbeError(RuntimeError):
+    """``claude --help`` exited nonzero (the message names the exit code)."""
+
+
 def _probe_help_text(argv: list[str]) -> str | None:
     """Run ``claude --help`` (bounded, tree-killed on timeout) and return its
-    stdout, or ``None`` on a nonzero exit. Runs in the neutral cwd (A7, SP2 M4)
-    like every other `claude` spawn. May raise; the caller degrades."""
+    stdout. Runs in the neutral cwd (A7, SP2 M4) like every other `claude`
+    spawn. Raises :class:`HelpProbeError` on a nonzero exit and
+    :class:`subprocess.TimeoutExpired` on a timeout (or whatever the spawn
+    raised); the caller degrades."""
     returncode, out = _run_bounded(argv, timeout=FLAG_PROBE_TIMEOUT, cwd=ensure_claude_cwd())
-    return out if returncode == 0 else None
+    if returncode != 0:
+        raise HelpProbeError(f"exit code {returncode}")
+    return out
+
+
+def _probe_help_with_retry(binary: str) -> tuple[str | None, str]:
+    """``(help text, failure reason)`` - the reason is ``""`` on success.
+
+    3A C2: a timeout is retried once at once - a cold first start of the CLI
+    (npm shim + node, antivirus scan) can blow the 15 s budget, and failing
+    there would run the next minute of calls without any isolation flag."""
+    for attempt in (1, 2):
+        try:
+            text = _probe_help_text([binary, "--help"])
+        except subprocess.TimeoutExpired:
+            if attempt == 1:
+                continue
+            return None, f"timed out twice after {FLAG_PROBE_TIMEOUT:g} s"
+        except HelpProbeError as exc:
+            return None, str(exc)
+        except Exception as exc:  # noqa: BLE001 - degrade to "no optional flags"
+            return None, type(exc).__name__
+        return text, "" if text else "no output"
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def cli_supported_flags() -> frozenset:
@@ -189,9 +218,12 @@ def cli_supported_flags() -> frozenset:
     A successful probe is cached for the life of the process (per resolved
     binary); a failed one (missing binary, timeout, crash, nonzero exit)
     yields an empty set - "pass no optional flags", the pre-A7 behaviour - and
-    is retried after :data:`FLAG_PROBE_FAILURE_TTL`. Never raises: the probe
-    must never break a run. The lock is held across the probe so concurrent
-    first calls (study run + background classifier) spawn it only once.
+    is retried after :data:`FLAG_PROBE_FAILURE_TTL`. A timeout is retried once
+    immediately, and a failure is logged as a WARNING with its reason (3A C2):
+    runs then go out WITHOUT the isolation flags, which must never be silent.
+    Never raises: the probe must never break a run. The lock is held across
+    the probe so concurrent first calls (study run + background classifier)
+    spawn it only once.
     """
     binary = config.claude_bin()
     key = shutil.which(binary) or binary
@@ -200,11 +232,16 @@ def cli_supported_flags() -> frozenset:
         hit = _flag_cache.get(key)
         if hit is not None and (hit[1] is None or hit[1] > now):
             return hit[0]
-        try:
-            text = _probe_help_text([binary, "--help"])
-        except Exception:  # noqa: BLE001 - degrade to "no optional flags"
-            text = None
+        text, reason = _probe_help_with_retry(binary)
         flags = parse_help_flags(text) if text else frozenset()
+        if not flags:
+            with contextlib.suppress(Exception):  # logging must never break a run
+                logger.warning(
+                    "`%s --help` probe failed (%s): running WITHOUT the isolation "
+                    "flags (--safe-mode, --tools \"\", --strict-mcp-config, "
+                    "--no-session-persistence); retrying in %g s.",
+                    binary, reason or "no options listed", FLAG_PROBE_FAILURE_TTL,
+                )
         _flag_cache[key] = (flags, None if flags else now + FLAG_PROBE_FAILURE_TTL)
         return flags
 
