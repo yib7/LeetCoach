@@ -209,6 +209,10 @@ def _json_object() -> tuple[dict, Response | None]:
     except RecursionError:
         return {}, not_object
     if data is None:
+        # 3A G3: a body that is there but is not JSON at all is said to be so,
+        # not answered "Problem text is required." as if it were empty.
+        if request.get_data(cache=True).strip():
+            return {}, not_object
         return {}, None
     if not isinstance(data, dict):
         return {}, not_object

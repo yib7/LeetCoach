@@ -286,6 +286,24 @@ def test_json_routes_reject_a_deeply_nested_body(client, method, path):
     assert not [p for p in tmp_path.rglob("*") if p.is_file()]
 
 
+@pytest.mark.parametrize("body", [b"{not json", b"problem=two+sum", bytes([255, 254]) + b" junk"])
+def test_an_unparseable_body_says_so_not_that_a_field_is_missing(client, body):
+    # 3A G3: a body that is not JSON at all used to fall through as {} and
+    # come back "Problem text is required." - true but misleading.
+    c, tmp_path = client
+    resp = c.post("/run", data=body, content_type="application/json")
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "Request body must be a JSON object."
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+def test_an_empty_body_is_still_treated_as_no_fields(client):
+    c, _ = client
+    resp = c.post("/run", data=b"", content_type="application/json")
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "Problem text is required."
+
+
 # --- 3A W8: an oversized body -> a JSON 413 the page can show -----------------
 
 @pytest.mark.parametrize("path", ["/run", "/ask", "/followup", "/attempt/test"])
