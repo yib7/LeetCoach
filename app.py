@@ -170,6 +170,11 @@ QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
 MAX_CONCURRENT_RUNS = 4
 MAX_CONCURRENT_ASKS = 4
 
+# Phase 4: the longest problem /run accepts. The 2 MiB body cap alone let
+# ~2 MB of text reach the prompt; a LeetCode statement is a few KB. Same as
+# what the problem record stores, so nothing accepted is later truncated.
+PROBLEM_MAX_CHARS = problem_store.STATEMENT_CAP
+
 # SP8 / D6: a follow-up question on a saved doc. Longer than a Quick Ask (it
 # can quote a line of the doc or some code) but still a question, not a paste.
 FOLLOWUP_MAX_QUESTION = 2000
@@ -1537,6 +1542,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # --- validation (reject unknown values up front, before any Claude call)
         if not problem:
             return jsonify({"error": "Problem text is required."}), 400
+        if len(problem) > PROBLEM_MAX_CHARS:
+            return jsonify({"error": (
+                f"The problem is too long (max {PROBLEM_MAX_CHARS} characters). "
+                "Paste just the problem statement and its examples.")}), 400
         if mode not in MODES:
             return jsonify({"error": f"Unknown mode {mode!r}."}), 400
         if language not in LANGUAGES:

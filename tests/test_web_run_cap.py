@@ -141,3 +141,26 @@ def test_default_caps_leave_room_for_normal_use():
     # several tabs may stream at once; a runaway loop may not.
     assert 2 <= app_module.MAX_CONCURRENT_RUNS <= 8
     assert 2 <= app_module.MAX_CONCURRENT_ASKS <= 8
+
+
+def test_an_oversized_problem_is_refused_before_any_claude_call(env):
+    # Phase 4: the 2 MiB body cap alone let ~2 MB of "problem" reach the
+    # prompt. A LeetCode statement is a few KB; the cap matches what the
+    # problem record stores.
+    c, runs, release = _client()
+    cap = app_module.PROBLEM_MAX_CHARS
+    too_long = {"problem": "x" * (cap + 1), "mode": "learning", "language": "python"}
+    resp = c.post("/run", json=too_long)
+    assert resp.status_code == 400
+    assert f"max {cap}" in resp.get_json()["error"]
+    assert runs == []
+    release.set()
+    ok = c.post("/run", json={**too_long, "problem": "y" * cap})
+    assert ok.status_code == 200
+    ok.get_data()
+
+
+def test_problem_cap_matches_the_stored_statement_cap():
+    import problem_store
+
+    assert app_module.PROBLEM_MAX_CHARS == problem_store.STATEMENT_CAP
