@@ -4,7 +4,7 @@ endpoint applies, and notes persistence. No Claude call is made."""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import date, timedelta
 
 import pytest
 
@@ -13,6 +13,17 @@ import claude_cli
 import problem_store
 
 PASTE = "1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\nInput: nums = [2,7], target = 9\nOutput: [0,1]"
+
+
+# 3A W9: the routes' "today" is frozen, so the expected dates below never
+# disagree with the server's own clock read (a run crossing local midnight).
+TODAY = date(2026, 3, 10)
+
+
+@pytest.fixture(autouse=True)
+def frozen_today(monkeypatch):
+    monkeypatch.setattr(problem_store, "local_today", lambda now=None: TODAY)
+    return TODAY
 
 
 @pytest.fixture
@@ -53,13 +64,13 @@ def _set_due(root, pid, due, box=1):
 def test_review_empty_library(client):
     data = client.get("/review").get_json()
     assert data["due"] == [] and data["counts"]["due"] == 0
-    assert data["today"] == datetime.now().astimezone().date().isoformat()
+    assert data["today"] == TODAY.isoformat()
 
 
 def test_review_lists_only_due_problems(client, root):
     a = _seed(root)
     b = _seed(root, "20. Valid Parentheses\nEasy\n\nGiven s")
-    today = datetime.now().astimezone().date()
+    today = TODAY
     _set_due(root, a, today.isoformat(), box=3)
     _set_due(root, b, (today + timedelta(days=4)).isoformat())
     data = client.get("/review").get_json()
@@ -77,13 +88,13 @@ def test_review_lists_only_due_problems(client, root):
 ])
 def test_grade_endpoint_applies_the_leitner_move(client, root, box, grade, new_box):
     pid = _seed(root)
-    _set_due(root, pid, datetime.now().astimezone().date().isoformat(), box=box)
+    _set_due(root, pid, TODAY.isoformat(), box=box)
     resp = client.post(f"/problems/{pid}/grade", json={"grade": grade})
     assert resp.status_code == 200, resp.get_json()
     data = resp.get_json()
     days = problem_store.REVIEW_INTERVALS[new_box - 1]
     assert data["review"]["box"] == new_box
-    assert data["review"]["due"] == (datetime.now().astimezone().date() + timedelta(days=days)).isoformat()
+    assert data["review"]["due"] == (TODAY + timedelta(days=days)).isoformat()
     assert data["previous"]["box"] == box
     # and the problem left today's queue
     assert client.get("/review").get_json()["counts"]["due"] == 0

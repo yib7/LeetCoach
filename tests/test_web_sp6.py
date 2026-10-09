@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import json
 import os
-import time
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from _helpers import parse_sse
+from _helpers import freeze_stats_now, local_noon, parse_sse
 
 import app as app_module
 import claude_cli
@@ -181,10 +181,15 @@ def test_metadata_stays_hidden_from_the_library(out):
 
 # --- /library: verdict + difficulty from the log, doc fallback for legacy -------------------
 
-def _write(path, text, age_days=0):
+def _write(path, text, age_days=0, *, day: date | None = None):
+    """Write ``path`` dated local noon on ``day`` (or ``age_days`` calendar
+    days ago). 3A W9: calendar arithmetic, not ``age_days * 86400`` seconds,
+    which lands on the wrong date across a 23 h / 25 h DST day."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-    stamp = time.time() - age_days * 86400
+    if day is None:
+        day = datetime.now().astimezone().date() - timedelta(days=age_days)
+    stamp = local_noon(day)
     os.utime(path, (stamp, stamp))
 
 
@@ -211,10 +216,15 @@ def test_library_verdict_and_difficulty_from_the_log(out):
 
 # --- /stats --------------------------------------------------------------------------
 
-def test_stats_endpoint_merges_log_and_legacy(out):
+def test_stats_endpoint_merges_log_and_legacy(out, monkeypatch):
     client = _client(_run_fn())
     _run(client)
-    _write(out / "guided" / "stack" / "valid_parentheses.md", "# VP\n", 1)
+    # 3A W9: the legacy doc is dated the calendar day before the logged run, and
+    # /stats computes at the run's own time - a two-day streak whatever the clock.
+    logged = datetime.fromisoformat(problem_store.read_runs()[-1]["ts"]).astimezone()
+    _write(out / "guided" / "stack" / "valid_parentheses.md", "# VP\n",
+           day=logged.date() - timedelta(days=1))
+    freeze_stats_now(monkeypatch, logged)
     s = _client(_run_fn()).get("/stats").get_json()
     assert s["total"] == 2
     assert s["sources"] == {"log": 1, "legacy": 1}
