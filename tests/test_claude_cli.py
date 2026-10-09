@@ -16,6 +16,7 @@ emits (observed live during SP1):
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 
@@ -454,6 +455,7 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
     still goes through `claude_cli._kill_process_tree` to pin the re-export.
     """
     monkeypatch.setattr(proc_util.sys, "platform", "win32")
+    monkeypatch.setenv("SystemRoot", r"C:\WinDir")
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -477,10 +479,26 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
     assert invoked_tree_kill is True
     assert len(calls) == 1
     cmd = calls[0]
-    assert cmd[0] == "taskkill"
+    # 3A C14: by full path, never a bare name CreateProcess would look up in
+    # the app dir / cwd first.
+    assert cmd[0] == os.path.join(r"C:\WinDir", "System32", "taskkill.exe")
     assert "/T" in cmd and "/F" in cmd
     assert "/PID" in cmd
     assert str(FakeProc.pid) in cmd
+
+
+def test_taskkill_falls_back_to_the_bare_name_without_systemroot(monkeypatch):
+    monkeypatch.setattr(proc_util.sys, "platform", "win32")
+    monkeypatch.delenv("SystemRoot", raising=False)
+    monkeypatch.delenv("SYSTEMROOT", raising=False)
+    calls = []
+    monkeypatch.setattr(proc_util.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+    class FakeProc:
+        pid = 4242
+
+    assert claude_cli._kill_process_tree(FakeProc()) is True
+    assert calls[0][0] == "taskkill"
 
 
 def test_kill_process_tree_taskkill_timeout_falls_back_to_terminate(monkeypatch):
