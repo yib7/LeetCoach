@@ -263,6 +263,36 @@ def test_problems_drop_deleted_files_from_runs_and_file_count(root):  # noqa: F8
     assert len(problem_store.load_problem("1-two_sum", root=root)["runs"]) == 2
 
 
+def test_problems_listing_reads_existence_from_the_library_listing(root, monkeypatch):  # noqa: F811
+    # 3B 3.5: /problems used to resolve every record's every run path (three
+    # realpath calls each): ~300 ms per call on a 500-problem library. Files
+    # the cached listing already holds cost no filesystem call; only a path
+    # it lacks is resolved.
+    _seed(root)
+    code = _write(root, "answers/hash_map/1_two_sum__normal.py", "print(1)\n")
+    problem_store.record_run(
+        PASTE, mode="learning", language="python", tier=None,
+        model="m", verdict=None, paths=[code], session_id=None, duration_s=1.0,
+        pattern="hash_map", doc="x", root=root)
+    resolved = []
+    real = app_module._resolve_library_file
+
+    def counting(rel):
+        resolved.append(rel)
+        return real(rel)
+
+    monkeypatch.setattr(app_module, "_resolve_library_file", counting)
+    c = _client(Recorder())
+    [item] = c.get("/problems").get_json()["problems"]
+    assert item["file_count"] == 2
+    assert resolved == []
+    # a file removed outside the app (Explorer) still drops out
+    code.unlink()
+    [item] = c.get("/problems").get_json()["problems"]
+    assert item["runs"] == ["answers/hash_map/1_two_sum__normal.md"]
+    assert item["file_count"] == 1
+
+
 # --- favicon ---------------------------------------------------------------------------
 
 def test_favicon_is_served_and_linked(root):  # noqa: F811
