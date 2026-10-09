@@ -178,15 +178,43 @@ def test_flags_default_to_the_cached_help_probe(monkeypatch):
     assert calls[0][-1] == "--help"
 
 
-def test_failed_help_probe_degrades_to_no_optional_flags(monkeypatch):
+def test_failed_help_probe_refuses_to_run_without_isolation(monkeypatch):
+    # Phase 4: a failed probe used to send the run out WITHOUT --tools "",
+    # --safe-mode and --strict-mcp-config, so a prompt-injected problem could
+    # reach whatever tools the user's own Claude Code settings allow. Now the
+    # call fails closed: nothing is spawned and the error says why.
     def boom(argv):
         raise OSError("probe exploded")
 
     monkeypatch.setattr(claude_cli, "_probe_help_text", boom)
     claude_cli.clear_flag_cache()
     assert claude_cli.cli_supported_flags() == frozenset()
-    argv = _argv()["argv"]  # the run itself still works
+    runner, calls = recording_runner()
+    with pytest.raises(claude_cli.ClaudeUnavailableError) as info:
+        list(claude_cli.run("hi", runner=runner))
+    assert calls == []
+    message = str(info.value)
+    assert "--help" in message and "OSError" in message
+    assert "isolation" in message
+
+
+def test_a_successful_probe_listing_no_isolation_flags_still_runs(monkeypatch):
+    # An older CLI that answers --help but lacks the newer flags still works
+    # (with less isolation), as documented: only a FAILED probe fails closed.
+    monkeypatch.setattr(claude_cli, "_probe_help_text",
+                        lambda argv: "Options:\n  -p, --print   Print\n  --model <m>  Model\n")
+    claude_cli.clear_flag_cache()
+    argv = _argv()["argv"]
     assert "--safe-mode" not in argv and "-p" in argv
+
+
+def test_an_explicit_empty_flag_set_is_not_a_probe_failure(monkeypatch):
+    def boom(argv):
+        raise AssertionError("must not probe when flags are given")
+
+    monkeypatch.setattr(claude_cli, "_probe_help_text", boom)
+    claude_cli.clear_flag_cache()
+    assert "-p" in _argv(flags=frozenset())["argv"]
 
 
 def test_failed_probe_is_retried_after_short_ttl(monkeypatch):

@@ -133,6 +133,9 @@ call (`claude_cli.build_argv`):
   servers) and a short `--system-prompt` persona in place of the agent prompt.
   - Each flag is passed only when the installed CLI's cached `claude --help` lists it,
     so an older CLI still works, just with less isolation.
+  - If `claude --help` itself fails (times out twice, exits nonzero), the call is
+    refused with an error instead of going out without these flags. The probe is
+    retried a minute later.
   - `--bare` is never passed, because it drops the subscription login.
 - Every call runs in a neutral working directory (`LEETCOACH_CLAUDE_CWD`, by default
   under `%LOCALAPPDATA%\LeetCoach` or `~/.local/share/leetcoach`), never in this repo.
