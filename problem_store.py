@@ -449,12 +449,90 @@ def _record_path(pid: str, root=None) -> Path:
     return meta_dir(root) / PROBLEMS_DIR / f"{pid}.json"
 
 
-def _read_record(path: Path) -> dict | None:
+# 3A S3: the type each known record field must have when present (``None`` is
+# always allowed - a record written by this module only ever stores these
+# types or ``None``). A hand-edited / foreign value of any other type is
+# dropped on read, so ONE bad field can no longer crash /review, /stats, a
+# grade, or every later upsert of that problem; the code reading the field
+# already treats a missing one as its default. ``bool`` never counts as a
+# number. Unknown extra fields are kept as they are.
+_FIELD_TYPES = {
+    "number": int,
+    "title": str,
+    "difficulty": str,
+    "difficulty_source": str,
+    "pattern": str,
+    "statement": str,
+    "created": str,
+    "updated": str,
+    "notes": str,
+    "notes_updated": str,
+    "review": dict,
+    "runs": list,
+    "aliases": list,
+}
+_REVIEW_FIELD_TYPES = {"history": list}
+
+# ``_load_record`` states
+_OK, _MISSING, _CORRUPT, _REPAIRED = "ok", "missing", "corrupt", "repaired"
+
+
+def _well_typed(value, kind) -> bool:
+    if value is None:
+        return True
+    if kind is int and isinstance(value, bool):
+        return False
+    return isinstance(value, kind)
+
+
+def _repair(rec: dict) -> bool:
+    """Drop every known field of ``rec`` whose value has the wrong type (in
+    place); ``True`` when anything was dropped."""
+    repaired = False
+    for key, kind in _FIELD_TYPES.items():
+        if key in rec and not _well_typed(rec[key], kind):
+            del rec[key]
+            repaired = True
+    review = rec.get("review")
+    if isinstance(review, dict):
+        for key, kind in _REVIEW_FIELD_TYPES.items():
+            if key in review and not _well_typed(review[key], kind):
+                del review[key]
+                repaired = True
+    return repaired
+
+
+def _load_record(path: Path) -> tuple[dict | None, str]:
+    """``(record, state)`` for the record file ``path``.
+
+    ``state`` is ``"missing"`` (no file), ``"corrupt"`` (not UTF-8 / JSON, not
+    an object, or no valid ``id`` - the record is ``None``), ``"repaired"``
+    (badly-typed fields were dropped, see :data:`_FIELD_TYPES`) or ``"ok"``.
+
+    3A S4: any OTHER ``OSError`` (a Windows sharing violation while antivirus
+    or OneDrive holds the file, a permissions hiccup) is RAISED: the file is
+    there and may be perfectly good, so it must never be treated as corrupt
+    and replaced."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None, _MISSING
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, RecursionError):  # UnicodeDecodeError is a ValueError
+        return None, _CORRUPT
+    if not isinstance(data, dict) or not valid_problem_id(data.get("id")):
+        return None, _CORRUPT
+    return data, (_REPAIRED if _repair(data) else _OK)
+
+
+def _read_record(path: Path) -> dict | None:
+    """The record at ``path`` for READERS: ``None`` when it is missing,
+    corrupt or cannot be read right now (never raises)."""
+    try:
+        return _load_record(path)[0]
+    except OSError:
         return None
-    return data if isinstance(data, dict) else None
 
 
 def record_index(*, root=None) -> dict[str, dict]:
@@ -517,14 +595,31 @@ def runs_for(pid: str, *, root=None) -> list[dict]:
     if rec is not None:
         ids.add(rec.get("id"))
         ids.update(a for a in rec.get("aliases") or () if isinstance(a, str))
-    return [e for e in read_runs(root=root) if e.get("problem_id") in ids]
+    # 3A S3: a hand-edited log line's problem_id may be any JSON value - a
+    # list / object is unhashable and must not fail the whole lookup.
+    return [e for e in read_runs(root=root)
+            if isinstance(e.get("problem_id"), str) and e["problem_id"] in ids]
+
+
+def _corrupt_name(path: Path) -> Path:
+    return path.with_name(f"{path.name}.corrupt-{int(time.time())}")
 
 
 def _preserve_corrupt(path: Path) -> None:
     if not path.exists():
         return
     try:
-        path.replace(path.with_name(f"{path.name}.corrupt-{int(time.time())}"))
+        path.replace(_corrupt_name(path))
+    except OSError:
+        pass
+
+
+def _preserve_original(path: Path) -> None:
+    """3A S3: keep a COPY of a record whose badly-typed fields were dropped
+    (``<name>.corrupt-<ts>``, like a corrupt one) before the repaired record
+    is written over it - the file stays in place until that write lands."""
+    try:
+        _corrupt_name(path).write_bytes(path.read_bytes())
     except OSError:
         pass
 
@@ -641,10 +736,21 @@ def _upsert(meta: Path, pid: str, parsed: ParsedProblem, *, merge_from: str | No
     folder = meta / PROBLEMS_DIR
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{pid}.json"
-    rec = _read_record(path)
-    if rec is None:
+    # 3A S4: a record that exists but can't be read right now raises here
+    # (record_run logs it; the run's log line is already written), so a
+    # momentarily locked GOOD record is never renamed away and replaced by a
+    # fresh one (box 1, no notes, no history).
+    rec, state = _load_record(path)
+    if state == _CORRUPT:
         _preserve_corrupt(path)
-    old = _read_record(folder / f"{merge_from}.json") if merge_from else None
+    elif state == _REPAIRED:
+        _preserve_original(path)
+    old = None
+    if merge_from:
+        old_path = folder / f"{merge_from}.json"
+        old, old_state = _load_record(old_path)
+        if old_state == _REPAIRED:
+            _preserve_original(old_path)  # it is deleted once merged below
     if old is not None:
         rec = _merged(rec, old, pid, parsed.number)
     if rec is None:
@@ -882,9 +988,14 @@ def _update_record(pid: str, mutate, *, root=None) -> dict | None:
         if current is None or not valid_problem_id(current.get("id")):
             return None
         path = _record_path(current["id"], root)
-        rec = _read_record(path)
+        try:
+            rec, state = _load_record(path)
+        except OSError:
+            return None  # 3A S4: unreadable right now - never written over
         if rec is None:
             return None
+        if state == _REPAIRED:
+            _preserve_original(path)
         mutate(rec)
         fsutil.atomic_write_text(path, json.dumps(rec, ensure_ascii=False, indent=2) + "\n",
                                  newline="\n")
