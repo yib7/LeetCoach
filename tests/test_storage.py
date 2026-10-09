@@ -111,6 +111,42 @@ def test_problem_name_uses_title_line():
     assert storage._problem_name(problem) == "two_sum"
 
 
+# --- 3A S6: a generic / labelled first line no longer names the file ----------
+
+@pytest.mark.parametrize("paste,stem", [
+    ("Description\n1. Two Sum\nGiven an array...", "1_two_sum"),
+    ("## Problem Description\n\n1. Two Sum\nEasy\n", "1_two_sum"),
+    ("Problem:\nValid Parentheses\n", "valid_parentheses"),
+    ("Problem: Two Sum\nGiven...", "two_sum"),
+    ("Title - 3Sum\nMedium", "3sum"),
+    ("---\nDescription\nLongest Substring\n", "longest_substring"),
+])
+def test_problem_name_skips_generic_first_lines_like_the_problem_id(paste, stem):
+    assert storage._problem_name(paste) == stem
+
+
+@pytest.mark.parametrize("paste,stem", [
+    # every paste whose first line names the problem keeps its old file name
+    ("1. Two Sum (Easy)\nGiven...", "1_two_sum_easy"),
+    ("# Two Sum\n", "two_sum"),
+    ("Problem 42 Trapping Rain Water\n", "problem_42_trapping_rain_water"),
+    ("Descriptions of graphs\n", "descriptions_of_graphs"),
+    ("  Two Sum  \r\nGiven...", "two_sum"),
+    # no line names a problem at all: unchanged too
+    ("Description\n---\n", "description"),
+    ("", "untitled"),
+])
+def test_problem_name_is_unchanged_when_the_first_line_names_the_problem(paste, stem):
+    assert storage._problem_name(paste) == stem
+
+
+def test_pastes_starting_with_description_save_to_their_own_files(out_root):
+    a = storage.save_learning("Description\nTwo Sum\nGiven...", "hashing", "# A\n")
+    b = storage.save_learning("Description\nThree Sum\nGiven...", "hashing", "# B\n")
+    assert Path(a).name == "two_sum.md"
+    assert Path(b).name == "three_sum.md"
+
+
 # --- regression: a full pasted problem must not blow past the path limit -----
 
 def test_save_answer_full_problem_paste_stays_short(out_root):
