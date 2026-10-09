@@ -239,34 +239,53 @@ def _locked(meta: Path):
                 _os_unlock(fh)
 
 
-def _os_lock(fh) -> None:
-    if os.name == "nt":
+# How long a store operation waits for another process's lock before giving
+# up with an OSError, and how often it retries meanwhile.
+_LOCK_TIMEOUT = 10.0
+_LOCK_POLL = 0.02
+_WINDOWS = os.name == "nt"
+
+
+def _try_os_lock(fh) -> None:
+    """One NON-blocking attempt at the exclusive lock; raises ``OSError``
+    while another holder has it."""
+    if _WINDOWS:
         import msvcrt
 
         fh.seek(0)
-        deadline = time.monotonic() + 10.0
-        while True:
-            try:
-                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                return
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.02)
-    else:  # pragma: no cover - exercised on POSIX CI only
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
         import fcntl
 
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _os_lock(fh) -> None:
+    """Take the exclusive OS lock, waiting at most :data:`_LOCK_TIMEOUT`.
+
+    3A S14c: POSIX polls ``LOCK_EX | LOCK_NB`` to the same deadline as
+    Windows - a plain blocking ``flock`` used to wait FOREVER behind a hung
+    second LeetCoach process, while Windows gave up after 10 s. Either way
+    the last attempt's ``OSError`` is raised at the deadline."""
+    deadline = time.monotonic() + _LOCK_TIMEOUT
+    while True:
+        try:
+            _try_os_lock(fh)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(_LOCK_POLL)
 
 
 def _os_unlock(fh) -> None:
     try:
-        if os.name == "nt":
+        if _WINDOWS:
             import msvcrt
 
             fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-        else:  # pragma: no cover
+        else:
             import fcntl
 
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
