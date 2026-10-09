@@ -141,8 +141,12 @@ def classify(problem: str, *, run_fn=claude_cli.run, **run_kwargs) -> Classifica
         return Classification(FALLBACK_TYPE, [])
     except Exception as exc:
         # A flaky/missing Claude must not crash the caller; classification is
-        # best-effort metadata. Logged so a persistent failure is diagnosable.
-        logger.warning("classification failed, using the fallback: %s", exc, exc_info=True)
+        # best-effort metadata. Logged so a persistent failure is diagnosable;
+        # an expected CLI failure already says what is wrong, so it gets one
+        # line, not a traceback (3A G2), and anything else keeps its traceback.
+        expected = isinstance(exc, claude_cli.ClaudeUnavailableError)
+        logger.warning("classification failed, using the fallback: %s", exc,
+                       exc_info=not expected)
         return Classification(FALLBACK_TYPE, [])
 
     obj = _extract_json(text)
