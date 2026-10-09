@@ -93,6 +93,16 @@ def test_topics_rescue_an_unmappable_type():
     assert result.problem_type == "hash_map"
 
 
+@pytest.mark.parametrize("raw", ["uncategorized", "Uncategorized", " UNCATEGORIZED "])
+def test_an_explicit_uncategorized_answer_is_not_overridden_by_the_topics(raw):
+    # 3A C8: the model said "none fits" - a topic must not rescue it into a
+    # pattern ("heap" here) the model itself rejected.
+    result = _classify(json.dumps({"problem_type": raw, "topics": ["strings", "heap"]}))
+    assert result.problem_type == patterns.FALLBACK
+    assert result.topics == ["strings", "heap"]
+    assert patterns.normalize_pattern(raw, ["heap"]) == patterns.FALLBACK
+
+
 def test_generic_container_topics_do_not_bias_the_rescue_to_hash_map():
     # SP2 M1: "array" used to rescue almost every label into hash_map, since
     # nearly every problem touches an array.
