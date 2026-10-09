@@ -45,8 +45,10 @@ The public surface:
 Statuses (see :class:`VerifyResult`):
 
 * ``"pass"``         — every parsed sample matched expected stdout.
-* ``"fail"``         — at least one sample's stdout differed.
-* ``"error"``        — the code crashed / timed out / wouldn't run.
+* ``"fail"``         — at least one sample's stdout differed, or the code
+                       crashed on some samples but passed others.
+* ``"error"``        — the code crashed / timed out / wouldn't run on every
+                       sample that ran.
 * ``"not_verified"`` — couldn't verify (no samples, no compiler, unsupported
                        language, sandbox caps unavailable, the bootstrap
                        failed before running the solution) — *not* a
@@ -1317,8 +1319,9 @@ def verify_answer(
     """Verify a generated solution against the problem's sample I/O.
 
     * **python** — first-class: parse samples from ``problem_text``, run ``code``
-      against each, and aggregate to ``pass`` (all matched) / ``fail`` (any
-      differed) / ``error`` (a sample crashed). If no samples parse, status is
+      against each, and aggregate to ``pass`` (all matched) / ``error`` (every
+      sample that ran crashed) / ``fail`` (anything else - see
+      :func:`_verify_python_samples`). If no samples parse, status is
       ``not_verified`` ("no sample I/O found").
     * **cpp / java** — only checks the compiler is on PATH (``g++`` / ``javac``).
       Absent -> ``not_verified`` ("no <compiler> on PATH..."). Present but
@@ -1388,11 +1391,14 @@ def _verify_python_samples(
 ) -> VerifyResult:
     """Run ``code`` against each parsed sample and aggregate the verdict.
 
-    Aggregation keeps three verdicts — ``pass`` (all matched), ``error`` (every
-    non-pass sample crashed), ``fail`` (at least one wrong-answer). A mixed run
-    that both fails and errors reports ``fail`` but the note names the errored
-    count too (``"X/Y passed, Z errored"``), so a crash is never silently folded
-    into a plain wrong-answer verdict. ``timeout`` is passed straight through as
+    Aggregation keeps three verdicts — ``pass`` (all matched), ``error``
+    (every sample that ran crashed - none passed, none answered wrong) and
+    ``fail`` (anything else: a wrong answer, or a crash alongside a pass).
+    3A S8: so a run that passes some samples and crashes on others is
+    ``fail`` - the same rule as the re-attempt "Test my code" summary
+    (``practice.run_cases``) - and the note names the errored count
+    (``"X/Y passed, Z errored"``), so a crash is never silently folded into
+    a plain wrong-answer verdict. ``timeout`` is passed straight through as
     a float (B5) — no truncating ``int()`` cast, so a sub-second budget like
     ``0.5`` is honoured instead of becoming ``0``.
     """
@@ -1454,7 +1460,8 @@ def _verify_python_samples(
         # every non-passing sample crashed — a pure error, not a wrong answer
         status, note = "error", f"code errored on {errored}/{total} sample(s)"
     elif errored:
-        # mixed: some wrong answers AND some crashes — surface both counts
+        # mixed: crashes alongside passes and/or wrong answers - surface both
+        # counts (3A S8: a pass + a crash is "fail", see the docstring)
         status, note = "fail", f"{passed}/{total} sample(s) passed, {errored} errored"
     else:
         status, note = "fail", f"{passed}/{total} sample(s) passed"
