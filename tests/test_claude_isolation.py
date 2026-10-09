@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 from _helpers import FAKE_CLAUDE_HELP
 
+import classifier
 import claude_cli
 import config
 import prompts
@@ -527,6 +528,7 @@ def test_empty_tools_arg_survives_a_cmd_shim(tmp_path):
     prompts.QUICK_ASK_SYSTEM_PROMPT,
     prompts.FOLLOWUP_SYSTEM_PROMPT,
     claude_cli.DEFAULT_SYSTEM_PROMPT,
+    classifier.CLASSIFIER_SYSTEM_PROMPT,  # 3A C16: every persona, the classifier's too
 ])
 def test_personas_are_single_line_and_cmd_safe(persona):
     # They travel in argv through the claude.cmd shim: a newline would cut the
