@@ -1,39 +1,53 @@
 name: CI
 
+# Every push on every branch, every pull request, and on demand. Nothing here
+# needs a secret or the real `claude` CLI: the test suite mocks the subprocess
+# and the setup jobs point the app at scripts/dev/fake_claude (canned output).
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
-    # Windows is the developed/tested platform (see README); the suite mocks the
-    # `claude` subprocess, so CI needs no real CLI and makes no Claude calls.
+  test-windows:
+    # Windows is the developed platform (README): lint, the launcher-script
+    # parse check, pytest and the node tests on the supported floor (3.12)
+    # through the current stable CPython (3.14).
+    name: test (windows, py${{ matrix.python-version }})
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
-
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: requirements.lock
 
-      - name: Install dependencies
+      - name: Install the locked dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt
+          python -m pip install -r requirements.lock
+          python -m pip check
 
       - name: Lint (ruff)
         run: python -m ruff check .
 
       - name: Windows launcher script syntax check (A1/C14)
-        # Windows PowerShell 5.1, not pwsh (PowerShell 7) — the launcher
+        # Windows PowerShell 5.1, not pwsh (PowerShell 7) - the launcher
         # scripts themselves target 5.1, and a 5.1-only parse bug (like the
         # em-dash encoding issue A1 fixed) would NOT be caught by pwsh, which
         # decodes source files differently (#5).
@@ -50,5 +64,187 @@ jobs:
           }
           if ($failed) { exit 1 }
 
+      - name: Front-end unit tests (node)
+        run: |
+          node --version
+          node tests/js/run.js
+
       - name: Test (pytest)
         run: python -m pytest -q
+
+  test-posix:
+    # The README's non-Windows path (venv + pip) claims plain cross-platform
+    # Python, so the suite runs on Linux and macOS too. Windows-only tests
+    # (PowerShell launchers, Job Objects) skip themselves there.
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python-version: "3.12" }
+          - { os: ubuntu-latest, python-version: "3.14" }
+          - { os: macos-latest, python-version: "3.14" }
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - name: Install the locked dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+          python -m pip check
+
+      - name: Front-end unit tests (node)
+        run: |
+          node --version
+          node tests/js/run.js
+
+      - name: Test (pytest)
+        run: python -m pytest -q
+
+  readme-setup-windows:
+    # 6.4: the README's literal Windows steps on a fresh runner - clone,
+    # `powershell -ExecutionPolicy Bypass -File .\setup.ps1`, activate, start
+    # `python app.py` - then prove the app answers. The runner's own Python is
+    # used (no setup-python), as on a fresh machine with Python 3.12+ and the
+    # `py` launcher. The `claude` CLI is the repo's fake (never real Claude).
+    name: README setup (windows, clean runner)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+        working-directory: ${{ runner.temp }}
+    steps:
+      - name: "Prerequisite check: Python 3.12+ via the py launcher"
+        run: |
+          py -0p
+          py -3 --version
+
+      - name: "Step 1: get the code (git clone)"
+        run: |
+          git clone --quiet "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git" LeetCoach
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C LeetCoach fetch --quiet origin "$env:GITHUB_REF"
+          git -C LeetCoach checkout --quiet --detach "$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          git -C LeetCoach log -1 --oneline
+
+      - name: "Step 2: install (setup.ps1)"
+        working-directory: ${{ runner.temp }}/LeetCoach
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\setup.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path .\.venv\.setup-ok)) { throw "setup.ps1 did not write .venv\.setup-ok" }
+
+      - name: "Step 3: run (activate, python app.py) against the fake claude CLI"
+        working-directory: ${{ runner.temp }}/LeetCoach
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\.venv\Scripts\Activate.ps1
+          $env:LEETCOACH_CLAUDE_BIN = (Resolve-Path .\scripts\dev\fake_claude.cmd).Path
+          $env:FAKE_CLAUDE_PYTHON = (Get-Command python).Source
+          $env:LEETCOACH_NO_BROWSER = "1"
+          $env:LEETCOACH_NO_DOTENV = "1"
+          $env:LEETCOACH_OUTPUT_DIR = Join-Path $env:RUNNER_TEMP "lc-output"
+          $env:LEETCOACH_CLAUDE_CWD = Join-Path $env:RUNNER_TEMP "lc-claude-cwd"
+          $env:PYTHONUNBUFFERED = "1"
+          New-Item -ItemType Directory -Force -Path $env:LEETCOACH_CLAUDE_CWD | Out-Null
+          Write-Host "python: $env:FAKE_CLAUDE_PYTHON"
+          $log = Join-Path $env:RUNNER_TEMP "app.out.log"
+          $err = Join-Path $env:RUNNER_TEMP "app.err.log"
+          $proc = Start-Process -FilePath python -ArgumentList "app.py" -NoNewWindow -PassThru `
+            -RedirectStandardOutput $log -RedirectStandardError $err
+          $ok = $false
+          try {
+            $deadline = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $deadline -and -not $proc.HasExited) {
+              Start-Sleep -Milliseconds 500
+              $text = ((Get-Content $log -Raw -ErrorAction SilentlyContinue) + (Get-Content $err -Raw -ErrorAction SilentlyContinue))
+              $m = [regex]::Match([string]$text, "http://127\.0\.0\.1:\d+")
+              if (-not $m.Success) { continue }
+              $base = $m.Value
+              try { $health = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 "$base/healthz" } catch { continue }
+              $page = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 "$base/"
+              Write-Host "GET $base/healthz -> $($health.StatusCode) $($health.Content)"
+              Write-Host "GET $base/ -> $($page.StatusCode) ($($page.Content.Length) bytes)"
+              $data = $health.Content | ConvertFrom-Json
+              if ($health.StatusCode -ne 200 -or $data.app -ne "leetcoach") { throw "unexpected /healthz answer" }
+              if ($page.StatusCode -ne 200 -or $page.Content -notmatch "<title>[^<]*LeetCoach") { throw "unexpected / page" }
+              $ok = $true
+              break
+            }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+            Write-Host "---- app stdout ----"; Get-Content $log -ErrorAction SilentlyContinue
+            Write-Host "---- app stderr ----"; Get-Content $err -ErrorAction SilentlyContinue
+          }
+          if (-not $ok) { throw "LeetCoach did not answer /healthz within 60 s" }
+          $all = (Get-Content $log -Raw) + (Get-Content $err -Raw -ErrorAction SilentlyContinue)
+          if ($all -match "WARNING: the ``claude`` CLI was not found|signed out of the ``claude`` CLI") {
+            throw "the app did not see the fake claude CLI as installed and signed in"
+          }
+
+  readme-setup-linux:
+    # The README's non-Windows path, literally: clone, `python3 -m venv .venv`,
+    # activate, `pip install -r requirements.txt`, `python app.py`, against the
+    # fake claude CLI (scripts/dev/fake_claude.py), then ask /healthz.
+    name: README setup (linux, clean runner)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ runner.temp }}
+    steps:
+      - name: "Step 1: get the code (git clone)"
+        run: |
+          python3 --version
+          git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" LeetCoach
+          git -C LeetCoach fetch --quiet origin "$GITHUB_REF"
+          git -C LeetCoach checkout --quiet --detach "$GITHUB_SHA"
+          git -C LeetCoach log -1 --oneline
+
+      - name: "Step 2: install (venv + pip)"
+        working-directory: ${{ runner.temp }}/LeetCoach
+        run: |
+          python3 -m venv .venv
+          . .venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: "Step 3: run (python app.py) against the fake claude CLI"
+        working-directory: ${{ runner.temp }}/LeetCoach
+        run: |
+          . .venv/bin/activate
+          export LEETCOACH_CLAUDE_BIN="$PWD/scripts/dev/fake_claude.py"
+          export FAKE_CLAUDE_PYTHON="$(command -v python)"
+          export LEETCOACH_NO_BROWSER=1 LEETCOACH_NO_DOTENV=1 PYTHONUNBUFFERED=1
+          export LEETCOACH_OUTPUT_DIR="$RUNNER_TEMP/lc-output"
+          export LEETCOACH_CLAUDE_CWD="$RUNNER_TEMP/lc-claude-cwd"
+          mkdir -p "$LEETCOACH_CLAUDE_CWD"
+          test -x "$LEETCOACH_CLAUDE_BIN" || { echo "fake_claude.py is not executable"; exit 1; }
+          log="$RUNNER_TEMP/app.log"
+          python app.py > "$log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; echo "---- app log ----"; cat "$log"' EXIT
+          ok=
+          for _ in $(seq 1 120); do
+            sleep 0.5
+            base=$(grep -oE 'http://127\.0\.0\.1:[0-9]+' "$log" | head -n1 || true)
+            [ -n "$base" ] || continue
+            health=$(curl -fsS --max-time 5 "$base/healthz") || continue
+            echo "GET $base/healthz -> $health"
+            echo "$health" | grep -q '"app": *"leetcoach"' || { echo "unexpected /healthz answer"; exit 1; }
+            curl -fsS --max-time 5 "$base/" | grep -q '<title>[^<]*LeetCoach' || { echo "unexpected / page"; exit 1; }
+            echo "GET $base/ -> 200"
+            ok=1
+            break
+          done
+          [ -n "$ok" ] || { echo "LeetCoach did not answer /healthz within 60 s"; exit 1; }
+          if grep -qE 'WARNING: the `claude` CLI was not found|signed out of the `claude` CLI' "$log"; then
+            echo "the app did not see the fake claude CLI as installed and signed in"; exit 1
+          fi
