@@ -29,8 +29,6 @@ MAX_CUSTOM_CASES = 10
 MAX_SAMPLES = 10
 ECHO_CAP = 8 * 1024           # characters of input/expected/output echoed back
 
-STATUSES = ("pass", "fail", "error", "ran", "not_verified")
-
 # The sandbox runs each case in ``<tempdir>/leetcoach_run_<random>/solution.py``;
 # a traceback naming that path is noise to the learner (and leaks the temp
 # dir), so the echoed stderr shows just ``solution.py``. A path is an optional

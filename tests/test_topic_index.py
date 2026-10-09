@@ -23,22 +23,24 @@ def idx_path(tmp_path, monkeypatch):
     return p
 
 
-# --- load / save roundtrip -----------------------------------------------
+# --- record / load roundtrip ---------------------------------------------
+# (3A S13: the test-only ``save()`` is gone - the production write path is
+# ``record()``; these keep its roundtrip / default-path behaviour covered.)
 
-def test_save_then_load_roundtrip(idx_path):
-    data = {"by_type": {"hashing": ["hash_map"]}, "all": ["hash_map"]}
-    topic_index.save(data)
+def test_record_then_load_roundtrip(idx_path):
+    topic_index.record("hashing", ["hash_map"])
     loaded = topic_index.load()
     assert loaded["by_type"] == {"hashing": ["hash_map"]}
     assert loaded["all"] == ["hash_map"]
+    assert loaded["by_language"] == {}
 
 
-def test_save_uses_config_default_path(tmp_path, monkeypatch):
+def test_record_uses_config_default_path(tmp_path, monkeypatch):
     # No explicit path + no override env -> falls back to <output_dir>/topic_index.json
     monkeypatch.delenv("LEETCOACH_TOPIC_INDEX", raising=False)
-    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
-    topic_index.save({"by_type": {}, "all": ["sliding_window"]})
-    expected = tmp_path / "topic_index.json"
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path / "fresh"))
+    topic_index.record("sliding", ["sliding_window"])
+    expected = tmp_path / "fresh" / "topic_index.json"
     assert expected.exists()
     assert "sliding_window" in expected.read_text(encoding="utf-8")
 
@@ -195,7 +197,8 @@ def test_learning_route_passes_known_topics_to_prompt(tmp_path, monkeypatch):
     idx = tmp_path / "topic_index.json"
     monkeypatch.setenv("LEETCOACH_TOPIC_INDEX", str(idx))
     monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path / "out"))
-    topic_index.save({"by_type": {"x": ["sliding_window"]}, "all": ["sliding_window"]})
+    idx.write_text(json.dumps({"by_type": {"x": ["sliding_window"]}, "all": ["sliding_window"]}),
+                   encoding="utf-8")
 
     # Spy on build_learning to capture the already_learned_topics it receives.
     captured = {}
@@ -291,7 +294,7 @@ def test_corrupt_index_is_preserved_as_corrupt_copy_not_overwritten(idx_path):
     assert len([p for p in idx_path.parent.iterdir() if ".corrupt-" in p.name]) == 1
 
 
-def test_save_goes_through_the_atomic_helper(idx_path, monkeypatch):
+def test_record_goes_through_the_atomic_helper(idx_path, monkeypatch):
     import fsutil
 
     seen = []
@@ -302,7 +305,7 @@ def test_save_goes_through_the_atomic_helper(idx_path, monkeypatch):
         return real(path, text, **kw)
 
     monkeypatch.setattr(fsutil, "atomic_write_text", spy)
-    topic_index.save({"by_type": {}, "all": ["x"]})
+    topic_index.record("misc", ["x"])
     assert seen == [str(idx_path)]
 
 

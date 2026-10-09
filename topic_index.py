@@ -155,21 +155,6 @@ def _clean_index(data) -> dict:
     return out
 
 
-def save(data: dict, path=None) -> str:
-    """Write ``data`` to the index file (UTF-8 JSON), creating parents. Returns the
-    path written. Best-effort normalization so the file stays well-shaped."""
-    p = _path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    data = data if isinstance(data, dict) else {}
-    normalized = {
-        "by_type": data.get("by_type", {}),
-        "all": data.get("all", []),
-        "by_language": data.get("by_language", {}),
-    }
-    _write_json(p, normalized)
-    return str(p)
-
-
 def _write_json(p: Path, obj) -> None:
     # Atomic write through the shared helper (SP4/B7): sibling temp file +
     # os.replace, retried with backoff while Windows reports the index as held
@@ -236,7 +221,7 @@ def known_topics(path=None, *, limit=None, language=None) -> list:
     """
     # Intentionally unlocked: this is a read-only path (no lock needed for
     # correctness here) and it's safe against a concurrent record() because
-    # save() writes via tmp-file + os.replace(), an atomic rename on both
+    # record() writes via tmp-file + os.replace(), an atomic rename on both
     # Windows and POSIX — a reader here always sees either the old file or
     # the fully-written new one, never a partial write.
     data = load(path)
