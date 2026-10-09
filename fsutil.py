@@ -206,6 +206,21 @@ def atomic_write_text(
     )
 
 
+# 3A S9: :func:`_backup`'s answer for a target that exists but can't be read.
+_UNREADABLE = object()
+
+
+def _backup(target: Path):
+    """``target``'s current bytes for a rollback: ``None`` when it does not
+    exist, :data:`_UNREADABLE` when it exists but cannot be read."""
+    try:
+        return target.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return _UNREADABLE
+
+
 def atomic_write_many(
     items,
     *,
@@ -219,7 +234,9 @@ def atomic_write_many(
     Every temp file is written first (nothing visible changes if any of those
     fails), then each is swapped into place. If a later swap fails, the files
     already swapped are rolled back: a target that did not exist is removed,
-    one that did gets its previous bytes back. Returns the target paths.
+    one that did gets its previous bytes back. A target that existed but
+    could not be READ for that backup (locked, unreadable) is left as
+    swapped in - never deleted (3A S9). Returns the target paths.
     """
     targets = [(Path(p), _encode(t, encoding, newline)) for p, t in items]
     for target, _ in targets:
@@ -233,19 +250,18 @@ def atomic_write_many(
             _unlink_quietly(tmp)
         raise
 
-    done: list[tuple[Path, bytes | None]] = []
+    done: list[tuple[Path, bytes | object | None]] = []
     try:
         for (target, _), tmp in zip(targets, tmps):
-            try:
-                previous = target.read_bytes() if target.exists() else None
-            except OSError:
-                previous = None
+            previous = _backup(target)
             _replace_with_retry(tmp, target, retries=retries, backoff=backoff)
             done.append((target, previous))
     except BaseException:
         for tmp in tmps:
             _unlink_quietly(tmp)
         for target, previous in reversed(done):
+            if previous is _UNREADABLE:
+                continue  # it existed: never unlink what we could not restore
             try:
                 if previous is None:
                     target.unlink()
