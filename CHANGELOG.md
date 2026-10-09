@@ -71,8 +71,21 @@ follow-up questions on a saved doc.
   keyed by language.
 - **Quick Ask model tag (C13).** The page now shows the configured
   `LEETCOACH_QUICK_ASK_MODEL` instead of a hard-coded "haiku".
+- **Dependencies.**
+  - The vendored Markdown renderer moves from marked 12.0.2 to 18.1.0. The hardened
+    renderer (no raw HTML, http(s) links only, `data:image/` images only) is ported to
+    marked's token API, and new tests pin its behaviour.
+  - highlight.js moves from 11.9.0 to 11.12.0. CREDITS.md lists both versions, and a test
+    keeps it in step with the vendored files.
+  - `requirements.lock` is regenerated from a clean resolve and passes `pip check`. Python
+    3.14 is the pinned development version; 3.12 is still the minimum.
+- **Lint.** Ruff moves to 0.16 with its larger default rule set, and every finding is
+  fixed in code. The only `noqa` comments left each give a reason.
 
 ### Fixed
+- **Classifier failures are logged.** When the save-time classifier call fails, a warning
+  with the error is logged before the fallback pattern is used, so a persistent failure
+  can be diagnosed.
 - **Launch and sign-in (A1, B9).** `ensure-claude-auth.ps1` is now ASCII-only, so it
   parses under Windows PowerShell 5.1. The desktop shortcut's automatic sign-in now
   actually runs, in its own visible window. `setup.ps1` checks every step's exit code,
@@ -127,6 +140,10 @@ follow-up questions on a saved doc.
 ### Notes
 - **CI and tests (C14).** CI parses every `.ps1` under Windows PowerShell 5.1. The
   JavaScript helpers have zero-dependency node tests, which pytest runs.
+  - CI now runs on every push to any branch. It tests Windows on Python 3.12-3.14,
+    Ubuntu on 3.12 and 3.14, and macOS on 3.14, and runs the node tests in each job.
+  - Two clean-runner jobs (Windows and Linux) follow the README's setup steps literally
+    against the fake `claude` CLI, and check that `/healthz` and `/` return 200.
 - **Docs (C13).** README, ARCHITECTURE, SECURITY and this changelog are up to date.
 - **Existing libraries.** Existing `output/` libraries keep working with no migration:
   legacy files count in Stats and open in the viewer. Follow-ups on them use the fallback
