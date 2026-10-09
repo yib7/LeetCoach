@@ -1195,6 +1195,20 @@ def _is_error_result(obj: dict) -> bool:
     )
 
 
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _fix_surrogates(text: str) -> str:
+    """Pair up UTF-16 surrogate halves into real code points and replace any
+    that stay unpaired with U+FFFD (3A C13). The CLI's JSON can carry an
+    emoji as ``\\ud83d`` + ``\\ude00`` split across two deltas; joined
+    naively they stay two lone surrogates, which raise ``UnicodeEncodeError``
+    (not ``OSError``) when the answer is saved."""
+    if not _SURROGATE_RE.search(text):
+        return text
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
 def _iter_text_deltas(
     lines: Iterable[str], state: ClaudeRun | None = None
 ) -> Iterator[str]:
@@ -1213,8 +1227,11 @@ def _iter_text_deltas(
     * Ignore everything else (system/init lines, thinking/signature deltas,
       blank lines, non-JSON noise) and skip any event whose fields have an
       unexpected type (B3): the parser must never crash on an odd shape.
+    * Every chunk is valid Unicode (3A C13): a surrogate pair split across two
+      deltas is re-paired, and a surrogate that stays unpaired becomes U+FFFD.
     """
     saw_stream_event_text = False
+    held_surrogate = ""  # 3A C13: a high surrogate whose low half is pending
     saw_result = False
     assistant_fallback: list[str] = []
     result_fallback = ""
@@ -1271,7 +1288,15 @@ def _iter_text_deltas(
                     text = delta.get("text")
                     if delta.get("type") == "text_delta" and isinstance(text, str) and text:
                         saw_stream_event_text = True
-                        yield text
+                        # 3A C13: a trailing high surrogate waits for the
+                        # next delta, which may carry its other half.
+                        text = held_surrogate + text
+                        held_surrogate = ""
+                        if "\ud800" <= text[-1] <= "\udbff":
+                            held_surrogate, text = text[-1], text[:-1]
+                        text = _fix_surrogates(text)
+                        if text:
+                            yield text
                 # thinking/signature deltas and other event types: ignored
                 continue
 
@@ -1308,8 +1333,10 @@ def _iter_text_deltas(
         # pass it off, or save it, as a success.
         raise ClaudeUnavailableError(NO_RESULT_MESSAGE)
     if saw_stream_event_text:
+        if held_surrogate:  # its other half never came
+            yield _fix_surrogates(held_surrogate)
         return
-    joined = "".join(assistant_fallback) or result_fallback
+    joined = _fix_surrogates("".join(assistant_fallback) or result_fallback)
     if joined:
         yield joined
 
