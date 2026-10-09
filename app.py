@@ -952,6 +952,15 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     # generous headroom while still capping a hostile/accidental flood.
     app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 
+    @app.errorhandler(413)
+    def _too_large(_exc):
+        # 3A W8: Flask's own 413 is an HTML page the front end can only show
+        # as "Request rejected (413)"; every page fetch reads a JSON `error`.
+        limit_mb = app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024)
+        return jsonify({"error": (
+            f"That request is too large (the limit is {limit_mb} MB). A LeetCode "
+            "problem is a few KB - paste just the problem statement and try again.")}), 413
+
     # Where the model picker persists its choice. A config value (not a bare
     # constant) so tests can redirect it to a temp file instead of the real
     # project `.env`. #7: honours LEETCOACH_DOTENV_PATH (set by the test
@@ -1090,6 +1099,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # it comes from LEETCOACH_QUICK_ASK_MODEL), not a hardcoded "haiku".
         html = html.replace("__QUICK_ASK_MODEL__", html_escape(config.quick_ask_model()))
         html = html.replace("__FOLLOWUP_MAX_QUESTION__", str(FOLLOWUP_MAX_QUESTION))
+        # 3A W8: Quick Ask trims its problem context to what /ask uses.
+        html = html.replace("__QUICK_ASK_PROBLEM_CONTEXT_CAP__",
+                            str(QUICK_ASK_PROBLEM_CONTEXT_CAP))
         # Display-only version labels for the picker tooltips (the alias, not
         # this label, is what reaches `--model`).
         for alias in config.ALLOWED_MODEL_ALIASES:

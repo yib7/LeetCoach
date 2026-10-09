@@ -1185,6 +1185,8 @@
   // with a 60 s client timeout (B20). Errors render as PLAIN TEXT.
   // =========================================================================
   var qaInput = $("qa-input");
+  // 3A W8: the server's QUICK_ASK_PROBLEM_CONTEXT_CAP, injected into the page.
+  var QA_PROBLEM_CAP = (qaInput && parseInt(qaInput.getAttribute("data-problem-cap"), 10)) || 6000;
   var qaAskBtn = $("qa-ask");
   var qaAnswer = $("qa-answer");
   var qaStatus = $("qa-status");
@@ -1243,7 +1245,9 @@
       var resp = await postJson("/ask", {
         question: question,
         language: activeVal("lang"),
-        problem: problemEl.value.trim(),
+        // 3A W8: /ask only reads the first QA_PROBLEM_CAP chars; sending a
+        // huge paste whole just risks the 2 MB request limit.
+        problem: core.clipChars(problemEl.value.trim(), QA_PROBLEM_CAP),
         ask_id: q.id,
       }, { signal: q.controller.signal });
       // SP5 fix R7: the answer has arrived - the 60 s timeout must not
