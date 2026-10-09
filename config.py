@@ -70,9 +70,16 @@ DEFAULT_VERIFY_TIMEOUT = 10.0  # seconds; per sample-verification subprocess
 MAX_TIMEOUT_SECONDS = 86400.0
 
 
+def _env_str(name: str, default: str) -> str:
+    """``os.environ[name]`` stripped, or ``default`` when it is unset, empty
+    or blank (3A C10): ``LEETCOACH_MODEL=`` in ``.env`` used to reach argv as
+    ``--model ""`` (and an empty binary name could not be run at all)."""
+    return (os.environ.get(name) or "").strip() or default
+
+
 def model() -> str:
     """Claude model id used for every `claude --model <id>` call."""
-    return os.environ.get("LEETCOACH_MODEL", DEFAULT_MODEL)
+    return _env_str("LEETCOACH_MODEL", DEFAULT_MODEL)
 
 
 # The generic aliases the in-app model picker offers. Aliases (not pinned ids)
@@ -142,7 +149,7 @@ def classifier_model() -> str:
     tiny JSON object naming the technique — so it defaults to the cheapest
     alias (``haiku``) regardless of which model produces the study material.
     """
-    return os.environ.get("LEETCOACH_CLASSIFIER_MODEL", DEFAULT_CLASSIFIER_MODEL)
+    return _env_str("LEETCOACH_CLASSIFIER_MODEL", DEFAULT_CLASSIFIER_MODEL)
 
 
 def quick_ask_model() -> str:
@@ -153,12 +160,12 @@ def quick_ask_model() -> str:
     cheapest alias (``haiku``) regardless of which model produces the study
     material. Override with ``LEETCOACH_QUICK_ASK_MODEL``.
     """
-    return os.environ.get("LEETCOACH_QUICK_ASK_MODEL", DEFAULT_QUICK_ASK_MODEL)
+    return _env_str("LEETCOACH_QUICK_ASK_MODEL", DEFAULT_QUICK_ASK_MODEL)
 
 
 def claude_bin() -> str:
     """Name or absolute path of the `claude` executable."""
-    return os.environ.get("LEETCOACH_CLAUDE_BIN", DEFAULT_CLAUDE_BIN)
+    return _env_str("LEETCOACH_CLAUDE_BIN", DEFAULT_CLAUDE_BIN)
 
 
 def _clamped_timeout(env_var: str, default: float) -> float:
