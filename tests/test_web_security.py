@@ -447,3 +447,65 @@ def test_inside_root_predicate(tmp_path, monkeypatch):
 
     monkeypatch.setattr(type(root), "resolve", broken)
     assert not app_module._inside_root(root / "a" / "x.md", root)
+
+
+# --- Phase 4 (ship run): headers on every response type, loopback peers only --------
+
+SECURITY_HEADERS = {
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def _response_kinds(env, c):
+    """One response of every kind the app serves: HTML, JSON, SSE, static,
+    text/plain, TSV, SVG and each error path (403, 404, 405, 413)."""
+    env.mkdir(parents=True, exist_ok=True)
+    (env / "notes.md").write_text("# Notes\n", encoding="utf-8")
+    sse = c.post("/run", json=RUN)
+    sse.get_data()
+    return {
+        "html": c.get("/"),
+        "json": c.get("/library"),
+        "sse": sse,
+        "static": c.get("/static/app.js"),
+        "vendor": c.get("/static/vendor/marked.min.js"),
+        "text": c.get("/library/file?path=notes.md"),
+        "tsv": c.get("/flashcards.tsv"),
+        "svg": c.get("/favicon.ico"),
+        "403-host": c.get("/", headers={"Host": "evil.example"}),
+        "403-origin": c.post("/run", json=RUN, headers={"Origin": "http://evil.example"}),
+        "404-json": c.get("/library/file?path=missing.md"),
+        "404-html": c.get("/no-such-route"),
+        "405": c.get("/run"),
+        "413": c.post("/ask", data=b"x" * (3 * 1024 * 1024), content_type="application/json"),
+    }
+
+
+def test_every_response_type_carries_the_security_headers(env):
+    kinds = _response_kinds(env, _client(Recorder()))
+    expected_status = {"403-host": 403, "403-origin": 403, "404-json": 404,
+                       "404-html": 404, "405": 405, "413": 413}
+    for kind, resp in kinds.items():
+        assert resp.status_code == expected_status.get(kind, 200), kind
+        csp = resp.headers.get("Content-Security-Policy", "")
+        assert "default-src 'none'" in csp and "frame-ancestors 'none'" in csp, kind
+        for name, value in SECURITY_HEADERS.items():
+            assert resp.headers.get(name) == value, (kind, name)
+
+
+def test_an_unhandled_error_is_a_bare_500_with_the_headers(env):
+    application = app_module.create_app(run_fn=Recorder(), auth_probe=_authed)
+
+    @application.get("/__boom")
+    def _boom():
+        raise RuntimeError(r"C:\Users\someone\secret LEETCOACH_SECRET=value")
+
+    resp = application.test_client().get("/__boom")
+    assert resp.status_code == 500
+    body = resp.get_data(as_text=True)
+    assert "secret" not in body and "Traceback" not in body and "Users" not in body
+    assert resp.headers.get("Referrer-Policy") == "no-referrer"
+    assert resp.headers.get("X-Content-Type-Options") == "nosniff"
+
