@@ -142,11 +142,16 @@ def normalize_pattern(raw, topics=()) -> str:
     ``raw`` is tried first; if it maps nowhere, each of ``topics`` is tried in
     order (a reply like ``{"problem_type": "strings", "topics": ["hash map"]}``
     still lands in ``hash_map``), ignoring generic container words (SP2 M1:
-    a topic "array" is no evidence of hash_map). Never raises; non-strings are
+    a topic "array" is no evidence of hash_map). An explicit
+    :data:`FALLBACK` answer is final (3A C8): the topics never override the
+    model's own "none of the patterns fits". Never raises; non-strings are
     ignored.
     """
     if isinstance(raw, str):
-        hit = _match(_slug(raw))
+        slug = _slug(raw)
+        if slug == FALLBACK:
+            return FALLBACK
+        hit = _match(slug)
         if hit:
             return hit
     for topic in topics or ():
