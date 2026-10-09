@@ -65,6 +65,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -250,22 +251,76 @@ def cli_supported_flags() -> frozenset:
         return flags
 
 
+_mkdtemp_cwd: str | None = None  # 3A C6: the last-resort dir, made once per process
+_mkdtemp_lock = threading.Lock()
+
+
+def _temp_cwd_candidate() -> Path:
+    """``<tempdir>/leetcoach-claude-cwd-<uid | user name>`` (3A C6): one name
+    per user, never a single name every account on the box shares."""
+    if hasattr(os, "getuid"):
+        owner = str(os.getuid())
+    else:
+        try:
+            import getpass
+
+            owner = getpass.getuser()
+        except Exception:  # noqa: BLE001 - no user name: still a stable token
+            owner = "user"
+        owner = re.sub(r"[^A-Za-z0-9_.-]", "_", owner)[:64] or "user"
+    return Path(tempfile.gettempdir()) / f"leetcoach-claude-cwd-{owner}"
+
+
+def _make_private_dir(path: Path) -> bool:
+    """Create ``path`` (mode 0o700) or accept an existing one ONLY if it is a
+    real directory owned by us (3A C6, POSIX): in a shared ``/tmp`` another
+    user could pre-create the name and plant ``CLAUDE.md`` or
+    ``.claude/settings.json`` for the CLI to load. Windows (per-user temp
+    dir) just creates it."""
+    if not hasattr(os, "getuid"):
+        path.mkdir(parents=True, exist_ok=True)
+        return path.is_dir()
+    with contextlib.suppress(FileExistsError):
+        path.mkdir(mode=0o700)
+    info = os.lstat(path)  # lstat: a planted symlink is not "our directory"
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        return False
+    if info.st_mode & 0o077:
+        os.chmod(path, 0o700)
+    return True
+
+
 def ensure_claude_cwd() -> str:
     """Create (if needed) and return the neutral directory `claude` runs in.
 
-    Falls back to ``<tempdir>/leetcoach-claude-cwd`` and then a fresh temp dir
-    if the configured one cannot be created - a run must never fail over this,
-    and any of them is still neutral (not the repo).
+    Falls back to a per-user ``<tempdir>/leetcoach-claude-cwd-<uid>`` and then
+    to one fresh temp dir (made once per process, so calls keep sharing one
+    --resume session bucket) if the configured one cannot be created or
+    resolved - a run must never fail over this (3A C5), and any of them is
+    still neutral (not the repo).
     """
-    candidates = [config.claude_cwd(), Path(tempfile.gettempdir()) / "leetcoach-claude-cwd"]
-    for candidate in candidates:
+    global _mkdtemp_cwd
+    try:
+        configured = config.claude_cwd()
+    except Exception:  # noqa: BLE001 - e.g. no resolvable home directory
+        configured = None
+    if configured is not None:
         try:
-            candidate.mkdir(parents=True, exist_ok=True)
-            if candidate.is_dir():
-                return str(candidate)
+            configured.mkdir(parents=True, exist_ok=True)
+            if configured.is_dir():
+                return str(configured)
         except OSError:
-            continue
-    return tempfile.mkdtemp(prefix="leetcoach-claude-cwd-")
+            pass
+    try:
+        fallback = _temp_cwd_candidate()
+        if _make_private_dir(fallback):
+            return str(fallback)
+    except OSError:
+        pass
+    with _mkdtemp_lock:
+        if _mkdtemp_cwd is None or not os.path.isdir(_mkdtemp_cwd):
+            _mkdtemp_cwd = tempfile.mkdtemp(prefix="leetcoach-claude-cwd-")
+        return _mkdtemp_cwd
 
 
 def build_argv(
