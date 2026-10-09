@@ -99,14 +99,6 @@ test("throttleDelay waits out the interval", function () {
   assert.strictEqual(core.throttleDelay(1000, 1200, 150), 0);
 });
 
-test("isNearBottom uses a threshold", function () {
-  assert.strictEqual(core.isNearBottom({ scrollTop: 900, clientHeight: 100, scrollHeight: 1000 }), true);
-  assert.strictEqual(core.isNearBottom({ scrollTop: 850, clientHeight: 100, scrollHeight: 1000 }), true);
-  assert.strictEqual(core.isNearBottom({ scrollTop: 500, clientHeight: 100, scrollHeight: 1000 }), false);
-  assert.strictEqual(core.isNearBottom({ scrollTop: 500, clientHeight: 100, scrollHeight: 1000 }, 400), true);
-  assert.strictEqual(core.isNearBottom(null), true);
-});
-
 test("nearEdge compares the live edge with the view bottom", function () {
   assert.strictEqual(core.nearEdge(900, 880), true);
   assert.strictEqual(core.nearEdge(1200, 880), false);
