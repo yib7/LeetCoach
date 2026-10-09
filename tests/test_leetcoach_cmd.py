@@ -63,7 +63,7 @@ def _stage(tmp_path, *, marker_present=False):
     return stage
 
 
-def _run(stage, extra_env=None):
+def _run(stage, extra_env=None, *, cwd=None):
     env = dict(os.environ)
     if extra_env:
         env.update(extra_env)
@@ -73,10 +73,52 @@ def _run(stage, extra_env=None):
         text=True,
         check=False,
         timeout=30,
-        cwd=str(stage),
+        cwd=str(cwd or stage),
         env=env,
         stdin=subprocess.DEVNULL,
     )
+
+
+# --- 3A S7: a repo folder whose path contains "!" ---------------------------
+# With EnableDelayedExpansion on, cmd.exe strips "!" out of an expanded
+# %~dp0, so `cd /d "%~dp0"` and "%~dp0setup.ps1" pointed at a path that does
+# not exist ("The system cannot find the path specified"). Run from an
+# unrelated cwd (like a desktop shortcut) so a failed `cd` can't be masked.
+
+_LOUD_AUTH_PS1 = 'Write-Host "FAKE AUTH RAN"\nexit 0\n'
+
+
+def _bang_stage(tmp_path, **kw):
+    stage = _stage(tmp_path / "lee!t", **kw)
+    (stage / "scripts" / "ensure-claude-auth.ps1").write_text(_LOUD_AUTH_PS1, encoding="utf-8")
+    return stage
+
+
+def test_launcher_runs_setup_and_auth_from_a_path_containing_a_bang(tmp_path):
+    stage = _bang_stage(tmp_path, marker_present=False)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    result = _run(stage, cwd=elsewhere)
+    out = result.stdout + result.stderr
+    assert "FAKE SETUP RAN" in result.stdout, out
+    assert "FAKE AUTH RAN" in result.stdout, out
+    assert "-File parameter does not exist" not in out
+    assert (stage / ".venv" / ".setup-ok").exists()
+
+
+def test_launcher_starts_the_app_from_a_path_containing_a_bang(tmp_path, fake_python_exe):
+    stage = _bang_stage(tmp_path, marker_present=True)
+    scripts_dir = stage / ".venv" / "Scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(fake_python_exe, scripts_dir / "python.exe")
+    (stage / "app.py").write_text("# unused by the fake python.exe\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    result = _run(stage, extra_env={"FAKE_APP_EXIT_CODE": "0"}, cwd=elsewhere)
+    out = result.stdout + result.stderr
+    assert "FAKE AUTH RAN" in result.stdout, out
+    assert "FAKE APP RAN" in result.stdout, out
+    assert "exited with an error" not in result.stdout
 
 
 # --- marker-gated re-run of setup (B9) --------------------------------------
