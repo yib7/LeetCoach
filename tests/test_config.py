@@ -321,3 +321,23 @@ def test_resolve_run_model_keeps_a_pinned_id_for_its_own_alias(monkeypatch):
     assert config.resolve_run_model("sonnet") == "claude-sonnet-4-5"
     assert config.resolve_run_model("haiku") == "haiku"
     assert config.resolve_run_model("") == ""
+
+
+# --- 3A C10: an empty (or blank) knob means "unset" ---------------------------
+
+@pytest.mark.parametrize("value", ["", "   ", "\t"])
+@pytest.mark.parametrize("env_var, getter, default", [
+    ("LEETCOACH_MODEL", config.model, config.DEFAULT_MODEL),
+    ("LEETCOACH_CLASSIFIER_MODEL", config.classifier_model, config.DEFAULT_CLASSIFIER_MODEL),
+    ("LEETCOACH_QUICK_ASK_MODEL", config.quick_ask_model, config.DEFAULT_QUICK_ASK_MODEL),
+    ("LEETCOACH_CLAUDE_BIN", config.claude_bin, config.DEFAULT_CLAUDE_BIN),
+])
+def test_blank_string_knobs_fall_back_to_their_default(monkeypatch, env_var, getter, default, value):
+    # `LEETCOACH_MODEL=` in .env used to reach argv as `--model ""`.
+    monkeypatch.setenv(env_var, value)
+    assert getter() == default
+
+
+def test_string_knobs_are_stripped(monkeypatch):
+    monkeypatch.setenv("LEETCOACH_MODEL", "  sonnet  ")
+    assert config.model() == "sonnet"
