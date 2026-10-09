@@ -247,6 +247,32 @@ def test_result_text_is_a_last_resort_fallback_only():
     assert _deltas(with_text) == ["x"]  # never double-counted
 
 
+# --- 3A C9: a pathologically nested line never escapes as RecursionError -------
+
+_DEEP_RESULT_LINE = '{"type": "result", "x": ' + "[" * 200_000 + "]" * 200_000 + "}"
+
+
+def test_is_result_line_survives_a_deeply_nested_line():
+    assert claude_cli._is_result_line(_DEEP_RESULT_LINE) is False
+
+
+def test_real_runner_survives_a_deeply_nested_result_line(tmp_path):
+    deep = tmp_path / "deep.txt"
+    deep.write_text(_DEEP_RESULT_LINE, encoding="utf-8")
+    script = (
+        "import sys\n"
+        "sys.stdin.read()\n"
+        f"sys.stdout.write(open({str(deep)!r}, encoding='utf-8').read() + '\\n')\n"
+        f"sys.stdout.write({_text_line('ok')!r} + '\\n')\n"
+        "sys.stdout.write('{\"type\": \"result\", \"result\": \"ok\"}\\n')\n"
+    )
+
+    def runner(argv, stdin_text, **kwargs):
+        return claude_cli._real_runner([sys.executable, "-c", script], stdin_text, **kwargs)
+
+    assert "".join(claude_cli.run("x", runner=runner, flags=frozenset())) == "ok"
+
+
 # --- B3: odd shapes never crash ----------------------------------------------
 
 ODD_LINES = [

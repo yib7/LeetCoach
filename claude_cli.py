@@ -832,7 +832,7 @@ def _is_result_line(line: str) -> bool:
         return False
     try:
         obj = json.loads(line)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):  # 3A C9: absurd nesting
         return False
     return isinstance(obj, dict) and obj.get("type") == "result"
 
