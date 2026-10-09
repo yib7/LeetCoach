@@ -431,9 +431,8 @@ def test_posix_os_lock_polls_non_blocking_until_the_deadline(root, monkeypatch):
     monkeypatch.setitem(sys.modules, "fcntl", fake)
     monkeypatch.setattr(ps, "_WINDOWS", False)
     monkeypatch.setattr(ps, "_LOCK_TIMEOUT", 0.2)
-    with open(root / "x.lock", "a+b") as fh:
-        with pytest.raises(OSError):
-            ps._os_lock(fh)
+    with open(root / "x.lock", "a+b") as fh, pytest.raises(OSError):
+        ps._os_lock(fh)
     assert len(fake.calls) > 1
     assert all(op == fake.LOCK_EX | fake.LOCK_NB for op in fake.calls)
 
