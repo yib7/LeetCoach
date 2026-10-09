@@ -517,6 +517,13 @@ def _kill_claude_tree(proc: subprocess.Popen, job=None, *, pid_ok: bool = True) 
     ``pid_ok=False`` (SP2 I2) skips the pid-based kills - the child was
     already reaped, so its pid / process-group id may belong to an unrelated
     process by now; only the job (still open, the caller guarantees) is used.
+
+    The order is deliberate (3A C14 reviewed it): taskkill runs BEFORE the
+    instant job kill. The npm ``cmd.exe`` shim can start ``node`` in the gap
+    between Popen and the job assignment, leaving node OUTSIDE the job; only
+    ``taskkill /T`` reaches it, and only while the shim is still alive for it
+    to walk from. Terminating the job first would kill the shim and orphan
+    exactly that node.
     """
     if pid_ok:
         with contextlib.suppress(Exception):  # keep going with the other mechanisms
