@@ -12,6 +12,8 @@ interpreter as a harmless stand-in.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sys
 from pathlib import Path
 
@@ -205,6 +207,74 @@ def test_real_help_probe_is_bounded_and_decodes_utf8(monkeypatch):
     )
     text = claude_cli._run_bounded([sys.executable, "-c", script], timeout=20)[1]
     assert "--safe-mode" in text and "\u0101" in text
+
+
+# --- API-billing env vars are withheld (3A C1) --------------------------------
+
+# Every variable that would switch Claude Code from the subscription login to
+# API-credit billing. Obvious placeholders only - never a real-looking key.
+_BILLING_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+)
+_PLACEHOLDER = "test-placeholder"
+_ENV_DUMP = "import json, os, sys\nsys.stdin.read()\nprint(json.dumps(dict(os.environ)))\n"
+
+
+def _set_billing_env(monkeypatch):
+    for name in _BILLING_VARS:
+        monkeypatch.setenv(name, _PLACEHOLDER)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9/" + _PLACEHOLDER)
+    monkeypatch.setattr(claude_cli, "_withheld_logged", False)
+
+
+def _assert_child_env_scrubbed(env):
+    for name in _BILLING_VARS:
+        assert name not in env, f"{name} leaked into the claude child"
+    # everything else is inherited untouched
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9/" + _PLACEHOLDER
+    assert env.get("PATH")
+
+
+def test_real_runner_withholds_api_billing_env_vars(monkeypatch):
+    _set_billing_env(monkeypatch)
+    lines = list(claude_cli._real_runner([sys.executable, "-c", _ENV_DUMP], ""))
+    _assert_child_env_scrubbed(json.loads(lines[-1]))
+    # the app's own environment is not modified
+    assert all(os.environ[name] == _PLACEHOLDER for name in _BILLING_VARS)
+
+
+def test_bounded_probe_runner_withholds_api_billing_env_vars(monkeypatch):
+    # _run_bounded serves both the `--help` and the `auth status` probes.
+    _set_billing_env(monkeypatch)
+    returncode, out = claude_cli._run_bounded([sys.executable, "-c", _ENV_DUMP], timeout=20)
+    assert returncode == 0
+    _assert_child_env_scrubbed(json.loads(out))
+
+
+def test_withheld_env_vars_are_logged_once_by_name_only(monkeypatch, caplog):
+    _set_billing_env(monkeypatch)
+    with caplog.at_level(logging.INFO, logger="claude_cli"):
+        claude_cli.child_env()
+        claude_cli.child_env()
+    records = [r for r in caplog.records if r.name == "claude_cli"]
+    assert len(records) == 1, "the withheld-vars notice must be logged once per process"
+    message = records[0].getMessage()
+    for name in _BILLING_VARS:
+        assert name in message
+    assert _PLACEHOLDER not in message, "a withheld value must never be logged"
+
+
+def test_child_env_is_silent_when_nothing_is_withheld(monkeypatch, caplog):
+    for name in _BILLING_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(claude_cli, "_withheld_logged", False)
+    with caplog.at_level(logging.INFO, logger="claude_cli"):
+        env = claude_cli.child_env()
+    assert env.get("PATH")
+    assert not [r for r in caplog.records if r.name == "claude_cli"]
 
 
 # --- neutral cwd ------------------------------------------------------------
