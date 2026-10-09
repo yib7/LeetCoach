@@ -1,18 +1,19 @@
 # Exact, reproducible dependency pins (runtime + dev), generated with `pip freeze`
-# in a clean venv. For a normal install use requirements.txt / requirements-dev.txt;
+# in a clean venv (Python 3.14, 2026-10-09; `pip check` clean, also installs clean on 3.12).
+# For a normal install use requirements.txt / requirements-dev.txt;
 # use this file when you want the precise versions development/CI ran against.
 Flask==3.1.3
 Jinja2==3.1.6
-MarkupSafe==3.0.3
+MarkupSafe==3.0.4
 Pygments==2.21.0
-Werkzeug==3.1.8
+Werkzeug==3.1.9
 blinker==1.9.0
 click==8.5.0
-colorama==0.4.6
-iniconfig==2.3.0
+colorama==0.4.6 ; platform_system == "Windows"  # click needs it on Windows only
+iniconfig==2.3.1
 itsdangerous==2.2.0
 packaging==26.3
 pluggy==1.6.0
 pytest==9.1.1
-python-dotenv==1.2.3
-ruff==0.15.22
+python-dotenv==1.2.4
+ruff==0.16.10
