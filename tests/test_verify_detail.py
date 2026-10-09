@@ -177,6 +177,36 @@ def test_timed_out_sample_note_lands_in_saved_md(tmp_path, monkeypatch):
     assert "timed out" in saved.lower()
 
 
+# --- Phase 4: the saved traceback names solution.py, not the temp run dir ---
+
+CRASHING_ANSWER = (
+    "Reasoning: this one crashes.\n\n"
+    "```python\n"
+    "def solve():\n"
+    "    raise ValueError('crash marker')\n"
+    "solve()\n"
+    "```\n\n"
+    "Complexity: O(1).\n"
+)
+
+
+def test_saved_traceback_does_not_leak_the_temp_run_dir(tmp_path, monkeypatch):
+    # The library is the user's to share; a saved doc must not carry the
+    # absolute temp path (and with it the OS user name) of the sandbox run.
+    import sandbox
+
+    c = _make_client(tmp_path, monkeypatch, CRASHING_ANSWER)
+    resp = _post_run(c, "answer")
+    assert resp.status_code == 200
+    resp.get_data(as_text=True)
+
+    saved = _saved_md(tmp_path, "answers")
+    assert "crash marker" in saved  # the stderr is still there...
+    assert 'File "solution.py", line 2' in saved  # ...naming just the script
+    assert sandbox._RUN_DIR_PREFIX not in saved
+    assert __import__("tempfile").gettempdir() not in saved
+
+
 # --- P2-13: extract_code runs exactly once per run --------------------------
 
 @pytest.mark.parametrize(
