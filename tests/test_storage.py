@@ -147,6 +147,20 @@ def test_pastes_starting_with_description_save_to_their_own_files(out_root):
     assert Path(b).name == "three_sum.md"
 
 
+# --- 3A S5: a CRLF body re-saves idempotently, without doubled CRs ------------
+
+def test_crlf_body_is_saved_once_and_rerun_reuses_the_slot(out_root):
+    body = "# Review\r\n\r\n```python\r\nprint(1)\r\n```\r\n"
+    first = storage.save_review("Two Sum", "hashing", body)
+    again = storage.save_review("Two Sum", "hashing", body)
+    assert first == again
+    raw = Path(first).read_bytes()
+    assert b"\r\r" not in raw
+    assert Path(first).read_text(encoding="utf-8") == body.replace("\r\n", "\n")
+    # the LF form of the same body is the same content, too
+    assert storage.save_review("Two Sum", "hashing", body.replace("\r\n", "\n")) == first
+
+
 # --- regression: a full pasted problem must not blow past the path limit -----
 
 def test_save_answer_full_problem_paste_stays_short(out_root):

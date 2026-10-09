@@ -218,6 +218,28 @@ def test_write_many_rollback_never_unlinks_a_file_it_could_not_back_up(tmp_path,
     assert _tmp_leftovers(tmp_path) == []
 
 
+# --- 3A S5: CRLF / lone CR in the text never doubles up ---------------------------
+
+@pytest.mark.parametrize("text", ["a\r\nb\n", "a\rb\n", "a\nb\r\n", "a\r\n\rb\r"])
+def test_text_line_endings_are_normalised_before_translation(tmp_path, text):
+    target = tmp_path / "doc.md"
+    fsutil.atomic_write_text(target, text)
+    lines = text.replace("\r\n", "\n").replace("\r", "\n")
+    assert target.read_bytes() == lines.replace("\n", os.linesep).encode("utf-8")
+    assert b"\r\r" not in target.read_bytes()
+    fsutil.atomic_write_text(target, text, newline="\n")
+    assert target.read_bytes() == lines.encode("utf-8")
+    fsutil.atomic_write_text(target, text, newline="\r\n")
+    assert target.read_bytes() == lines.replace("\n", "\r\n").encode("utf-8")
+
+
+def test_write_many_normalises_line_endings_too(tmp_path):
+    a, b = tmp_path / "s.py", tmp_path / "s.md"
+    fsutil.atomic_write_many([(a, "x\r\ny\n"), (b, "p\rq")], newline="\r\n")
+    assert a.read_bytes() == b"x\r\ny\r\n"
+    assert b.read_bytes() == b"p\r\nq"
+
+
 # --- SP4 review M5/M6/M7 ---------------------------------------------------------
 
 def test_worst_case_wait_matches_the_real_backoff_schedule(monkeypatch, tmp_path):

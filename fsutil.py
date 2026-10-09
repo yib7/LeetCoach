@@ -160,6 +160,11 @@ def _replace_with_retry(tmp: Path, target: Path, *, retries: int, backoff: float
 
 def _encode(text: str, encoding: str, newline: str | None) -> bytes:
     # ``newline=None`` mirrors ``Path.write_text``: "\n" becomes os.linesep.
+    # 3A S5: line endings are normalised to "\n" FIRST (a "\r\n" pair and a
+    # lone "\r" alike), so text that already carries CRLF - code posted with
+    # CRLF to Code Review - is not written as "\r\r\n" on Windows, and reads
+    # back (universal newlines) exactly like its LF form.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     if newline is None:
         newline = os.linesep
     if newline != "\n":
@@ -199,7 +204,8 @@ def atomic_write_text(
 
     ``newline=None`` (the default) translates ``"\\n"`` to the platform line
     ending exactly like ``Path.write_text``, so files written before this
-    helper existed compare equal on re-read.
+    helper existed compare equal on re-read. Any ``"\\r\\n"`` / lone ``"\\r"``
+    in ``text`` counts as a ``"\\n"`` first (3A S5), whatever ``newline`` is.
     """
     return atomic_write_bytes(
         path, _encode(text, encoding, newline), retries=retries, backoff=backoff
