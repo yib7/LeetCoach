@@ -506,6 +506,26 @@ def _final_exception_line(lines: list) -> str | None:
     return lines[-1] if lines else None
 
 
+# CPython 3.12/3.13 also count C-level calls (each functools.cache /
+# lru_cache hop is one) against a fixed C recursion limit that
+# sys.setrecursionlimit and a big thread stack do not raise: about 1000
+# cached levels on Windows. 3.14 replaced it with a stack-based check.
+_C_RECURSION_CAPPED = sys.version_info < (3, 14)
+_RECURSION_HINT = (
+    "RecursionError: if the recursion goes through functools.cache / lru_cache, "
+    f"Python {sys.version_info[0]}.{sys.version_info[1]} caps it at a fixed C-level depth "
+    "that sys.setrecursionlimit does not raise; Python 3.14 does not"
+)
+
+
+def _with_recursion_hint(note: str, stderr: str) -> str:
+    """``note`` plus why a RecursionError may be the interpreter's C limit
+    rather than a bug, on the versions that have one."""
+    if _C_RECURSION_CAPPED and "RecursionError" in (stderr or ""):
+        return f"{note} ({_RECURSION_HINT})"
+    return note
+
+
 def _exit_note(returncode: int, stderr: str) -> str:
     """The note for a nonzero exit of the SOLUTION: "blocked by sandbox
     (<what>)" when the audit hook's PermissionError is what ended the run,
@@ -521,6 +541,8 @@ def _exit_note(returncode: int, stderr: str) -> str:
         if m.group("why"):
             what += f": {m.group('why')}"
         return f"blocked by sandbox ({what})"
+    if last and last.startswith("RecursionError"):
+        return _with_recursion_hint(f"exited with code {returncode}", last)
     return f"exited with code {returncode}"
 
 
@@ -1030,7 +1052,7 @@ def verify_python(
         ok = _outputs_match(stdout, expected_stdout, problem_text)
         return VerifyResult(
             status="pass" if ok else "fail",
-            note="output matched" if ok else "output differed",
+            note="output matched" if ok else _with_recursion_hint("output differed", stderr),
             samples_total=1,
             samples_passed=1 if ok else 0,
             detail=[{
