@@ -622,7 +622,7 @@ def _verification_line(result) -> str:
     """A short one-line human verdict for the stream + saved markdown, derived
     from a ``sandbox.VerifyResult``."""
     status = getattr(result, "status", "not_verified")
-    note = getattr(result, "note", "") or ""
+    note = practice.strip_run_dir(getattr(result, "note", "") or "")
     if status == "pass":
         return f"✓ Sample tests PASS ({note})" if note else "✓ Sample tests PASS"
     if status == "fail":
@@ -950,13 +950,15 @@ def _verification_detail(result) -> str:
         # error paths (timeout, couldn't launch) have a note but no captured
         # stdout at all, and it used to be dropped entirely, leaving the user
         # with "errored 1/1" and no explanation.
-        note = str(entry.get("note") or "").strip()
+        note = practice.strip_run_dir(str(entry.get("note") or "")).strip()
         if note:
             lines += [note, ""]
         for label, key in (("Input", "stdin"), ("Expected", "expected"), ("Got", "stdout")):
             value = str(entry.get(key, "")).rstrip("\n")
             lines += [f"{label}:", "```", value, "```"]
-        stderr = str(entry.get("stderr") or "").rstrip("\n")
+        # Phase 4: the saved doc is the user's to share, so a traceback names
+        # `solution.py`, not the temp run dir (and the OS user name in it).
+        stderr = practice.strip_run_dir(str(entry.get("stderr") or "")).rstrip("\n")
         if stderr:
             lines += ["Stderr:", "```", stderr, "```"]
         blocks.append("\n".join(lines))
