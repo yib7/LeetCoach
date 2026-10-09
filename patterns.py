@@ -162,10 +162,6 @@ def normalize_pattern(raw, topics=()) -> str:
     return FALLBACK
 
 
-def is_pattern(value) -> bool:
-    return isinstance(value, str) and value in PATTERNS
-
-
 def sanitize_topic(value) -> str | None:
     """One topic reduced to ``[a-z0-9 _+-]``, whitespace collapsed, at most
     :data:`TOPIC_MAX_LEN` chars; ``None`` if nothing usable remains."""
