@@ -124,12 +124,6 @@ test("model text stays text: a heading with markup-looking text is moved, not re
   assert.strictEqual(details.children[1].textContent, "<b>x</b>");
 });
 
-test("isGuidedPath picks Guided docs in the library", function () {
-  assert.strictEqual(core.isGuidedPath("guided/hash_map/two_sum.md"), true);
-  assert.strictEqual(core.isGuidedPath("answers/hash_map/two_sum__normal.md"), false);
-  assert.strictEqual(core.isGuidedPath(""), false);
-});
-
 // ---- D1: the Diff column ----------------------------------------------------------
 test("diffInfo maps difficulties to the table's classes", function () {
   assert.deepStrictEqual(core.diffInfo("Easy"), { cls: "easy", label: "Easy" });

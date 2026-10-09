@@ -20,22 +20,19 @@ test("docCandidatesFor: solutions newest first, then other modes, then record ru
   assert.deepStrictEqual(core.docCandidatesFor(REC), [
     "guided/h/1.md", "answers/h/1.md", "learning/h_learning/1.md", "reviews/h/1.md",
   ]);
-  assert.strictEqual(core.latestDocFor(REC), "guided/h/1.md");  // unchanged default
 });
 
 test("docCandidatesFor skips docs missing from the library listing (map or array)", function () {
   var listing = { "answers/h/1.md": { path: "answers/h/1.md" }, "answers/h/1.py": {} };
   assert.deepStrictEqual(core.docCandidatesFor(REC, listing), ["answers/h/1.md"]);
-  assert.strictEqual(core.latestDocFor(REC, listing), "answers/h/1.md");
   var arr = [{ path: "learning/h_learning/1.md" }, "reviews/h/1.md"];
   assert.deepStrictEqual(core.docCandidatesFor(REC, arr),
     ["learning/h_learning/1.md", "reviews/h/1.md"]);
 });
 
-test("every doc deleted: no candidate, latestDocFor is empty (no 404 fetch)", function () {
+test("every doc deleted: no candidate (no 404 fetch)", function () {
   assert.deepStrictEqual(core.docCandidatesFor(REC, {}), []);
-  assert.strictEqual(core.latestDocFor(REC, {}), "");
-  assert.strictEqual(core.latestDocFor(REC, []), "");
+  assert.deepStrictEqual(core.docCandidatesFor(REC, []), []);
   // a key inherited from Object.prototype is not a library file
   assert.deepStrictEqual(core.docCandidatesFor({ runs: ["constructor.md"] }, {}), []);
 });

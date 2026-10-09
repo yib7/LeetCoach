@@ -232,13 +232,6 @@
     return wait > 0 ? wait : 0;
   }
 
-  // D11: is a scroll container (close enough to) the bottom?
-  function isNearBottom(box, threshold) {
-    if (!box) return true;
-    threshold = threshold == null ? 80 : threshold;
-    return box.scrollHeight - (box.scrollTop + box.clientHeight) <= threshold;
-  }
-
   // D11: is a live edge (the bottom of the streamed output, in viewport px)
   // within `threshold` px of the visible bottom of its scroll container?
   function nearEdge(edgeBottom, viewBottom, threshold) {
@@ -596,9 +589,6 @@
     });
     return targets.length;
   }
-  function isGuidedPath(p) {
-    return /^guided\//.test(String(p || ""));
-  }
 
   // ---- tier + display titles (SP6 fix O2 / O3) ------------------------------------
   // The code-quality tier is an Answer concept: Guided and Learning docs never
@@ -771,9 +761,6 @@
       seen[p] = 1;
       return !has || Object.prototype.hasOwnProperty.call(has, p);
     });
-  }
-  function latestDocFor(record, existing) {
-    return docCandidatesFor(record, existing)[0] || "";
   }
 
   // "Test my code" per-case / overall status -> label + style.
@@ -1036,12 +1023,10 @@
     phaseText: phaseText,
     hasOpenFence: hasOpenFence,
     throttleDelay: throttleDelay,
-    isNearBottom: isNearBottom,
     nearEdge: nearEdge,
     libRelPath: libRelPath,
     verdictFromLine: verdictFromLine,
     verdictInfo: verdictInfo,
-    CODE_EXT: CODE_EXT,
     splitRunName: splitRunName,
     deriveRuns: deriveRuns,
     runSiblings: runSiblings,
@@ -1053,7 +1038,6 @@
     applyReveals: applyReveals,
     tierApplies: tierApplies,
     problemTitle: problemTitle,
-    isGuidedPath: isGuidedPath,
     summaryActions: summaryActions,
     modKey: modKey,
     nextFocusIndex: nextFocusIndex,
@@ -1067,7 +1051,6 @@
     daysBetween: daysBetween,
     dueLabel: dueLabel,
     plural: plural,
-    latestDocFor: latestDocFor,
     docCandidatesFor: docCandidatesFor,
     caseInfo: caseInfo,
     starterCode: starterCode,

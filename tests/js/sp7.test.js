@@ -45,19 +45,19 @@ test("dueLabel across month ends and bad input", function () {
   assert.strictEqual(core.daysBetween("2026-10-01", "nope"), null);
 });
 
-test("latestDocFor prefers the newest Answer/Guided doc", function () {
+test("docCandidatesFor puts the newest Answer/Guided doc first", function () {
   var rec = { log: [
     { ts: "2026-10-01T10:00:00", mode: "answer", files: ["answers/h/1.py", "answers/h/1.md"] },
     { ts: "2026-10-03T10:00:00", mode: "learning", files: ["learning/h_learning/1.md"] },
     { ts: "2026-10-02T10:00:00", mode: "guided", files: ["guided/h/1.md"] },
   ] };
-  assert.strictEqual(core.latestDocFor(rec), "guided/h/1.md");
+  assert.strictEqual(core.docCandidatesFor(rec)[0], "guided/h/1.md");
   var learnOnly = { log: [{ ts: "1", mode: "learning", files: ["learning/a.md"] },
     { ts: "2", mode: "review", files: ["reviews/a.md"] }] };
-  assert.strictEqual(core.latestDocFor(learnOnly), "reviews/a.md");
-  assert.strictEqual(core.latestDocFor({ runs: ["a.py", "a.md", "b.md"] }), "b.md");
-  assert.strictEqual(core.latestDocFor({}), "");
-  assert.strictEqual(core.latestDocFor(null), "");
+  assert.strictEqual(core.docCandidatesFor(learnOnly)[0], "reviews/a.md");
+  assert.strictEqual(core.docCandidatesFor({ runs: ["a.py", "a.md", "b.md"] })[0], "b.md");
+  assert.deepStrictEqual(core.docCandidatesFor({}), []);
+  assert.deepStrictEqual(core.docCandidatesFor(null), []);
 });
 
 test("caseInfo maps statuses, unknown -> not run", function () {
