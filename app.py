@@ -163,6 +163,13 @@ RUN_SIBLING_EXTENSIONS = (".md", ".py", ".cpp", ".java", ".txt")
 QUICK_ASK_MAX_QUESTION = 500
 QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
 
+# Phase 4 abuse cap: every /run and Quick Ask spends the user's Claude
+# subscription. A tab streams one run at a time, so a handful of tabs fit
+# under these; a runaway script or retry loop does not. Past the cap the
+# request is a 429 and nothing is started. Read at call time (tests lower it).
+MAX_CONCURRENT_RUNS = 4
+MAX_CONCURRENT_ASKS = 4
+
 # SP8 / D6: a follow-up question on a saved doc. Longer than a Quick Ask (it
 # can quote a line of the doc or some code) but still a question, not a paste.
 FOLLOWUP_MAX_QUESTION = 2000
@@ -1005,6 +1012,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     _inflight_runs: dict = {}
     _runs: dict = {}
     _asks: dict = {}  # B20: ask_id -> [call or None, cancelled Event] for /ask/cancel
+    _asks_running = [0]  # Phase 4: Quick Asks in flight, for MAX_CONCURRENT_ASKS
     _attempts: dict = {}  # SP7: test_id -> cancel Event for /attempt/cancel
     _attempt_slot = threading.Lock()  # SP7: one "Test my code" run at a time
     # SP7 fix 6: the running test's cancel Event. A test cancelled (e.g. the
@@ -1556,6 +1564,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 return jsonify(
                     {"error": "An identical run is already in progress."}
                 ), 409
+            if len(_runs) >= MAX_CONCURRENT_RUNS:
+                return jsonify({"error": (
+                    f"{MAX_CONCURRENT_RUNS} runs are already in progress. Wait for "
+                    "one to finish (or stop one) and try again.")}), 429
             _inflight_runs[run_key] = run_id
             _runs[run_id] = state
 
@@ -2070,8 +2082,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # it and sets the flag instead of 404-ing; the call itself is filled
         # in (and cancelled, if the flag is already set) once run_fn returns.
         entry = [None, cancelled]
-        if ask_id:
-            with _inflight_lock:
+        with _inflight_lock:
+            if _asks_running[0] >= MAX_CONCURRENT_ASKS:
+                return jsonify({"error": (
+                    f"{MAX_CONCURRENT_ASKS} Quick Asks are already in progress. "
+                    "Wait for one to answer and try again.")}), 429
+            _asks_running[0] += 1
+            if ask_id:
                 _asks[ask_id] = entry
         try:
             try:
@@ -2088,10 +2105,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     return jsonify({"error": "Quick Ask cancelled."}), 409
                 answer = "".join(call).strip()
             finally:
-                if ask_id:
-                    with _inflight_lock:
-                        if _asks.get(ask_id) is entry:
-                            del _asks[ask_id]
+                with _inflight_lock:
+                    _asks_running[0] -= 1
+                    if ask_id and _asks.get(ask_id) is entry:
+                        del _asks[ask_id]
         except Exception as exc:  # noqa: BLE001 - a clean 502, logged by _log_failure
             if cancelled.is_set():
                 return jsonify({"error": "Quick Ask cancelled."}), 409
