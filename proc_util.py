@@ -69,6 +69,44 @@ def kill_process_tree(proc: subprocess.Popen[str], *, group: bool = False) -> bo
     return False
 
 
+def child_exited_unreaped(pid: int) -> bool | None:
+    """POSIX: has our child ``pid`` exited? Asked WITHOUT reaping it
+    (``waitid`` + ``WNOWAIT``), so its pid - and, for a child started with
+    ``start_new_session``, its process-group id - stays reserved until the
+    caller reaps it (3A C3).
+
+    ``True`` once it exited (a zombie), ``False`` while it runs, ``None`` when
+    this cannot be told without reaping: no ``waitid``/``WNOWAIT`` (Windows,
+    macOS before Python 3.13) or the pid is not an unreaped child of ours.
+    Never raises.
+    """
+    waitid = getattr(os, "waitid", None)
+    wnowait = getattr(os, "WNOWAIT", None)
+    if waitid is None or wnowait is None:
+        return None
+    try:
+        info = waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | wnowait)
+    except OSError:  # ChildProcessError: already reaped / not ours
+        return None
+    return info is not None  # None: WNOHANG and nothing exited yet
+
+
+def kill_process_group(pgid: int) -> bool:
+    """POSIX: SIGKILL every process in group ``pgid`` (3A C3). Only for the
+    group of a child you started with ``start_new_session`` and whose pid is
+    still reserved (alive, an unreaped zombie, or a group with members left).
+    True if the signal was sent; a group that is already gone, or one we may
+    not signal, is tolerated. Never raises."""
+    killpg = getattr(os, "killpg", None)
+    if killpg is None:
+        return False
+    try:
+        killpg(pgid, getattr(signal, "SIGKILL", 9))
+    except OSError:  # ProcessLookupError / PermissionError
+        return False
+    return True
+
+
 # --- Windows Job Object caps (audit6 P1-2 step 2) --------------------------
 #
 # ALL ctypes machinery — imports, structure definitions, kernel32 bindings —
