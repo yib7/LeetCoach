@@ -25,11 +25,18 @@ KNOWN_SETTINGS = [
     "LEETCOACH_NO_BROWSER",
     "LEETCOACH_NO_DOTENV",
     "LEETCOACH_CLAUDE_CWD",
+    "LEETCOACH_DOTENV_PATH",
 ]
 
 # Settings whose default is computed relative to the app (or otherwise
 # footgun-y to set verbatim) and so must ship commented out.
-PATH_SETTINGS = {"LEETCOACH_OUTPUT_DIR", "LEETCOACH_TOPIC_INDEX", "LEETCOACH_CLAUDE_CWD"}
+PATH_SETTINGS = {"LEETCOACH_OUTPUT_DIR", "LEETCOACH_TOPIC_INDEX", "LEETCOACH_CLAUDE_CWD",
+                 "LEETCOACH_DOTENV_PATH"}
+
+# Read outside the app's own settings (setup.ps1, the scripts/dev fake CLI):
+# documented as comments so .env.example covers every variable the repo reads.
+NON_APP_VARIABLES = ["LEETCOACH_SETUP_PYTHON_EXE", "FAKE_CLAUDE_DELAY", "FAKE_CLAUDE_FAIL",
+                     "FAKE_CLAUDE_PYTHON"]
 
 
 def _lines():
@@ -64,3 +71,12 @@ def test_non_path_settings_stay_active():
     for setting in set(KNOWN_SETTINGS) - PATH_SETTINGS - {"LEETCOACH_NO_BROWSER", "LEETCOACH_NO_DOTENV"}:
         active = [line for line in _lines() if re.match(rf"^{setting}=", line)]
         assert active, f"{setting} should be an active example line"
+
+
+def test_non_app_variables_are_mentioned_but_never_active():
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    missing = [v for v in NON_APP_VARIABLES if v not in text]
+    assert not missing, f"variables missing from .env.example: {missing}"
+    for var in NON_APP_VARIABLES:
+        active = [line for line in _lines() if re.match(rf"^{var}=", line)]
+        assert not active, f"{var} is not an app setting and must not be active: {active}"
