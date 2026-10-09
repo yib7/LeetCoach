@@ -258,6 +258,35 @@ def test_result_text_is_a_last_resort_fallback_only():
     assert _deltas(with_text) == ["x"]  # never double-counted
 
 
+# --- 3A C13: a surrogate pair split across two deltas -------------------------
+
+_RESULT_OK = json.dumps({"type": "result", "subtype": "success", "result": "x"})
+
+
+def test_surrogate_pair_split_across_deltas_is_rejoined():
+    out = _deltas([_text_line("smile \ud83d"), _text_line("\ude00 ok"), _RESULT_OK])
+    text = "".join(out)
+    assert text == "smile \U0001f600 ok"
+    text.encode("utf-8")  # saving it must not raise UnicodeEncodeError
+    assert all(chunk for chunk in out)
+
+
+def test_lone_surrogates_are_replaced_not_saved():
+    out = _deltas([_text_line("a\ude00b"), _text_line("end \ud83d"), _RESULT_OK])
+    text = "".join(out)
+    assert text == "a�bend �"
+    text.encode("utf-8")
+
+
+def test_lone_surrogate_in_the_complete_block_fallback_is_replaced():
+    lines = [
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "x\ud83d"}, {"type": "text", "text": "\ude00"}]}}),
+        _RESULT_OK,
+    ]
+    assert "".join(_deltas(lines)) == "x\U0001f600"
+
+
 # --- 3A C9: a pathologically nested line never escapes as RecursionError -------
 
 _DEEP_RESULT_LINE = '{"type": "result", "x": ' + "[" * 200_000 + "]" * 200_000 + "}"
