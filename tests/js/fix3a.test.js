@@ -65,7 +65,7 @@ var fs = require("fs");
 var APP = fs.readFileSync(path.join(__dirname, "..", "..", "static", "app.js"), "utf8");
 
 function fnBody(name) {
-  var start = APP.indexOf("  function " + name + "(");
+  var start = APP.indexOf("function " + name + "(");
   assert.ok(start !== -1, name + " not found in app.js");
   var end = APP.indexOf("\n  }\n", start);
   return APP.slice(start, end);
@@ -92,6 +92,12 @@ test("app.js: loadLibrary drops a stale listing; closeViewer and fuFinish respec
 });
 
 // ---- W8: clipChars -------------------------------------------------------------
+
+test("app.js: Quick Ask sends only the problem context the server reads", function () {
+  var body = fnBody("quickAsk");
+  assert.ok(/problem: core\.clipChars\(problemEl\.value\.trim\(\), QA_PROBLEM_CAP\)/.test(body), body);
+  assert.ok(/QA_PROBLEM_CAP = .*getAttribute\("data-problem-cap"\)/.test(APP));
+});
 
 test("clipChars keeps short text and clips long text to n characters", function () {
   assert.strictEqual(core.clipChars("abc", 5), "abc");

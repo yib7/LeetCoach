@@ -286,6 +286,28 @@ def test_json_routes_reject_a_deeply_nested_body(client, method, path):
     assert not [p for p in tmp_path.rglob("*") if p.is_file()]
 
 
+# --- 3A W8: an oversized body -> a JSON 413 the page can show -----------------
+
+@pytest.mark.parametrize("path", ["/run", "/ask", "/followup", "/attempt/test"])
+def test_oversized_body_is_a_json_413(client, path):
+    c, tmp_path = client
+    body = json.dumps({"problem": "x" * (2 * 1024 * 1024 + 10), "question": "q"})
+    resp = c.post(path, data=body, content_type="application/json")
+    assert resp.status_code == 413
+    assert resp.is_json
+    error = resp.get_json()["error"]
+    assert "too large" in error and "2 MB" in error
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+def test_quick_ask_problem_cap_is_published_to_the_page(client):
+    # the page trims Quick Ask's problem context to what /ask actually uses
+    c, _ = client
+    html = c.get("/").get_data(as_text=True)
+    assert f'data-problem-cap="{app_module.QUICK_ASK_PROBLEM_CONTEXT_CAP}"' in html
+    assert "__QUICK_ASK_PROBLEM_CONTEXT_CAP__" not in html
+
+
 # --- B24: no extracted code -> no empty code file lands in the library -----
 
 NO_CODE_ANSWER_MARKDOWN = (
