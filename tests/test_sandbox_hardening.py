@@ -435,6 +435,12 @@ def test_default_secret_paths_cover_claude_credentials_and_the_repo_env():
         os.path.join(home, ".claude.json"),
         os.path.join(home, ".ssh"),
         os.path.join(repo, ".env"),
+        # 3A S14b: package-registry, container, cluster and GPG credentials
+        os.path.join(home, ".npmrc"),
+        os.path.join(home, ".pypirc"),
+        os.path.join(home, ".docker", "config.json"),
+        os.path.join(home, ".kube"),
+        os.path.join(home, ".gnupg"),
     ):
         assert os.path.normcase(os.path.abspath(must)) in paths, must
 

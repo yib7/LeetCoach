@@ -226,8 +226,10 @@ def _secret_paths() -> list:
     Deliberately short: the Claude Code login/config (``~/.claude``,
     ``~/.claude.json``, ``$CLAUDE_CONFIG_DIR``), this repo's ``.env`` (plus the
     one ``LEETCOACH_DOTENV_PATH`` points at), SSH / cloud / git / GitHub CLI
-    credentials, and the Windows credential stores. Only paths are computed
-    here — nothing is ever opened.
+    credentials, package-registry / container / cluster / GPG credential
+    stores (``~/.npmrc``, ``~/.pypirc``, ``~/.docker/config.json``,
+    ``~/.kube``, ``~/.gnupg`` - 3A S14b), and the Windows credential stores.
+    Only paths are computed here — nothing is ever opened.
     """
     home = os.path.expanduser("~")
     paths = [
@@ -238,6 +240,11 @@ def _secret_paths() -> list:
         os.path.join(home, ".git-credentials"),
         os.path.join(home, ".netrc"),
         os.path.join(home, ".config", "gh"),
+        os.path.join(home, ".npmrc"),
+        os.path.join(home, ".pypirc"),
+        os.path.join(home, ".docker", "config.json"),
+        os.path.join(home, ".kube"),
+        os.path.join(home, ".gnupg"),
         os.path.join(_REPO_DIR, ".env"),
     ]
     for var in ("CLAUDE_CONFIG_DIR", "LEETCOACH_DOTENV_PATH"):
