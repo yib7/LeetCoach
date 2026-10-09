@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -193,6 +194,66 @@ def test_login_that_never_completes_still_lets_the_app_open(tmp_path):
     assert result.returncode == 0
     assert "still signed out" in result.stdout.lower()
     assert "auth login" in result.stdout.lower()
+
+
+# --- 3A S10: both waits on the (FAKE) claude CLI are bounded -----------------
+# A hung `claude auth status` or a login window left open must never block
+# app startup. The stubs below sleep via ping (never a real claude); the
+# timeouts are shortened through the script's own env-var overrides.
+
+_HANGING_STATUS_CLAUDE_CMD = r"""@echo off
+setlocal
+if "%~1"=="auth" if "%~2"=="status" goto :status
+if "%~1"=="auth" if "%~2"=="login" goto :login
+exit /b 1
+:status
+ping -n 60 127.0.0.1 >nul
+echo {"loggedIn": true}
+exit /b 0
+:login
+type nul > "%~dp0login_ran.marker"
+exit /b 0
+"""
+
+_HANGING_LOGIN_CLAUDE_CMD = r"""@echo off
+setlocal
+if "%~1"=="auth" if "%~2"=="status" goto :status
+if "%~1"=="auth" if "%~2"=="login" goto :login
+exit /b 1
+:status
+echo {"loggedIn": false}
+exit /b 0
+:login
+ping -n 15 127.0.0.1 >nul
+exit /b 0
+"""
+
+
+def test_hanging_auth_status_is_bounded_and_skips_login(tmp_path):
+    stub = tmp_path / "claude.cmd"
+    stub.write_text(_HANGING_STATUS_CLAUDE_CMD, encoding="ascii")
+    started = time.monotonic()
+    result = _run_ensure_script(stub, extra_env={"LEETCOACH_AUTH_STATUS_TIMEOUT_MS": "1000"})
+    elapsed = time.monotonic() - started
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert elapsed < 20, elapsed
+    # a status that could not be read in time is not "signed out": no login
+    # window is opened over it, and the app is told to start anyway
+    assert not (tmp_path / "login_ran.marker").exists()
+    assert "signing you in" not in result.stdout.lower()
+    assert "open anyway" in result.stdout.lower()
+
+
+def test_login_window_left_open_does_not_block_startup(tmp_path):
+    stub = tmp_path / "claude.cmd"
+    stub.write_text(_HANGING_LOGIN_CLAUDE_CMD, encoding="ascii")
+    started = time.monotonic()
+    result = _run_ensure_script(stub, extra_env={"LEETCOACH_AUTH_LOGIN_TIMEOUT_MS": "1000"})
+    elapsed = time.monotonic() - started
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert elapsed < 12, elapsed
+    assert "signing you in" in result.stdout.lower()
+    assert "auth login" in result.stdout.lower()  # the copy-paste fallback
 
 
 def test_missing_claude_binary_warns_and_exits_zero(tmp_path):
