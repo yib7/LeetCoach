@@ -258,3 +258,20 @@ def test_short_merged_notes_are_joined_unchanged(root):
     _write(root, "two_sum", notes="first")
     _write(root, "1-two_sum", number=1, notes="second")
     assert _merge(root)["notes"] == "first\n\nsecond"
+
+
+# --- 3A W3: GET /problems keeps only string aliases from a hand-edited record ------
+
+@pytest.mark.parametrize("raw,expected", [
+    ([{"x": 1}, "two_sum", 5, ["y"]], ["two_sum"]),
+    ("two_sum", []),
+    ({"two_sum": 1}, []),
+    (7, []),
+])
+def test_problems_listing_filters_non_string_aliases(root, application, raw, expected):
+    _write(root, "1-two_sum", number=1, aliases=raw)
+    resp = application.test_client().get("/problems")
+    assert resp.status_code == 200
+    (item,) = resp.get_json()["problems"]
+    assert item["aliases"] == expected
+    assert item["run_count"] == 0
