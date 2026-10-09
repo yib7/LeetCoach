@@ -109,8 +109,86 @@ def test_reading_stops_at_result_even_if_grandchild_holds_stdout(monkeypatch):
         assert exc is None, f"unexpected error: {exc!r}"
         assert elapsed < 15
         assert json.loads(lines[-1])["type"] == "result"
+        # 3A C3: the straggler does not outlive the run - the kill-on-close job
+        # (Windows) / a kill of the CLI's own process group (POSIX) ends it.
+        assert gpid is not None and wait_dead(gpid), "the stdout-holding helper survived"
     finally:
         _kill_pid(gpid)
+
+
+def test_helper_left_behind_by_a_normally_finished_run_is_killed(monkeypatch):
+    # 3A C3: the CLI exits 0 at EOF but leaves a helper that does NOT hold
+    # stdout (nothing kept the read open). It must still die with the run.
+    monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "60")
+    script = (
+        "import subprocess, sys\n"
+        "sys.stdin.read()\n"
+        "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(40)'],\n"
+        "                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+        "                     stderr=subprocess.DEVNULL)\n"
+        "sys.stdout.write('GRANDCHILD %d\\n' % g.pid)\n"
+        "sys.stdout.flush()\n"
+    )
+    lines, exc, elapsed, finished = _drive([sys.executable, "-c", script], "ping")
+    gpid = _grandchild_pid(lines)
+    try:
+        assert finished and exc is None, f"unexpected outcome: {exc!r}"
+        assert elapsed < 15
+        assert gpid is not None and wait_dead(gpid), "the leftover helper outlived the run"
+    finally:
+        _kill_pid(gpid)
+
+
+@pytest.mark.parametrize("peek", [True, None], ids=["waitid-wnowait", "no-wnowait"])
+def test_posix_group_cleanup_kills_the_cli_group_once_it_exited(monkeypatch, peek):
+    """3A C3, platform-independent: with the POSIX cleanup on, a finished run
+    kills the CLI's process group - before the reap when the exit can be seen
+    without reaping (``peek=True``), right after it otherwise (``None``)."""
+    monkeypatch.setattr(claude_cli, "_POSIX_GROUP_CLEANUP", True)
+    procs = []
+    real_popen = claude_cli.subprocess.Popen
+
+    def spy_popen(*args, **kwargs):
+        procs.append(real_popen(*args, **kwargs))
+        return procs[-1]
+
+    kills = []
+
+    def fake_kill_group(pgid):
+        kills.append((pgid, procs[0].returncode is not None))  # (group, reaped yet?)
+        return True
+
+    monkeypatch.setattr(claude_cli.subprocess, "Popen", spy_popen)
+    monkeypatch.setattr(claude_cli.proc_util, "child_exited_unreaped", lambda pid: peek)
+    monkeypatch.setattr(claude_cli.proc_util, "kill_process_group", fake_kill_group)
+    script = "import sys\nsys.stdin.read()\nprint('done')\n"
+    assert list(claude_cli._real_runner([sys.executable, "-c", script], "ping"))
+    pid = procs[0].pid  # the group leader the runner spawned
+    assert kills and all(pgid == pid for pgid, _ in kills), kills
+    if peek:
+        assert not any(reaped for _, reaped in kills), "group killed after the reap"
+    else:
+        assert kills == [(pid, True)], "exactly one kill, right after the reap"
+
+
+def test_proc_util_group_helpers_never_raise(monkeypatch):
+    import proc_util
+
+    def gone(*args):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(proc_util.os, "killpg", gone, raising=False)
+    assert proc_util.kill_process_group(12345) is False
+    monkeypatch.setattr(proc_util.os, "waitid", gone, raising=False)
+    monkeypatch.setattr(proc_util.os, "WNOWAIT", 0x1000000, raising=False)
+    monkeypatch.setattr(proc_util.os, "P_PID", 1, raising=False)
+    monkeypatch.setattr(proc_util.os, "WEXITED", 4, raising=False)
+    monkeypatch.setattr(proc_util.os, "WNOHANG", 1, raising=False)
+    assert proc_util.child_exited_unreaped(12345) is None
+    monkeypatch.setattr(proc_util.os, "waitid", lambda *a: None)
+    assert proc_util.child_exited_unreaped(12345) is False  # still running
+    monkeypatch.setattr(proc_util.os, "waitid", lambda *a: object())
+    assert proc_util.child_exited_unreaped(12345) is True
 
 
 def test_lingering_cli_after_result_is_killed_not_awaited(monkeypatch):

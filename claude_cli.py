@@ -116,6 +116,11 @@ class ClaudeCancelledError(RuntimeError):
 # rather than awaited.
 RESULT_EXIT_GRACE = 3.0
 
+# 3A C3: on POSIX the runner kills the CLI's process group once the CLI has
+# exited (Windows closes the kill-on-close job instead). A name, not an inline
+# check, so tests can exercise that path on any platform.
+_POSIX_GROUP_CLEANUP = os.name != "nt"
+
 
 # --- isolation (A7) ------------------------------------------------------
 
@@ -825,7 +830,9 @@ def _real_runner(
     one kill reaches a grandchild whose parent already exited; reading stops at
     the terminal ``result`` event (a straggler holding stdout cannot keep the
     run open); and the wall-clock watchdog fires until *reading* is done, not
-    merely until the direct child exits.
+    merely until the direct child exits. Nothing outlives the run either: the
+    job is closed (Windows) or the process group killed once the CLI exited
+    (POSIX, 3A C3).
     """
     # stderr goes to a temp file, not a PIPE: an unread stderr PIPE can fill its
     # ~64KB OS buffer and deadlock the child (it blocks writing stderr while we
@@ -895,9 +902,29 @@ def _real_runner(
     def _alive() -> bool:
         nonlocal reaped
         with kill_lock:
+            if reaped:
+                return False
+            # 3A C3 (POSIX): a CLI that exits - normally or after the result
+            # grace - can leave a helper behind in its process group, and
+            # there is no job object to close. Kill the group when the CLI is
+            # seen to have exited, while it is still an unreaped zombie: its
+            # pid (= the group id) cannot be recycled yet. Without WNOWAIT
+            # (macOS before 3.13) the kill follows the reap instead: any
+            # leftover still reserves the group id, so only an already EMPTY
+            # group whose id was recycled in that instant is at risk.
+            group_kill = _POSIX_GROUP_CLEANUP
+            if group_kill:
+                exited = proc_util.child_exited_unreaped(proc.pid)
+                if exited is False:
+                    return True
+                if exited:
+                    proc_util.kill_process_group(proc.pid)
+                    group_kill = False
             if proc.poll() is None:
                 return True
             reaped = True
+            if group_kill:
+                proc_util.kill_process_group(proc.pid)
             return False
 
     def _reap(timeout: float | None) -> int:
