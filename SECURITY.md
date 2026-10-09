@@ -167,11 +167,20 @@ The app binds to `127.0.0.1`, has no authentication, and intentionally shows the
 error text in the browser to make local debugging easy. Every request's `Host` header
 is checked against a loopback allowlist (`127.0.0.1`, `localhost`, `[::1]`) and
 anything else gets a 403, so a malicious web page cannot drive the app through your
-browser via DNS rebinding.
+browser via DNS rebinding. The connection itself must also come from a loopback
+address: if the app is ever served on another interface (`flask run --host 0.0.0.0`,
+a WSGI server), a request from another machine gets a 403 even when it forges
+`Host: 127.0.0.1`.
+
+The error text is meant for you alone. The app sends no CORS headers, so a page on
+another origin cannot read any response, error or not. A server error (500) is
+Flask's plain page with no traceback; the traceback goes to the terminal only. A
+failed sample's traceback saved into a study doc names `solution.py`, not the
+sandbox's temp folder.
 
 Other web hardening:
 
-- **CSP.** Every page response carries `default-src 'none'; script-src 'self';
+- **CSP.** Every response carries `default-src 'none'; script-src 'self';
   style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self';
   base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. All scripts, styles and
   fonts are vendored, with no CDN and no inline script.
@@ -179,10 +188,16 @@ Other web hardening:
   clickjacking of Run, Delete and the model picker.
 - **Plain-text library files.** `X-Content-Type-Options: nosniff` keeps
   `/library/file`, which is served as `text/plain`, from being interpreted as HTML.
+- **No referrer.** `Referrer-Policy: no-referrer` keeps a link in a study doc from
+  telling the site it opens about the local URL.
 - **Same-origin check.** Every unsafe request (POST, PUT, PATCH, DELETE) with an
   `Origin` header must come from this exact origin, and `Sec-Fetch-Site: cross-site` is
   refused. `GET /`, which runs the sign-in probe, may be loaded cross-site only by a
   top-level navigation. JSON routes accept only a JSON object body.
+- **Limits on spend.** Every study run and Quick Ask uses your subscription, so at
+  most 4 of each run at once (more get a 429), one follow-up and one "Test my code"
+  at a time. Request bodies are capped at 2 MB and a pasted problem at 50,000
+  characters.
 - **Anki export.** In `GET /flashcards.tsv`, any cell a spreadsheet would read as a
   formula (starting with `=`, `+`, `-`, `@`, a tab or a line break) is prefixed with `'`.
   A field holding a tab, a line break or a quote is quoted, so it cannot break the

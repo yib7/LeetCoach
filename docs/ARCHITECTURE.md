@@ -87,7 +87,7 @@ sequenceDiagram
     participant ST as storage + problem_store
 
     U->>F: POST /run {problem, mode, language, tier, model, run_id}
-    F->>F: validate against allowlists (400), same-origin check (403)
+    F->>F: validate against allowlists (400), same-origin check (403), run cap (429)
     par classification (background thread, cheap model)
         F->>CL: classify(problem)
         CL->>CC: claude -p (one short call, no session kept)
@@ -146,8 +146,9 @@ guardrail.
 
 ## Routes
 
-These are all the routes in `app.url_map`. Every request passes the loopback `Host`
-check. Unsafe methods (POST/PUT/DELETE) also pass the same-origin check.
+These are all the routes in `app.url_map`. Every request must come from a loopback
+address and pass the loopback `Host` check. Unsafe methods (POST/PUT/DELETE) also pass
+the same-origin check. `/run` and `/ask` each allow 4 calls in flight (429 past that).
 
 | Method | Route | What it does |
 | --- | --- | --- |
@@ -180,7 +181,7 @@ check. Unsafe methods (POST/PUT/DELETE) also pass the same-origin check.
 
 | Module | Responsibility |
 | --- | --- |
-| `app.py` | The Flask app factory and every route above. It validates input (allowlists, JSON-object bodies, loopback `Host`, same-origin check) and orchestrates classify → prompt → stream → verify → save for `/run`. It emits the SSE events (`meta`, `phase`, `done`, `error`, `cancelled` and the `: ping` heartbeat) and sets the CSP and anti-framing headers. The Claude runner is injectable, so tests never spawn a real process. |
+| `app.py` | The Flask app factory and every route above. It validates input (allowlists, JSON-object bodies, loopback peer and `Host`, same-origin check, length and concurrency caps) and orchestrates classify → prompt → stream → verify → save for `/run`. It emits the SSE events (`meta`, `phase`, `done`, `error`, `cancelled` and the `: ping` heartbeat) and sets the CSP, anti-framing, `nosniff` and `Referrer-Policy` headers. The Claude runner is injectable, so tests never spawn a real process. |
 | `claude_cli.py` | The keystone. It wraps `claude -p --output-format stream-json`. The prompt is piped on **stdin**, never in argv, and stream-json is parsed into text deltas plus the model and `session_id`. Flags are gated on a cached `claude --help` probe. Calls run in the neutral cwd under a watchdog that kills the whole tree. A stream with no `result` event is an error. This module also holds the cached auth probe. |
 | `classifier.py` | One short Claude call that labels the problem with a pattern and topics. It never raises; anything unreadable falls back to `uncategorized`. |
 | `patterns.py` | The fixed list of about 18 patterns, the normalisation of free-form labels onto it, and topic sanitising. |
