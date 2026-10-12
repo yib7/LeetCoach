@@ -77,8 +77,8 @@ from typing import NamedTuple
 
 # Re-exported under the historical private name: this module's tests (and any
 # older callers) reach the tree-kill via ``claude_cli._kill_process_tree``.
-from leetcoach import config, proc_util
-from leetcoach.proc_util import kill_process_tree as _kill_process_tree
+from leetcoach import config, process_tree
+from leetcoach.process_tree import kill_process_tree as _kill_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -541,7 +541,7 @@ def _kill_claude_tree(proc: subprocess.Popen, job=None, *, pid_ok: bool = True) 
     if pid_ok:
         with contextlib.suppress(Exception):  # keep going with the other mechanisms
             _kill_process_tree(proc, group=True)
-    proc_util.terminate_job(job)
+    process_tree.terminate_job(job)
     if pid_ok:
         with contextlib.suppress(Exception):  # already exited / reaped
             proc.kill()
@@ -558,7 +558,7 @@ def _run_bounded(argv: list[str], *, timeout: float, cwd: str | None = None):
     code page, which flipped a non-Latin account name into a decode error.
     """
     resolved = shutil.which(argv[0]) or argv[0]
-    job = proc_util.create_kill_on_close_job()
+    job = process_tree.create_kill_on_close_job()
     try:
         proc = subprocess.Popen(
             [resolved, *argv[1:]],
@@ -573,9 +573,9 @@ def _run_bounded(argv: list[str], *, timeout: float, cwd: str | None = None):
             **_spawn_kwargs(),
         )
     except BaseException:
-        proc_util.close_job(job)
+        process_tree.close_job(job)
         raise
-    proc_util.assign_to_job(job, proc)
+    process_tree.assign_to_job(job, proc)
     try:
         try:
             out, _err = proc.communicate(timeout=timeout)
@@ -588,7 +588,7 @@ def _run_bounded(argv: list[str], *, timeout: float, cwd: str | None = None):
             raise
         return proc.returncode, out or ""
     finally:
-        proc_util.close_job(job)
+        process_tree.close_job(job)
 
 
 def _default_auth_runner(argv: list[str]):
@@ -914,7 +914,7 @@ def _real_runner(
 
     # A6: a kill-on-close job for the whole `claude` tree (None on POSIX or if
     # the Job API is unavailable - the process group / taskkill still apply).
-    job = proc_util.create_kill_on_close_job()
+    job = process_tree.create_kill_on_close_job()
 
     # If Popen fails (e.g. the binary vanished in the narrow window after
     # is_available()), release what we opened above — the try/finally that
@@ -923,13 +923,13 @@ def _real_runner(
         proc = subprocess.Popen(argv, **popen_kwargs)
     except BaseException:
         stderr_file.close()
-        proc_util.close_job(job)
+        process_tree.close_job(job)
         raise
     # Assigned right after spawn, BEFORE the prompt is written: the CLI does
     # its work (and spawns its helpers) only after reading stdin, so those
     # helpers are born inside the job. (The npm cmd.exe shim starting node in
     # that window is still covered by taskkill /T, which walks live parents.)
-    proc_util.assign_to_job(job, proc)
+    process_tree.assign_to_job(job, proc)
 
     # SP2 I2: the tree-kill runs on other threads too (ClaudeRun.cancel(), the
     # watchdog), and a kill can block for a while inside `taskkill`. One
@@ -966,17 +966,17 @@ def _real_runner(
             # kill path reaped it - and that path killed the group already.
             group_kill = _POSIX_GROUP_CLEANUP and proc.returncode is None
             if group_kill:
-                exited = proc_util.child_exited_unreaped(proc.pid)
+                exited = process_tree.child_exited_unreaped(proc.pid)
                 if exited is False:
                     return True
                 if exited:
-                    proc_util.kill_process_group(proc.pid)
+                    process_tree.kill_process_group(proc.pid)
                     group_kill = False
             if proc.poll() is None:
                 return True
             reaped = True
             if group_kill:
-                proc_util.kill_process_group(proc.pid)
+                process_tree.kill_process_group(proc.pid)
             return False
 
     def _reap(timeout: float | None) -> int:
@@ -1147,7 +1147,7 @@ def _real_runner(
             job_closed = True
             # Closing the kill-on-close job reaps any straggler still inside
             # it (e.g. a grandchild that outlived a run we stopped at `result`).
-            proc_util.close_job(job)
+            process_tree.close_job(job)
         cancelled = handle is not None and handle.cancelled
         try:
             # Nobody is listening after a disconnect, and raising here would

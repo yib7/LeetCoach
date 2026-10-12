@@ -1,4 +1,4 @@
-"""Tests for `parsing.extract_code` — the markdown -> primary code-block helper.
+"""Tests for `code_blocks.extract_code` — the markdown -> primary code-block helper.
 
 SP5's sandbox imports the same function to recover runnable code, so its
 behaviour is pinned here: prefer the fence matching the requested language,
@@ -6,7 +6,7 @@ fall back to the first fence of any kind, and never raise on prose-only text.
 """
 from __future__ import annotations
 
-from leetcoach import parsing
+from leetcoach import code_blocks
 
 
 def test_extracts_matching_language_fence():
@@ -18,7 +18,7 @@ def test_extracts_matching_language_fence():
         "```\n\n"
         "Complexity: time O(n), space O(n)."
     )
-    code = parsing.extract_code(md, "python")
+    code = code_blocks.extract_code(md, "python")
     assert "def two_sum(nums, target):" in code
     assert "return []" in code
     # surrounding prose is not part of the code
@@ -28,12 +28,12 @@ def test_extracts_matching_language_fence():
 
 def test_py_alias_matches_python():
     md = "```py\nprint('hi')\n```"
-    assert parsing.extract_code(md, "python") == "print('hi')"
+    assert code_blocks.extract_code(md, "python") == "print('hi')"
 
 
 def test_cpp_aliases():
     md = "```c++\nint main(){return 0;}\n```"
-    assert parsing.extract_code(md, "cpp") == "int main(){return 0;}"
+    assert code_blocks.extract_code(md, "cpp") == "int main(){return 0;}"
 
 
 def test_prefers_requested_language_over_earlier_block():
@@ -44,12 +44,12 @@ def test_prefers_requested_language_over_earlier_block():
         "```python\nx = 1\n```\n"
     )
     # the python block is wanted even though a ```text block comes first
-    assert parsing.extract_code(md, "python") == "x = 1"
+    assert code_blocks.extract_code(md, "python") == "x = 1"
 
 
 def test_falls_back_to_first_fence_when_no_language_match():
     md = "```\njust code no tag\n```"
-    assert parsing.extract_code(md, "python") == "just code no tag"
+    assert code_blocks.extract_code(md, "python") == "just code no tag"
 
 
 def test_nested_indented_fence_does_not_truncate_code():
@@ -70,7 +70,7 @@ def test_nested_indented_fence_does_not_truncate_code():
         "```\n\n"
         "Complexity: O(1)."
     )
-    code = parsing.extract_code(md, "python")
+    code = code_blocks.extract_code(md, "python")
     assert "def solve():" in code
     assert "return 42" in code          # not truncated at the inner fence
     assert "    ```" in code            # the indented inner fences are preserved
@@ -79,12 +79,12 @@ def test_nested_indented_fence_does_not_truncate_code():
 
 def test_returns_empty_when_no_fence():
     md = "Pure prose, no code at all."
-    assert parsing.extract_code(md, "python") == ""
+    assert code_blocks.extract_code(md, "python") == ""
 
 
 def test_empty_input():
-    assert parsing.extract_code("", "python") == ""
-    assert parsing.extract_code(None, "python") == ""  # type: ignore[arg-type]
+    assert code_blocks.extract_code("", "python") == ""
+    assert code_blocks.extract_code(None, "python") == ""  # type: ignore[arg-type]
 
 
 # --- A2: pick the RIGHT block in a multi-block Guided/Answer doc ---------
@@ -105,7 +105,7 @@ def test_multi_block_guided_prefers_tagged_solution_block():
         "    return [0, 1]\n"
         "```\n"
     )
-    code = parsing.extract_code(md, "python")
+    code = code_blocks.extract_code(md, "python")
     assert "def two_sum" in code
     assert "just illustrating" not in code
 
@@ -126,7 +126,7 @@ def test_multi_block_guided_prefers_last_block_with_main_guard():
         "    print(two_sum([2, 7], 9))\n"
         "```\n"
     )
-    code = parsing.extract_code(md, "python")
+    code = code_blocks.extract_code(md, "python")
     assert "def two_sum" in code
     assert "__main__" in code
     assert "teaching snippet" not in code
@@ -151,7 +151,7 @@ def test_multi_block_main_guard_outranks_a_later_def_block():
         "    return []  # forgets to actually search\n"
         "```\n"
     )
-    code = parsing.extract_code(md, "python")
+    code = code_blocks.extract_code(md, "python")
     assert "__main__" in code
     assert "def two_sum(" in code
     assert "buggy" not in code
@@ -164,7 +164,7 @@ def test_multi_block_no_marker_prefers_last_tagged_block():
         "```python\nfirst_block = 1\n```\n\n"
         "```python\nsecond_block = 2\n```\n"
     )
-    assert parsing.extract_code(md, "python") == "second_block = 2"
+    assert code_blocks.extract_code(md, "python") == "second_block = 2"
 
 
 def test_indented_list_item_fence_is_extracted_correctly():
@@ -178,7 +178,7 @@ def test_indented_list_item_fence_is_extracted_correctly():
         "   ```\n\n"
         "2. That's it.\n"
     )
-    code = parsing.extract_code(md, "python")
+    code = code_blocks.extract_code(md, "python")
     assert code == "def solve():\n    return 42"
 
 
@@ -186,4 +186,4 @@ def test_legacy_single_untagged_block_still_extracted():
     # Backward compat: an old-style doc with one plain, untagged fence must
     # still degrade to that block (unchanged pre-A2 behaviour).
     md = "```\ndef legacy():\n    return 1\n```\n"
-    assert parsing.extract_code(md, "python") == "def legacy():\n    return 1"
+    assert code_blocks.extract_code(md, "python") == "def legacy():\n    return 1"

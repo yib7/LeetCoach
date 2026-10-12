@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from leetcoach import claude_cli, proc_util
+from leetcoach import claude_cli, process_tree
 
 
 class _JobRecorder:
@@ -51,10 +51,10 @@ class _JobRecorder:
 @pytest.fixture
 def jobs(monkeypatch):
     rec = _JobRecorder()
-    monkeypatch.setattr(proc_util, "create_kill_on_close_job", rec.create)
-    monkeypatch.setattr(proc_util, "assign_to_job", rec.assign)
-    monkeypatch.setattr(proc_util, "close_job", rec.close)
-    monkeypatch.setattr(proc_util, "terminate_job", rec.terminate)
+    monkeypatch.setattr(process_tree, "create_kill_on_close_job", rec.create)
+    monkeypatch.setattr(process_tree, "assign_to_job", rec.assign)
+    monkeypatch.setattr(process_tree, "close_job", rec.close)
+    monkeypatch.setattr(process_tree, "terminate_job", rec.terminate)
     return rec
 
 

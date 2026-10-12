@@ -24,7 +24,7 @@ from _helpers import CLASSIFY_JSON
 from _helpers import parse_sse as _parse_sse
 
 from leetcoach import app as app_module
-from leetcoach import parsing, topic_index
+from leetcoach import code_blocks, topic_index
 
 # A problem with one parseable sample (mirrors test_sandbox.py's fixture).
 PROBLEM_WITH_SAMPLE = (
@@ -214,13 +214,13 @@ def test_saved_traceback_does_not_leak_the_temp_run_dir(tmp_path, monkeypatch):
 )
 def test_extract_code_called_exactly_once(tmp_path, monkeypatch, mode, markdown):
     calls = []
-    real = parsing.extract_code
+    real = code_blocks.extract_code
 
     def counting_extract(markdown_text, language):
         calls.append(language)
         return real(markdown_text, language)
 
-    monkeypatch.setattr(parsing, "extract_code", counting_extract)
+    monkeypatch.setattr(code_blocks, "extract_code", counting_extract)
 
     c = _make_client(tmp_path, monkeypatch, markdown)
     resp = _post_run(c, mode)

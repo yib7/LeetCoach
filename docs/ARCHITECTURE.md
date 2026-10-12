@@ -33,16 +33,16 @@ flowchart TD
     Classifier["classifier.py<br/>pattern + topics"]
     Patterns["patterns.py<br/>fixed pattern list"]
     Prompts["prompts.py<br/>mode x tier x language templates"]
-    Parsing["parsing.py<br/>extract the solution block"]
+    Parsing["code_blocks.py<br/>extract the solution block"]
     Sandbox["sandbox.py<br/>sample-I/O verify"]
     Boot["sandbox_bootstrap.py<br/>child first stage + audit hook"]
     Practice["practice.py<br/>Test my code"]
-    Proc["proc_util.py<br/>job caps + tree kill"]
+    Proc["process_tree.py<br/>job caps + tree kill"]
     Storage["storage.py<br/>safe-slug writes, follow-up append"]
     Store["problem_store.py<br/>records + run log + reviews"]
     Stats["stats.py<br/>/stats from the log"]
     Cards["flashcards.py<br/>cards + Anki TSV"]
-    Fs["fsutil.py<br/>atomic writes"]
+    Fs["atomic_files.py<br/>atomic writes"]
     Topic["topic_index.py<br/>skip learned topics"]
     Config["config.py<br/>env-overridable settings"]
     Claude(["claude CLI<br/>subscription, no API key"])
@@ -186,16 +186,16 @@ the same-origin check. `/run` and `/ask` each allow 4 calls in flight (429 past 
 | `classifier.py` | One short Claude call that labels the problem with a pattern and topics. It never raises; anything unreadable falls back to `uncategorized`. |
 | `patterns.py` | The fixed list of about 18 patterns, the normalisation of free-form labels onto it, and topic sanitising. |
 | `prompts.py` | The system personas and the prompt builders for each mode, tier and language (Learning, Guided, Answer, Code Review, Quick Ask, follow-up). It holds the shared study-doc contract and the random-nonce fences around pasted text. |
-| `parsing.py` | Pulls the runnable solution block (```` ```<lang> solution````) out of Claude's markdown. It is Flask-free, so the sandbox can import it. |
+| `code_blocks.py` | Pulls the runnable solution block (```` ```<lang> solution````) out of Claude's markdown. It is Flask-free, so the sandbox can import it. |
 | `sandbox.py` | Best-effort sample-I/O verification: parses the samples, runs the code in a throwaway, secret-free directory, and compares the output structurally. Runs have a timeout, capped output capture and resource limits: a Windows Job Object, or POSIX rlimits set by the bootstrap. It fails closed. |
 | `sandbox_bootstrap.py` | The trusted, stdlib-only first stage of the sandbox child. It reads its config from stdin, sets the POSIX rlimits and installs the audit hook. It then reports READY and waits for the go byte, which the parent sends only after the Job Object is assigned. Finally it runs the solution with `runpy`, under the real interpreter with `-I`. |
 | `practice.py` | "Test my code" (D3): builds the sample and custom cases, runs each one in a fresh sandbox, and reports the results per case. |
-| `proc_util.py` | Process containment shared by `sandbox.py` and `claude_cli.py`: Windows Job Objects (memory, process count, kill-on-close) and whole-tree kill (`taskkill /T` on Windows, process groups on POSIX). |
+| `process_tree.py` | Process containment shared by `sandbox.py` and `claude_cli.py`: Windows Job Objects (memory, process count, kill-on-close) and whole-tree kill (`taskkill /T` on Windows, process groups on POSIX). |
 | `storage.py` | Writes study docs under `output/`. `slug()` is the single containment chokepoint for path segments. Re-runs go to `__2`, `__3`, ... slots under a write lock, and a failed save falls back to `_unsorted/`. It also appends follow-up sections. |
 | `problem_store.py` | Problem records (`.leetcoach/problems/<id>.json`) and the append-only run log (`.leetcoach/runs.jsonl`). It also handles review scheduling and grading, notes, `path_index` (which problem a file belongs to) and `session_for_doc` (D6). It holds a cross-process lock on `.leetcoach/.lock`. |
 | `stats.py` | `/stats`: streaks, the heatmap and totals by mode, language and topic, from the run log, with a per-file fallback for legacy files. Follow-up entries are skipped. |
 | `flashcards.py` | Parses `## Flashcards` sections leniently and writes the Anki TSV with formula neutralisation. |
-| `fsutil.py` | The shared atomic write (temp file + `os.replace`, with retry and backoff on Windows `PermissionError`), used for docs, records, the topic index and `.env`. |
+| `atomic_files.py` | The shared atomic write (temp file + `os.replace`, with retry and backoff on Windows `PermissionError`), used for docs, records, the topic index and `.env`. |
 | `topic_index.py` | Records what Learning and Guided have covered, per language, and feeds it back so later runs skip and cross-link known topics. A corrupt file is preserved, not overwritten. |
 | `config.py` | Every machine-specific setting, read from the environment at call time: models, the `claude` binary, the output dir, the topic index, the claude cwd and the timeouts. It also holds the `.env` upsert and the display-only `LATEST_MODEL_IDS` table. |
 | `static/app.js` | The single-page UI: Console, Library viewer (follow-up box, notes, re-attempt), Stats, the review queue, flashcards and the search palette. Model-derived DOM is built with `el()` and `textContent`, and markdown goes through a hardened `marked` renderer. |
@@ -219,7 +219,7 @@ output/
 ```
 
 The library is not read-only. The app writes new runs, appends follow-ups to existing
-docs, and deletes files or whole runs on request. Every write goes through `fsutil`
+docs, and deletes files or whole runs on request. Every write goes through `atomic_files`
 atomic writes. Libraries saved before the run log existed still work: their files are
 listed, counted in Stats by their own mtime, and accept follow-ups through the fallback
 path.

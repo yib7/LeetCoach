@@ -22,7 +22,7 @@ import time
 
 import pytest
 
-from leetcoach import parsing, sandbox
+from leetcoach import code_blocks, sandbox
 
 # --- verify_python: pass / fail / error ----------------------------------
 
@@ -894,7 +894,7 @@ def test_verify_answer_threads_the_configured_timeout(monkeypatch):
     assert seen and all(t == 3 for t in seen), seen
 
 
-# --- #13: end-to-end integration, parsing.extract_code + sandbox ----------
+# --- #13: end-to-end integration, code_blocks.extract_code + sandbox ----------
 
 _GUIDED_DOC_MULTI_BLOCK = (
     "Here's how hash maps work:\n\n"
@@ -935,13 +935,13 @@ _GUIDED_DOC_PROBLEM_TEXT = (
 
 
 def test_integrated_guided_multiblock_main_guard_doc_verifies_pass_real_python():
-    """#13: end-to-end integration of `parsing.extract_code` + `sandbox` — a
+    """#13: end-to-end integration of `code_blocks.extract_code` + `sandbox` — a
     multi-block Guided-style doc (an earlier teaching snippet, then the real
     `__main__`-driven solution) whose solution prints Python's `[0, 1]` list
     repr against a LeetCode-style `**Input:**`/`**Output:**` `[0,1]`
     (no-space) example must verify PASS. Nothing in the sandbox is mocked —
     this runs a REAL python subprocess (only the doc text is a fixture)."""
-    code = parsing.extract_code(_GUIDED_DOC_MULTI_BLOCK, "python")
+    code = code_blocks.extract_code(_GUIDED_DOC_MULTI_BLOCK, "python")
     assert "teaching snippet" not in code
     assert "__main__" in code
 

@@ -174,12 +174,12 @@ def test_upsert_aborts_on_undecodable_file(tmp_path):
 
 
 def test_upsert_writes_atomically(tmp_path, monkeypatch):
-    from leetcoach import fsutil
+    from leetcoach import atomic_files
 
     seen = []
-    real = fsutil.atomic_write_text
+    real = atomic_files.atomic_write_text
     monkeypatch.setattr(
-        fsutil, "atomic_write_text",
+        atomic_files, "atomic_write_text",
         lambda p, t, **kw: (seen.append(str(p)), real(p, t, **kw))[1],
     )
     env = tmp_path / ".env"

@@ -43,7 +43,7 @@ import math
 import os
 from pathlib import Path
 
-from leetcoach import fsutil
+from leetcoach import atomic_files
 
 # Defaults live here so they are documented in one place and referenced by name.
 # An alias (not a pinned id): the CLI resolves it to the newest Opus, so the
@@ -430,7 +430,7 @@ def upsert_env_var(path, key: str, value: str) -> None:
     B12 robustness: a UTF-8 BOM or UTF-16 file is read correctly and written
     back as plain UTF-8 (what python-dotenv reads at boot); a read or decode
     error ABORTS (raises ``OSError`` / ``ValueError``) instead of treating the
-    file as empty and wiping it; the write is atomic (:mod:`fsutil`). Pure I/O
+    file as empty and wiping it; the write is atomic (:mod:`atomic_files`). Pure I/O
     on the given path - the live process env is updated by the caller.
     """
     new_line = f"{key}={value}"
@@ -445,4 +445,4 @@ def upsert_env_var(path, key: str, value: str) -> None:
         # else: a later duplicate - dropped, with any continuation lines
     if not replaced:
         out.append(new_line)
-    fsutil.atomic_write_text(path, "\n".join(out) + "\n")
+    atomic_files.atomic_write_text(path, "\n".join(out) + "\n")

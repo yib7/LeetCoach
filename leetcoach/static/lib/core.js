@@ -201,7 +201,7 @@
   // last code block is then partial: not highlighted, marked `.partial`.)
   //
   // SP5 fix R3: a fence may be indented (a code block inside a list item,
-  // "1. step\n\n    ```python"), like parsing.py's indentation-aware match.
+  // "1. step\n\n    ```python"), like code_blocks.py's indentation-aware match.
   // A closing fence counts when it is indented at most 3 columns past its
   // opener (or less - a dedent ends the list item, and the block with it);
   // a ``` indented further is code INSIDE the block (e.g. a docstring example).

@@ -42,7 +42,7 @@ import threading
 import time
 from pathlib import Path
 
-from leetcoach import config, fsutil, patterns
+from leetcoach import atomic_files, config, patterns
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +157,7 @@ def _write_json(p: Path, obj) -> None:
     # Atomic write through the shared helper (SP4/B7): sibling temp file +
     # os.replace, retried with backoff while Windows reports the index as held
     # by another process (AV, OneDrive, a reader), temp file always cleaned up.
-    fsutil.atomic_write_text(p, json.dumps(obj, indent=2))
+    atomic_files.atomic_write_text(p, json.dumps(obj, indent=2))
 
 
 def _preserve_corrupt(p: Path) -> bool:

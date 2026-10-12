@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from leetcoach import fsutil, prompts
+from leetcoach import atomic_files, prompts
 from leetcoach import problem_store as ps
 
 NOW = datetime(2026, 10, 8, 14, 30).astimezone()
@@ -136,7 +136,7 @@ def test_log_line_survives_a_failing_record_write(root, monkeypatch):
     def boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(fsutil, "atomic_write_text", boom)
+    monkeypatch.setattr(atomic_files, "atomic_write_text", boom)
     pid = _record(root, "1. Two Sum\nEasy\n")
     assert pid == "1-two_sum"
     [entry] = ps.read_runs(root=root)

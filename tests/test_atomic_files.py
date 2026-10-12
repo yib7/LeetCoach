@@ -1,7 +1,7 @@
-"""Tests for ``fsutil`` — the one shared atomic-write helper (SP4).
+"""Tests for ``atomic_files`` — the one shared atomic-write helper (SP4).
 
 Storage, the topic index, the ``.env`` model picker and (later) the problem
-store all write through ``fsutil.atomic_write_text``: a sibling temp file, then
+store all write through ``atomic_files.atomic_write_text``: a sibling temp file, then
 ``os.replace`` onto the target, retried with backoff when Windows refuses the
 replace because another process (AV, OneDrive, an open reader) holds the file,
 and with the temp file always cleaned up on failure.
@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from leetcoach import fsutil
+from leetcoach import atomic_files
 
 
 def _tmp_leftovers(folder):
@@ -24,7 +24,7 @@ def _tmp_leftovers(folder):
 
 def test_writes_text_and_creates_parents(tmp_path):
     target = tmp_path / "a" / "b" / "note.md"
-    out = fsutil.atomic_write_text(target, "hello\nworld\n")
+    out = atomic_files.atomic_write_text(target, "hello\nworld\n")
     assert out == target
     assert target.read_text(encoding="utf-8") == "hello\nworld\n"
     assert _tmp_leftovers(target.parent) == []
@@ -33,15 +33,15 @@ def test_writes_text_and_creates_parents(tmp_path):
 def test_overwrites_existing_file(tmp_path):
     target = tmp_path / "x.json"
     target.write_text("old", encoding="utf-8")
-    fsutil.atomic_write_text(target, "new")
+    atomic_files.atomic_write_text(target, "new")
     assert target.read_text(encoding="utf-8") == "new"
 
 
 def test_encoding_and_newline_are_honoured(tmp_path):
     target = tmp_path / "x.txt"
-    fsutil.atomic_write_text(target, "a\nb\n", newline="\n")
+    atomic_files.atomic_write_text(target, "a\nb\n", newline="\n")
     assert target.read_bytes() == b"a\nb\n"
-    fsutil.atomic_write_text(target, "café", encoding="utf-8")
+    atomic_files.atomic_write_text(target, "café", encoding="utf-8")
     assert target.read_bytes() == "café".encode()
 
 
@@ -53,9 +53,9 @@ def test_temp_name_is_hidden_sibling(tmp_path, monkeypatch):
         seen.append(os.fspath(src))
         return real_replace(src, dst)
 
-    monkeypatch.setattr(fsutil, "_replace", spy)
+    monkeypatch.setattr(atomic_files, "_replace", spy)
     target = tmp_path / "note.md"
-    fsutil.atomic_write_text(target, "x")
+    atomic_files.atomic_write_text(target, "x")
     name = os.path.basename(seen[0])
     assert os.path.dirname(seen[0]) == str(tmp_path)
     assert name.startswith(".note.md.") and name.endswith(".tmp")
@@ -72,10 +72,10 @@ def test_retries_permission_error_then_succeeds(tmp_path, monkeypatch):
         return real_replace(src, dst)
 
     sleeps = []
-    monkeypatch.setattr(fsutil, "_replace", flaky)
-    monkeypatch.setattr(fsutil, "_sleep", sleeps.append)
+    monkeypatch.setattr(atomic_files, "_replace", flaky)
+    monkeypatch.setattr(atomic_files, "_sleep", sleeps.append)
     target = tmp_path / "idx.json"
-    fsutil.atomic_write_text(target, "{}")
+    atomic_files.atomic_write_text(target, "{}")
     assert calls["n"] == 3
     assert target.read_text(encoding="utf-8") == "{}"
     assert len(sleeps) == 2 and sleeps[1] > sleeps[0]  # backoff grows
@@ -86,12 +86,12 @@ def test_gives_up_after_retries_and_cleans_tmp(tmp_path, monkeypatch):
     def always_locked(src, dst):
         raise PermissionError(13, "locked")
 
-    monkeypatch.setattr(fsutil, "_replace", always_locked)
-    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    monkeypatch.setattr(atomic_files, "_replace", always_locked)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
     target = tmp_path / "idx.json"
     target.write_text("original", encoding="utf-8")
     with pytest.raises(PermissionError):
-        fsutil.atomic_write_text(target, "new", retries=4)
+        atomic_files.atomic_write_text(target, "new", retries=4)
     assert target.read_text(encoding="utf-8") == "original"  # untouched
     assert _tmp_leftovers(tmp_path) == []
 
@@ -103,10 +103,10 @@ def test_non_permission_oserror_is_not_retried(tmp_path, monkeypatch):
         calls["n"] += 1
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(fsutil, "_replace", broken)
-    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    monkeypatch.setattr(atomic_files, "_replace", broken)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
     with pytest.raises(OSError):
-        fsutil.atomic_write_text(tmp_path / "f.md", "x")
+        atomic_files.atomic_write_text(tmp_path / "f.md", "x")
     assert calls["n"] == 1
     assert _tmp_leftovers(tmp_path) == []
 
@@ -114,7 +114,7 @@ def test_non_permission_oserror_is_not_retried(tmp_path, monkeypatch):
 def test_failed_tmp_write_cleans_up(tmp_path):
     # An unencodable body fails while writing the temp file.
     with pytest.raises(UnicodeEncodeError):
-        fsutil.atomic_write_text(tmp_path / "f.txt", "€", encoding="ascii")
+        atomic_files.atomic_write_text(tmp_path / "f.txt", "€", encoding="ascii")
     assert _tmp_leftovers(tmp_path) == []
     assert not (tmp_path / "f.txt").exists()
 
@@ -136,7 +136,7 @@ def test_write_succeeds_once_a_held_reader_lets_go(tmp_path):
 
     threading.Thread(target=release_later, daemon=True).start()
     try:
-        fsutil.atomic_write_text(target, "new")
+        atomic_files.atomic_write_text(target, "new")
     finally:
         released.wait(5)
         if not fh.closed:
@@ -147,7 +147,7 @@ def test_write_succeeds_once_a_held_reader_lets_go(tmp_path):
 
 def test_write_many_writes_all_or_nothing(tmp_path, monkeypatch):
     a, b = tmp_path / "s.py", tmp_path / "s.md"
-    fsutil.atomic_write_many([(a, "code"), (b, "notes")])
+    atomic_files.atomic_write_many([(a, "code"), (b, "notes")])
     assert a.read_text(encoding="utf-8") == "code"
     assert b.read_text(encoding="utf-8") == "notes"
 
@@ -161,10 +161,10 @@ def test_write_many_rolls_back_new_files_when_a_later_replace_fails(tmp_path, mo
             raise OSError(5, "boom")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(fsutil, "_replace", fail_on_md)
-    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    monkeypatch.setattr(atomic_files, "_replace", fail_on_md)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
     with pytest.raises(OSError):
-        fsutil.atomic_write_many([(a, "code"), (b, "notes")])
+        atomic_files.atomic_write_many([(a, "code"), (b, "notes")])
     assert not a.exists() and not b.exists()  # the pair landed together or not at all
     assert _tmp_leftovers(tmp_path) == []
 
@@ -179,10 +179,10 @@ def test_write_many_restores_a_preexisting_file_on_rollback(tmp_path, monkeypatc
             raise OSError(5, "boom")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(fsutil, "_replace", fail_on_md)
-    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    monkeypatch.setattr(atomic_files, "_replace", fail_on_md)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
     with pytest.raises(OSError):
-        fsutil.atomic_write_many([(a, "code"), (b, "notes")])
+        atomic_files.atomic_write_many([(a, "code"), (b, "notes")])
     assert a.read_text(encoding="utf-8") == "previous"
     assert not b.exists()
     assert [p.name for p in tmp_path.iterdir()] == ["s.py"]
@@ -194,7 +194,7 @@ def test_write_many_rollback_never_unlinks_a_file_it_could_not_back_up(tmp_path,
     old code recorded it like a new file and unlinked it."""
     a, b = tmp_path / "s.py", tmp_path / "s.md"
     a.write_text("previous", encoding="utf-8")
-    real_read_bytes = fsutil.Path.read_bytes
+    real_read_bytes = atomic_files.Path.read_bytes
     real_replace = os.replace
 
     def unreadable_a(self):
@@ -207,11 +207,11 @@ def test_write_many_rollback_never_unlinks_a_file_it_could_not_back_up(tmp_path,
             raise OSError(5, "boom")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(fsutil.Path, "read_bytes", unreadable_a)
-    monkeypatch.setattr(fsutil, "_replace", fail_on_md)
-    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    monkeypatch.setattr(atomic_files.Path, "read_bytes", unreadable_a)
+    monkeypatch.setattr(atomic_files, "_replace", fail_on_md)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
     with pytest.raises(OSError):
-        fsutil.atomic_write_many([(a, "code"), (b, "notes")])
+        atomic_files.atomic_write_many([(a, "code"), (b, "notes")])
     monkeypatch.undo()
     assert a.exists()  # left as swapped in - it could not be restored, never deleted
     assert not b.exists()
@@ -223,19 +223,19 @@ def test_write_many_rollback_never_unlinks_a_file_it_could_not_back_up(tmp_path,
 @pytest.mark.parametrize("text", ["a\r\nb\n", "a\rb\n", "a\nb\r\n", "a\r\n\rb\r"])
 def test_text_line_endings_are_normalised_before_translation(tmp_path, text):
     target = tmp_path / "doc.md"
-    fsutil.atomic_write_text(target, text)
+    atomic_files.atomic_write_text(target, text)
     lines = text.replace("\r\n", "\n").replace("\r", "\n")
     assert target.read_bytes() == lines.replace("\n", os.linesep).encode("utf-8")
     assert b"\r\r" not in target.read_bytes()
-    fsutil.atomic_write_text(target, text, newline="\n")
+    atomic_files.atomic_write_text(target, text, newline="\n")
     assert target.read_bytes() == lines.encode("utf-8")
-    fsutil.atomic_write_text(target, text, newline="\r\n")
+    atomic_files.atomic_write_text(target, text, newline="\r\n")
     assert target.read_bytes() == lines.replace("\n", "\r\n").encode("utf-8")
 
 
 def test_write_many_normalises_line_endings_too(tmp_path):
     a, b = tmp_path / "s.py", tmp_path / "s.md"
-    fsutil.atomic_write_many([(a, "x\r\ny\n"), (b, "p\rq")], newline="\r\n")
+    atomic_files.atomic_write_many([(a, "x\r\ny\n"), (b, "p\rq")], newline="\r\n")
     assert a.read_bytes() == b"x\r\ny\r\n"
     assert b.read_bytes() == b"p\r\nq"
 
@@ -247,12 +247,12 @@ def test_worst_case_wait_matches_the_real_backoff_schedule(monkeypatch, tmp_path
         raise PermissionError(13, "locked")
 
     sleeps = []
-    monkeypatch.setattr(fsutil, "_replace", always_locked)
-    monkeypatch.setattr(fsutil, "_sleep", sleeps.append)
+    monkeypatch.setattr(atomic_files, "_replace", always_locked)
+    monkeypatch.setattr(atomic_files, "_sleep", sleeps.append)
     with pytest.raises(PermissionError):
-        fsutil.atomic_write_text(tmp_path / "f.md", "x")
-    assert sum(sleeps) == pytest.approx(fsutil.WORST_CASE_WAIT)
-    assert fsutil.WORST_CASE_WAIT == pytest.approx(3.55)
+        atomic_files.atomic_write_text(tmp_path / "f.md", "x")
+    assert sum(sleeps) == pytest.approx(atomic_files.WORST_CASE_WAIT)
+    assert atomic_files.WORST_CASE_WAIT == pytest.approx(3.55)
 
 
 def test_temp_name_suffix_is_short(tmp_path, monkeypatch):
@@ -263,9 +263,9 @@ def test_temp_name_suffix_is_short(tmp_path, monkeypatch):
         seen.append(os.path.basename(os.fspath(src)))
         return real_replace(src, dst)
 
-    monkeypatch.setattr(fsutil, "_replace", spy)
-    fsutil.atomic_write_text(tmp_path / "note.md", "x")
-    fsutil.atomic_write_text(tmp_path / "note.md", "y")
+    monkeypatch.setattr(atomic_files, "_replace", spy)
+    atomic_files.atomic_write_text(tmp_path / "note.md", "x")
+    atomic_files.atomic_write_text(tmp_path / "note.md", "y")
     for name in seen:
         tag = name[len(".note.md."):-len(".tmp")]
         assert len(tag) == 8 and all(c in "0123456789abcdef" for c in tag), name
@@ -274,9 +274,9 @@ def test_temp_name_suffix_is_short(tmp_path, monkeypatch):
 
 def test_temp_name_collision_picks_another_name(tmp_path, monkeypatch):
     tags = iter(["deadbeef", "deadbeef", "cafef00d"])
-    monkeypatch.setattr(fsutil.secrets, "token_hex", lambda n: next(tags))
+    monkeypatch.setattr(atomic_files.secrets, "token_hex", lambda n: next(tags))
     (tmp_path / ".note.md.deadbeef.tmp").write_text("someone else's", encoding="utf-8")
-    fsutil.atomic_write_text(tmp_path / "note.md", "mine")
+    atomic_files.atomic_write_text(tmp_path / "note.md", "mine")
     assert (tmp_path / "note.md").read_text(encoding="utf-8") == "mine"
     # the existing temp file is not clobbered
     assert (tmp_path / ".note.md.deadbeef.tmp").read_text(encoding="utf-8") == "someone else's"
@@ -295,10 +295,10 @@ def test_read_only_target_fails_fast_without_retrying(tmp_path, monkeypatch):
     target.write_text("original", encoding="utf-8")
     _make_readonly(target)
     sleeps = []
-    monkeypatch.setattr(fsutil, "_sleep", sleeps.append)
+    monkeypatch.setattr(atomic_files, "_sleep", sleeps.append)
     try:
         with pytest.raises(PermissionError, match="read-only"):
-            fsutil.atomic_write_text(target, "new")
+            atomic_files.atomic_write_text(target, "new")
         assert sleeps == []  # no 3.5 s of pointless retries
         assert target.read_text(encoding="utf-8") == "original"
         assert not (os.stat(target).st_mode & stat.S_IWUSR)  # flag left alone
@@ -316,7 +316,7 @@ def test_write_many_checks_read_only_before_touching_anything(tmp_path):
     _make_readonly(locked)
     try:
         with pytest.raises(PermissionError, match="read-only"):
-            fsutil.atomic_write_many([(free, "a"), (locked, "b")])
+            atomic_files.atomic_write_many([(free, "a"), (locked, "b")])
         assert not free.exists()
         assert locked.read_text(encoding="utf-8") == "original"
         assert _tmp_leftovers(tmp_path) == []
@@ -333,6 +333,6 @@ def test_hidden_attribute_survives_the_replace(tmp_path):
     target.write_text("{}", encoding="utf-8")
     kernel32 = ctypes.windll.kernel32
     assert kernel32.SetFileAttributesW(str(target), stat.FILE_ATTRIBUTE_HIDDEN)
-    fsutil.atomic_write_text(target, '{"a": 1}')
+    atomic_files.atomic_write_text(target, '{"a": 1}')
     assert target.read_text(encoding="utf-8") == '{"a": 1}'
     assert os.stat(target).st_file_attributes & stat.FILE_ATTRIBUTE_HIDDEN

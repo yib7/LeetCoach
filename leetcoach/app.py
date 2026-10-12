@@ -73,9 +73,9 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 from leetcoach import (
     classifier,
     claude_cli,
+    code_blocks,
     config,
     flashcards,
-    parsing,
     practice,
     problem_store,
     prompts,
@@ -1852,7 +1852,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     )
                     yield from _stream_and_accumulate(prompt)
                     body = out[0]
-                    code = parsing.extract_code(body, language)
+                    code = code_blocks.extract_code(body, language)
 
                     # SP5: best-effort sample-I/O verification. Stream a short
                     # verdict line; the saved reasoning .md gets the verdict
@@ -1924,7 +1924,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     # SP5: verify Guided's answer step the same way as Answer —
                     # extract the code from the full piped doc exactly once
                     # (P2-13), and save verdict + failure detail (P2-9).
-                    code = parsing.extract_code(body, language)
+                    code = code_blocks.extract_code(body, language)
                     result, verdict = yield from _verify(code)
                     verification = verdict
                     yield _sse_text("\n\n" + verdict + "\n")

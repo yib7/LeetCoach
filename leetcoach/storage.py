@@ -39,7 +39,7 @@ import threading
 import unicodedata
 from pathlib import Path
 
-from leetcoach import config, fsutil
+from leetcoach import atomic_files, config
 
 # Extension chosen per answer language. Anything unknown falls back to ``.txt``
 # so an unexpected language never produces a separator-bearing extension.
@@ -215,7 +215,7 @@ def _same_content(path: Path, body: str) -> bool:
     doubt we suffix rather than risk clobbering something we could not read.
 
     3A S5: compared line-ending-blind on both sides - ``read_text`` already
-    reads any CRLF / CR back as ``"\\n"`` and :mod:`fsutil` writes ``body``'s
+    reads any CRLF / CR back as ``"\\n"`` and :mod:`atomic_files` writes ``body``'s
     CRLF / CR as one line break - so an identical re-run of a CRLF body
     reuses its slot instead of shifting to ``__2``.
     """
@@ -254,9 +254,9 @@ def _resolve_slot(folder: Path, stem: str, files: list[tuple[str, str]]) -> list
 
 def _write(path: Path, body: str) -> str:
     """Atomically write ``body`` to ``path`` (UTF-8), creating parents; return
-    the str path. Goes through the shared :mod:`fsutil` helper (SP4) so a
+    the str path. Goes through the shared :mod:`atomic_files` helper (SP4) so a
     reader never sees a half-written doc and a held file is retried."""
-    fsutil.atomic_write_text(path, body)
+    atomic_files.atomic_write_text(path, body)
     return str(path)
 
 
@@ -274,7 +274,7 @@ def _write_entry(folder: Path, stem: str, files: list[tuple[str, str]]) -> list[
             return [_write(paths[0], files[0][1])]
         # B25: an Answer's code + notes pair lands together or not at all -
         # never an orphaned code file without its reasoning.
-        fsutil.atomic_write_many([(path, body) for path, (_, body) in zip(paths, files)])
+        atomic_files.atomic_write_many([(path, body) for path, (_, body) in zip(paths, files)])
         return [str(path) for path in paths]
 
 
@@ -476,7 +476,7 @@ def append_followup(path, question: str, answer: str) -> str:
         fence = open_fence(text)
         if fence is not None:
             text += "\n" + fence
-        fsutil.atomic_write_text(target, text + "\n\n" + section)
+        atomic_files.atomic_write_text(target, text + "\n\n" + section)
         try:
             os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
         except OSError:

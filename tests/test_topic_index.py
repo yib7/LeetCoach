@@ -244,12 +244,12 @@ def test_learning_route_passes_known_topics_to_prompt(tmp_path, monkeypatch):
     assert "sliding_window" in known
 
 
-# --- B7: atomic writes through fsutil, corrupt file preserved ----------------
+# --- B7: atomic writes through atomic_files, corrupt file preserved ----------------
 
 def test_record_retries_a_locked_index_instead_of_losing_the_update(idx_path, monkeypatch):
     import os as _os
 
-    from leetcoach import fsutil
+    from leetcoach import atomic_files
 
     topic_index.record("dp", ["memoization"])
     real_replace = _os.replace
@@ -261,21 +261,21 @@ def test_record_retries_a_locked_index_instead_of_losing_the_update(idx_path, mo
             raise PermissionError(13, "held by another process")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(fsutil, "_replace", flaky)
-    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    monkeypatch.setattr(atomic_files, "_replace", flaky)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
     topic_index.record("graphs", ["bfs"])
     assert "bfs" in json.loads(idx_path.read_text(encoding="utf-8"))["all"]
     assert [p.name for p in idx_path.parent.iterdir() if p.name.endswith(".tmp")] == []
 
 
 def test_record_leaves_no_tmp_when_the_write_finally_fails(idx_path, monkeypatch):
-    from leetcoach import fsutil
+    from leetcoach import atomic_files
 
     def locked(src, dst):
         raise PermissionError(13, "locked")
 
-    monkeypatch.setattr(fsutil, "_replace", locked)
-    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    monkeypatch.setattr(atomic_files, "_replace", locked)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
     topic_index.record("graphs", ["bfs"])  # best-effort: must not raise
     assert [p.name for p in idx_path.parent.iterdir() if p.name.endswith(".tmp")] == []
 
@@ -295,16 +295,16 @@ def test_corrupt_index_is_preserved_as_corrupt_copy_not_overwritten(idx_path):
 
 
 def test_record_goes_through_the_atomic_helper(idx_path, monkeypatch):
-    from leetcoach import fsutil
+    from leetcoach import atomic_files
 
     seen = []
-    real = fsutil.atomic_write_text
+    real = atomic_files.atomic_write_text
 
     def spy(path, text, **kw):
         seen.append(str(path))
         return real(path, text, **kw)
 
-    monkeypatch.setattr(fsutil, "atomic_write_text", spy)
+    monkeypatch.setattr(atomic_files, "atomic_write_text", spy)
     topic_index.record("misc", ["x"])
     assert seen == [str(idx_path)]
 

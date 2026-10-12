@@ -14,7 +14,7 @@ saved run of it produced (files, so an Answer run adds two), ``aliases`` the
 older ids merged into it (an un-numbered ``two_sum`` record folds into
 ``1-two_sum`` once a paste gives the number) and ``difficulty_source`` is
 ``"paste"`` or ``"doc"`` (a doc-header guess; a later pasted difficulty
-replaces it). Records are rewritten through :func:`fsutil.atomic_write_text`.
+replaces it). Records are rewritten through :func:`atomic_files.atomic_write_text`.
 SP7: :func:`grade_problem` moves ``review`` along the Leitner boxes (D4) and
 :func:`set_notes` replaces ``notes`` (D9), both under the same store lock as
 a run's upsert; :func:`review_summary` is the due queue.
@@ -63,7 +63,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from leetcoach import config, fsutil, patterns, storage
+from leetcoach import atomic_files, config, patterns, storage
 
 META_DIR = ".leetcoach"
 PROBLEMS_DIR = "problems"
@@ -792,7 +792,7 @@ def _upsert(meta: Path, pid: str, parsed: ParsedProblem, *, merge_from: str | No
         if p not in runs:
             runs.append(p)
     rec["runs"] = runs
-    fsutil.atomic_write_text(path, json.dumps(rec, ensure_ascii=False, indent=2) + "\n",
+    atomic_files.atomic_write_text(path, json.dumps(rec, ensure_ascii=False, indent=2) + "\n",
                              newline="\n")
     if old is not None:
         with contextlib.suppress(OSError):
@@ -992,7 +992,7 @@ def _update_record(pid: str, mutate, *, root=None) -> dict | None:
         if state == _REPAIRED:
             _preserve_original(path)
         mutate(rec)
-        fsutil.atomic_write_text(path, json.dumps(rec, ensure_ascii=False, indent=2) + "\n",
+        atomic_files.atomic_write_text(path, json.dumps(rec, ensure_ascii=False, indent=2) + "\n",
                                  newline="\n")
         return rec
 

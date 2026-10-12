@@ -159,8 +159,8 @@ def test_posix_group_cleanup_kills_the_cli_group_once_it_exited(monkeypatch, pee
         return True
 
     monkeypatch.setattr(claude_cli.subprocess, "Popen", spy_popen)
-    monkeypatch.setattr(claude_cli.proc_util, "child_exited_unreaped", lambda pid: peek)
-    monkeypatch.setattr(claude_cli.proc_util, "kill_process_group", fake_kill_group)
+    monkeypatch.setattr(claude_cli.process_tree, "child_exited_unreaped", lambda pid: peek)
+    monkeypatch.setattr(claude_cli.process_tree, "kill_process_group", fake_kill_group)
     script = "import sys\nsys.stdin.read()\nprint('done')\n"
     assert list(claude_cli._real_runner([sys.executable, "-c", script], "ping"))
     pid = procs[0].pid  # the group leader the runner spawned
@@ -172,23 +172,23 @@ def test_posix_group_cleanup_kills_the_cli_group_once_it_exited(monkeypatch, pee
 
 
 def test_proc_util_group_helpers_never_raise(monkeypatch):
-    from leetcoach import proc_util
+    from leetcoach import process_tree
 
     def gone(*args):
         raise ProcessLookupError
 
-    monkeypatch.setattr(proc_util.os, "killpg", gone, raising=False)
-    assert proc_util.kill_process_group(12345) is False
-    monkeypatch.setattr(proc_util.os, "waitid", gone, raising=False)
-    monkeypatch.setattr(proc_util.os, "WNOWAIT", 0x1000000, raising=False)
-    monkeypatch.setattr(proc_util.os, "P_PID", 1, raising=False)
-    monkeypatch.setattr(proc_util.os, "WEXITED", 4, raising=False)
-    monkeypatch.setattr(proc_util.os, "WNOHANG", 1, raising=False)
-    assert proc_util.child_exited_unreaped(12345) is None
-    monkeypatch.setattr(proc_util.os, "waitid", lambda *a: None)
-    assert proc_util.child_exited_unreaped(12345) is False  # still running
-    monkeypatch.setattr(proc_util.os, "waitid", lambda *a: object())
-    assert proc_util.child_exited_unreaped(12345) is True
+    monkeypatch.setattr(process_tree.os, "killpg", gone, raising=False)
+    assert process_tree.kill_process_group(12345) is False
+    monkeypatch.setattr(process_tree.os, "waitid", gone, raising=False)
+    monkeypatch.setattr(process_tree.os, "WNOWAIT", 0x1000000, raising=False)
+    monkeypatch.setattr(process_tree.os, "P_PID", 1, raising=False)
+    monkeypatch.setattr(process_tree.os, "WEXITED", 4, raising=False)
+    monkeypatch.setattr(process_tree.os, "WNOHANG", 1, raising=False)
+    assert process_tree.child_exited_unreaped(12345) is None
+    monkeypatch.setattr(process_tree.os, "waitid", lambda *a: None)
+    assert process_tree.child_exited_unreaped(12345) is False  # still running
+    monkeypatch.setattr(process_tree.os, "waitid", lambda *a: object())
+    assert process_tree.child_exited_unreaped(12345) is True
 
 
 def test_lingering_cli_after_result_is_killed_not_awaited(monkeypatch):

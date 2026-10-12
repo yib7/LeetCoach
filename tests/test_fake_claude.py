@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from leetcoach import app, classifier, claude_cli, parsing, prompts, sandbox
+from leetcoach import app, classifier, claude_cli, code_blocks, prompts, sandbox
 
 ROOT = Path(__file__).resolve().parent.parent
 DEV = ROOT / "scripts" / "dev"
@@ -87,7 +87,7 @@ def test_study_stream_parses_with_model_session_and_a_verifiable_solution(flags)
     assert handle.session_id
     assert text.startswith("# Two Sum")
     assert "**Input:**" in text and "**Output:**" in text
-    code = parsing.extract_code(text, "python")
+    code = code_blocks.extract_code(text, "python")
     assert "sys.stdin.read()" in code
     result = sandbox.verify_answer(code, TWO_SUM, "python")
     assert result.status == "pass", result.note
@@ -97,7 +97,7 @@ def test_study_stream_parses_with_model_session_and_a_verifiable_solution(flags)
 def test_in_band_markers_change_the_verdict(flags, marker, status):
     problem = TWO_SUM + "\n" + marker
     _, text = _study(flags, problem)
-    code = parsing.extract_code(text, "python")
+    code = code_blocks.extract_code(text, "python")
     assert sandbox.verify_answer(code, problem, "python").status == status
 
 
@@ -109,7 +109,7 @@ def test_model_alias_maps_to_a_concrete_id(flags):
 def test_other_languages_get_their_own_solution_block(flags):
     _, text = _study(flags, language="java")
     assert "```java solution" in text
-    assert "class Solution" in parsing.extract_code(text, "java")
+    assert "class Solution" in code_blocks.extract_code(text, "java")
 
 
 def test_learning_doc_has_an_untagged_block_and_no_solution(flags):
@@ -339,7 +339,7 @@ def test_fake_guided_doc_has_hints_brute_force_and_one_solution_block(flags):
     assert text.index("### Hint 4") < text.index("## Solution")
     assert "brute force" in text.lower()
     assert text.count("```python solution") == 1
-    code = parsing.extract_code(text, "python")
+    code = code_blocks.extract_code(text, "python")
     assert "json.dumps(" in code
     assert sandbox.verify_answer(code, TWO_SUM, "python").status == "pass"
 

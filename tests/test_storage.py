@@ -592,7 +592,7 @@ def test_save_unsorted_writes_hash_named_fallback(out_root):
 
 
 def test_answer_pair_is_written_all_or_nothing(out_root, monkeypatch):
-    from leetcoach import fsutil
+    from leetcoach import atomic_files
 
     real_replace = os.replace
 
@@ -601,7 +601,7 @@ def test_answer_pair_is_written_all_or_nothing(out_root, monkeypatch):
             raise OSError(28, "disk full")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(fsutil, "_replace", fail_md)
+    monkeypatch.setattr(atomic_files, "_replace", fail_md)
     with pytest.raises(OSError):
         storage.save_answer("Two Sum", "hash_map", tier="normal", language="python",
                             code="print(1)", reasoning="notes")

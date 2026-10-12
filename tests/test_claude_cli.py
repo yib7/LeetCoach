@@ -20,7 +20,7 @@ import os
 import sys
 import threading
 
-from leetcoach import claude_cli, config, proc_util
+from leetcoach import claude_cli, config, process_tree
 
 # --- fakes ---------------------------------------------------------------
 
@@ -449,11 +449,11 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
 
     Regression guard for audit review round 1, Important #2. This monkeypatches
     both sys.platform and subprocess.run so no real process (and no real
-    taskkill) is invoked. The implementation lives in `proc_util` (shared with
+    taskkill) is invoked. The implementation lives in `process_tree` (shared with
     sandbox.py since audit6 P1-2), so that's where the patches land; the call
     still goes through `claude_cli._kill_process_tree` to pin the re-export.
     """
-    monkeypatch.setattr(proc_util.sys, "platform", "win32")
+    monkeypatch.setattr(process_tree.sys, "platform", "win32")
     monkeypatch.setenv("SystemRoot", r"C:\WinDir")
     calls = []
 
@@ -465,7 +465,7 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
 
         return Result()
 
-    monkeypatch.setattr(proc_util.subprocess, "run", fake_run)
+    monkeypatch.setattr(process_tree.subprocess, "run", fake_run)
 
     class FakeProc:
         pid = 4242
@@ -487,11 +487,11 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
 
 
 def test_taskkill_falls_back_to_the_bare_name_without_systemroot(monkeypatch):
-    monkeypatch.setattr(proc_util.sys, "platform", "win32")
+    monkeypatch.setattr(process_tree.sys, "platform", "win32")
     monkeypatch.delenv("SystemRoot", raising=False)
     monkeypatch.delenv("SYSTEMROOT", raising=False)
     calls = []
-    monkeypatch.setattr(proc_util.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    monkeypatch.setattr(process_tree.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
 
     class FakeProc:
         pid = 4242
@@ -508,13 +508,13 @@ def test_kill_process_tree_taskkill_timeout_falls_back_to_terminate(monkeypatch)
     """
     import subprocess
 
-    monkeypatch.setattr(proc_util.sys, "platform", "win32")
+    monkeypatch.setattr(process_tree.sys, "platform", "win32")
 
     def fake_run(cmd, **kwargs):
         assert kwargs.get("timeout") == 10
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
 
-    monkeypatch.setattr(proc_util.subprocess, "run", fake_run)
+    monkeypatch.setattr(process_tree.subprocess, "run", fake_run)
 
     terminated = {"called": False}
 
@@ -531,7 +531,7 @@ def test_kill_process_tree_taskkill_timeout_falls_back_to_terminate(monkeypatch)
 
 
 def test_kill_process_tree_falls_back_to_terminate_on_non_windows(monkeypatch):
-    monkeypatch.setattr(proc_util.sys, "platform", "linux")
+    monkeypatch.setattr(process_tree.sys, "platform", "linux")
     terminated = {"called": False}
 
     class FakeProc:

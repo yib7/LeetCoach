@@ -17,7 +17,7 @@ import pytest
 from _helpers import parse_sse
 
 from leetcoach import app as app_module
-from leetcoach import claude_cli, fsutil, problem_store, prompts, storage
+from leetcoach import atomic_files, claude_cli, problem_store, prompts, storage
 
 PASTE = "1. Two Sum\nEasy\nGiven nums, return indices.\nExample: Input: 1\nOutput: 1"
 ANSWER_DOC = (
@@ -406,8 +406,8 @@ def test_failed_atomic_write_leaves_the_doc_untouched(root, monkeypatch):
     def locked(src, dst):
         raise PermissionError(13, "The process cannot access the file")
 
-    monkeypatch.setattr(fsutil, "_replace", locked)
-    monkeypatch.setattr(fsutil, "_sleep", lambda s: None)
+    monkeypatch.setattr(atomic_files, "_replace", locked)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
     _, (_, events) = _ask(_client(Recorder()), rel)
     name, msg = events[-1]
     assert name == "error" and "could not add the answer" in msg

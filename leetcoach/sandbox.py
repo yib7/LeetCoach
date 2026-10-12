@@ -8,7 +8,7 @@ analysis code (``statlee/sandbox.py``):
   key or any other app secret — only the bare minimum Windows/CPython needs;
 * POSIX ``resource`` rlimits, set by the bootstrap itself before the go byte
   (no ``preexec_fn``: it is not fork-safe in a threaded parent); on Windows a
-  **Job Object** (``proc_util.create_job_with_caps`` created+configured
+  **Job Object** (``process_tree.create_job_with_caps`` created+configured
   *before* the spawn, ``assign_to_job`` right after) caps per-process memory
   (512 MB, parity with ``RLIMIT_AS``) and active process count (16), with
   KILL_ON_JOB_CLOSE so closing the job handle in the ``finally`` nukes any
@@ -28,7 +28,7 @@ analysis code (``statlee/sandbox.py``):
 * ``subprocess.Popen`` with both output pipes drained on capped reader threads
   (never more than ``_OUTPUT_LIMIT`` retained — a runaway print loop gets the
   child killed, not hundreds of MB buffered) and a **whole-tree kill** on
-  timeout/overflow (``proc_util.kill_process_tree``) so grandchildren spawned
+  timeout/overflow (``process_tree.kill_process_tree``) so grandchildren spawned
   by the untrusted code die too.
 
 The public surface:
@@ -73,7 +73,7 @@ import time
 from dataclasses import dataclass, field
 
 from leetcoach import config
-from leetcoach.proc_util import (
+from leetcoach.process_tree import (
     assign_to_job,
     close_job,
     create_job_with_caps,
@@ -952,7 +952,7 @@ def verify_python(
             popen_kwargs["start_new_session"] = True
 
         # Windows: create + configure the Job Object BEFORE the spawn. Every
-        # slow step (one-time ctypes setup at proc_util import, job creation,
+        # slow step (one-time ctypes setup at process_tree import, job creation,
         # limit configuration) happens while no child exists — an earlier
         # revision did the ctypes setup lazily AFTER Popen, and the ~100ms
         # first-call import cost let the first child of a fresh process run

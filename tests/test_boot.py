@@ -42,8 +42,8 @@ def test_all_core_modules_import():
     from leetcoach import (
         classifier,  # noqa: F401
         claude_cli,  # noqa: F401
+        code_blocks,  # noqa: F401
         config,  # noqa: F401
-        parsing,  # noqa: F401
         prompts,  # noqa: F401
         sandbox,  # noqa: F401
         storage,  # noqa: F401
