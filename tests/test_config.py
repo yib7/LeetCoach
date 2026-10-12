@@ -10,6 +10,8 @@ Covered:
 """
 from __future__ import annotations
 
+import pytest
+
 from leetcoach import config
 
 # --- model_alias ----------------------------------------------------------
@@ -110,8 +112,6 @@ def test_upsert_tolerates_export_prefix(tmp_path):
 
 
 # --- B12: robust .env upsert ------------------------------------------------
-
-import pytest  # noqa: E402
 
 
 def test_upsert_handles_utf8_bom_without_duplicating_the_first_key(tmp_path):

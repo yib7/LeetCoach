@@ -84,6 +84,7 @@ def test_returns_empty_when_no_fence():
 
 def test_empty_input():
     assert code_blocks.extract_code("", "python") == ""
+    # None on purpose: the helper must tolerate a missing doc
     assert code_blocks.extract_code(None, "python") == ""  # type: ignore[arg-type]
 
 

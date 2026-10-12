@@ -26,7 +26,7 @@ def _spy_popen(monkeypatch):
     calls: list = []
     real_popen = subprocess.Popen
 
-    class _Spy(real_popen):  # type: ignore[misc, valid-type]
+    class _Spy(real_popen):  # type: ignore[misc, valid-type]  # subclasses the saved real Popen
         def __init__(self, args, *a, **k):
             calls.append(list(args) if isinstance(args, (list, tuple)) else args)
             super().__init__(args, *a, **k)
@@ -1076,7 +1076,7 @@ def test_windows_fails_closed_when_the_job_cannot_be_assigned(monkeypatch, caplo
     procs: list = []
     real_popen = subprocess.Popen
 
-    class _Spy(real_popen):  # type: ignore[misc, valid-type]
+    class _Spy(real_popen):  # type: ignore[misc, valid-type]  # subclasses the saved real Popen
         def __init__(self, args, *a, **k):
             super().__init__(args, *a, **k)
             procs.append(self)
@@ -1810,7 +1810,7 @@ def test_no_preexec_fn_and_a_caps_failure_is_not_verified(monkeypatch):
     calls: list = []
     real_popen = subprocess.Popen
 
-    class _Spy(real_popen):  # type: ignore[misc, valid-type]
+    class _Spy(real_popen):  # type: ignore[misc, valid-type]  # subclasses the saved real Popen
         def __init__(self, args, *a, **k):
             calls.append(k)
             super().__init__(args, *a, **k)

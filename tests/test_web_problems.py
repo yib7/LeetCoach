@@ -292,7 +292,7 @@ def test_problem_detail_log_includes_merged_aliases(out):
 
 
 @pytest.fixture
-def application(root):  # noqa: F811
+def application(root):  # noqa: F811 - fixture
     def no_claude(*a, **k):  # pragma: no cover - must never be called
         raise AssertionError("no Claude call expected")
 
@@ -311,7 +311,7 @@ def application(root):  # noqa: F811
     ({"two_sum": 1}, []),
     (7, []),
 ])
-def test_problems_listing_filters_non_string_aliases(root, application, raw, expected):  # noqa: F811
+def test_problems_listing_filters_non_string_aliases(root, application, raw, expected):  # noqa: F811 - fixture
     write_problem_record(root, "1-two_sum", number=1, aliases=raw)
     resp = application.test_client().get("/problems")
     assert resp.status_code == 200
@@ -322,7 +322,7 @@ def test_problems_listing_filters_non_string_aliases(root, application, raw, exp
 
 # --- M7: /problems counts only files that still exist -------------------------------
 
-def test_problems_drop_deleted_files_from_runs_and_file_count(root):  # noqa: F811
+def test_problems_drop_deleted_files_from_runs_and_file_count(root):  # noqa: F811 - fixture
     rel = _seed_doc(root)
     code = _write_doc(root, "answers/hash_map/1_two_sum__normal.py", "print(1)\n")
     problem_store.record_run(
@@ -344,7 +344,7 @@ def test_problems_drop_deleted_files_from_runs_and_file_count(root):  # noqa: F8
     assert len(problem_store.load_problem("1-two_sum", root=root)["runs"]) == 2
 
 
-def test_problems_listing_reads_existence_from_the_library_listing(root, monkeypatch):  # noqa: F811
+def test_problems_listing_reads_existence_from_the_library_listing(root, monkeypatch):  # noqa: F811 - fixture
     # 3B 3.5: /problems used to resolve every record's every run path (three
     # realpath calls each): ~300 ms per call on a 500-problem library. Files
     # the cached listing already holds cost no filesystem call; only a path
