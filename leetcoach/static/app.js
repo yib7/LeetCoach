@@ -3309,7 +3309,7 @@
         // SP8 fix M7: skip docs no longer in the library listing, and fall
         // back to the next candidate when one 404s (deleted since the listing).
         var candidates = core.docCandidatesFor(p.rec, libListed ? libByPath : null);
-        var NO_SOLUTION = "No saved solution exists for this problem - its saved docs were deleted " +
+        var NO_SOLUTION = "No saved solution for this problem: its study docs were deleted, " +
           "or it has none yet.";
         var path = "";
         function fetchNext(i) {
