@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.0] - 2026-10-08
+## [1.5.0] - 2026-10-12
 
 The study-loop release. Every audit finding is fixed (A1-A8, B1-B25, C1-C14), and the app
 grows from "generate a doc" into a practice loop: problem records, a run log, hints,
