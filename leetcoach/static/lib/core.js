@@ -268,7 +268,7 @@
       case "fail": return { cls: "fail", glyph: "✗", label: "Samples failed" };
       case "error": return { cls: "fail", glyph: "✗", label: "Code errored on the samples" };
       case "not_verified": return { cls: "warn", glyph: "!", label: "Not auto-verified" };
-      default: return { cls: "none", glyph: "—", label: "No verification (study notes)" };
+      default: return { cls: "none", glyph: "—", label: "No verification (no code to run)" };
     }
   }
 
