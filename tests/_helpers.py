@@ -1,6 +1,6 @@
 """Shared test helpers (audit P2-7 de-duplication).
 
-`tests/` is not a package; pytest's default (prepend) import mode puts this
+`tests/` is not a package; ``pythonpath`` in pyproject.toml puts this
 directory on ``sys.path``, so test modules can ``from _helpers import ...``.
 
 Holds the pieces that were copy-pasted across several test files:
@@ -15,6 +15,8 @@ Holds the pieces that were copy-pasted across several test files:
   unified here: ``test_topic_index`` asserts on ``binary_search`` and
   ``test_modes`` exercises a two-topic reply — importing this constant would
   break the first and hide the intent of the second.
+* :func:`write_problem_record` — a hand-written ``.leetcoach/problems`` record,
+  used by ``test_problem_records`` and ``test_web_problems``.
 """
 from __future__ import annotations
 
@@ -36,7 +38,10 @@ def parse_sse(body: str):
             continue
         event_name = None
         data_lines = []
-        for line in block.split("\n"):
+        lines = block.split("\n")
+        if all(line.startswith(":") for line in lines):
+            continue  # an SSE comment frame (the C3 ": ping" heartbeat)
+        for line in lines:
             if line.startswith("event:"):
                 event_name = line[len("event:"):].strip()
             elif line.startswith("data:"):
@@ -48,3 +53,118 @@ def parse_sse(body: str):
         else:
             events.append((event_name, json.loads(data) if data else None))
     return text_chunks, events
+
+
+# Canned `claude --help` text for the A7 help-probe gate. The suite-wide
+# autouse fixture (tests/conftest.py) feeds this to claude_cli's probe so no
+# test ever spawns the real CLI just to learn which flags it supports. It lists
+# every optional isolation flag LeetCoach knows about (and --bare, which must
+# still never be passed).
+FAKE_CLAUDE_HELP = """Usage: claude [options] [command] [prompt]
+
+Options:
+  --bare                                Minimal mode (never used by LeetCoach)
+  --model <model>                       Model for the current session.
+  --no-session-persistence              Disable session persistence
+  --output-format <format>              Output format
+  -p, --print                           Print response and exit
+  -r, --resume [value]                  Resume a conversation by session ID
+  --safe-mode                           Start with all customizations disabled
+  --strict-mcp-config                   Only use MCP servers from --mcp-config
+  --system-prompt <prompt>              System prompt to use for the session
+  --tools <tools...>                    Use "" to disable all tools
+  --verbose                             Override verbose mode setting
+"""
+
+
+def pid_alive(pid: int) -> bool:
+    """True while process ``pid`` is still running (no signal is sent).
+
+    Windows: ``os.kill(pid, 0)`` would call TerminateProcess, so ask the kernel
+    via OpenProcess + WaitForSingleObject instead. POSIX: signal 0 probe.
+    """
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        import ctypes
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+        k32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+        k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        synchronize = 0x00100000
+        handle = k32.OpenProcess(synchronize, 0, pid)
+        if not handle:
+            return False
+        try:
+            return k32.WaitForSingleObject(handle, 0) == 0x102  # WAIT_TIMEOUT
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def wait_dead(pid: int, timeout: float = 8.0) -> bool:
+    """Poll until ``pid`` is gone (True) or ``timeout`` elapses (False)."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not pid_alive(pid)
+
+
+# --- 3A W9: wall-clock-free dates ------------------------------------------------
+# "N days ago" as N * 86400 real seconds lands on the wrong calendar day near
+# midnight when a 23 h / 25 h DST day lies in between, and a test that reads
+# the clock separately from the server can disagree with it across midnight.
+
+def local_noon(day) -> float:
+    """Epoch seconds of local noon on ``day`` (a ``datetime.date``): an mtime
+    that is unambiguously on that local calendar day."""
+    from datetime import datetime
+    from datetime import time as dtime
+
+    return datetime.combine(day, dtime(12)).timestamp()
+
+
+def freeze_stats_now(monkeypatch, now) -> None:
+    """Make ``GET /stats`` compute "today" / the streak / the heatmap at the
+    aware datetime ``now`` instead of reading the real clock."""
+    from leetcoach import stats
+
+    real = stats.compute_stats
+
+    def frozen(entries, files, **kwargs):
+        kwargs["now"] = now
+        return real(entries, files, **kwargs)
+
+    monkeypatch.setattr(stats, "compute_stats", frozen)
+
+
+# --- a hand-written problem record ------------------------------------------------
+# Shared by the record-merge tests (test_problem_records) and the /problems
+# listing tests (test_web_problems): write ``.leetcoach/problems/<pid>.json``
+# directly, as a hand edit or an older version of the app would have left it.
+
+def write_problem_record(root, pid, **fields):
+    """Write problem record ``pid`` under ``root`` (an output dir): a minimal
+    un-numbered "Two Sum" record, with ``fields`` overriding any key."""
+    folder = root / ".leetcoach" / "problems"
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = {"id": pid, "number": None, "title": "Two Sum", "difficulty": None,
+           "pattern": "hash_map", "statement": "", "created": "2026-01-01T00:00:00",
+           "updated": "2026-01-01T00:00:00", "notes": "",
+           "review": {"box": 1, "due": "2026-01-02", "history": []},
+           "runs": [], "aliases": []}
+    rec.update(fields)
+    (folder / f"{pid}.json").write_text(json.dumps(rec), "utf-8")

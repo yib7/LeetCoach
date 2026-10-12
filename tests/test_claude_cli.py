@@ -12,27 +12,34 @@ emits (observed live during SP1):
     IGNORED (they are not user-visible answer text)
   - a fallback shape (when --include-partial-messages is off) is:
       {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+
+The parser also records the concrete model id a run reports (``system/init``,
+else the assistant message) on the ``ClaudeRun`` handle.
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 
-import claude_cli
-import config
-import proc_util
+from leetcoach import claude_cli, config, process_tree
 
 # --- fakes ---------------------------------------------------------------
 
-def make_recording_runner(lines):
-    """Return (runner, calls) where runner records argv + stdin and yields `lines`."""
-    calls = []
 
-    def runner(argv, stdin_text):
+def make_recording_runner(lines, *, terminal_result=True):
+    """Return (runner, calls) where runner records argv + stdin and yields `lines`.
+
+    Like the real CLI, the stream ends with a ``result`` event unless the test
+    already supplies one (or opts out with ``terminal_result=False``)."""
+    calls = []
+    if terminal_result and not any('"type": "result"' in ln for ln in lines):
+        lines = [*lines, json.dumps({"type": "result", "subtype": "success", "result": ""})]
+
+    def runner(argv, stdin_text, **kwargs):  # kwargs: cwd / handle (A7)
         calls.append({"argv": list(argv), "stdin": stdin_text})
-        for line in lines:
-            yield line
+        yield from lines
 
     return runner, calls
 
@@ -115,7 +122,7 @@ def test_default_model_used_when_none_given(monkeypatch):
     list(claude_cli.run("hi", runner=runner))
 
     argv = calls[0]["argv"]
-    assert "claude-opus-4-8" in argv
+    assert "opus" in argv  # the default is the `opus` alias (tracks the latest Opus)
 
 
 # --- (b) stream-json -> text-delta assembly ------------------------------
@@ -198,6 +205,62 @@ def test_is_available_uses_configured_binary_name(monkeypatch):
 
     assert claude_cli.is_available(which=fake_which) is True
     assert seen["name"] == "my-claude"
+
+
+# --- (c2) auth_status: sign-in probe via `claude auth status` -------------
+
+import types  # noqa: E402 - grouped with the auth-probe tests it supports
+
+
+def _fake_proc(stdout):
+    return types.SimpleNamespace(stdout=stdout, returncode=0)
+
+
+def test_auth_status_reports_logged_in():
+    seen = {}
+
+    def fake_run(argv):
+        seen["argv"] = argv
+        return _fake_proc('{"loggedIn": true, "authMethod": "oauth"}')
+
+    st = claude_cli.auth_status(run=fake_run, which=lambda name: "/usr/bin/claude")
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=True)
+    # it asks the CLI the right question
+    assert seen["argv"][-2:] == ["auth", "status"]
+
+
+def test_auth_status_reports_logged_out():
+    st = claude_cli.auth_status(
+        run=lambda argv: _fake_proc('{"loggedIn": false, "authMethod": "none"}'),
+        which=lambda name: "/usr/bin/claude",
+    )
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=False)
+
+
+def test_auth_status_missing_binary_is_not_installed():
+    # No binary on PATH -> installed False, and the runner is never called.
+    def boom(argv):
+        raise AssertionError("runner must not be called when the binary is missing")
+
+    st = claude_cli.auth_status(run=boom, which=lambda name: None)
+    assert st == claude_cli.AuthStatus(installed=False, logged_in=False)
+
+
+def test_auth_status_malformed_output_is_safe():
+    # Non-JSON output must not raise; treat as installed-but-signed-out.
+    st = claude_cli.auth_status(
+        run=lambda argv: _fake_proc("not json at all"),
+        which=lambda name: "/usr/bin/claude",
+    )
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=False)
+
+
+def test_auth_status_runner_crash_is_safe():
+    def boom(argv):
+        raise OSError("spawn failed")
+
+    st = claude_cli.auth_status(run=boom, which=lambda name: "/usr/bin/claude")
+    assert st == claude_cli.AuthStatus(installed=True, logged_in=False)
 
 
 def test_run_raises_clear_error_when_unavailable():
@@ -340,11 +403,11 @@ def test_run_full_chain_kills_subprocess_on_early_close():
         "sys.stdout.write('second\\n')\n"
     )
 
-    def real_argv_runner(argv, stdin_text):
+    def real_argv_runner(argv, stdin_text, **kwargs):
         # Ignore the real argv claude_cli.run() built (it targets `claude`);
         # substitute this python stand-in script instead, but otherwise go
         # through the exact same _real_runner code path.
-        return claude_cli._real_runner([sys.executable, "-c", script], stdin_text)
+        return claude_cli._real_runner([sys.executable, "-c", script], stdin_text, **kwargs)
 
     gen = claude_cli.run("hi", runner=real_argv_runner)
     first = next(gen)
@@ -389,11 +452,12 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
 
     Regression guard for audit review round 1, Important #2. This monkeypatches
     both sys.platform and subprocess.run so no real process (and no real
-    taskkill) is invoked. The implementation lives in `proc_util` (shared with
+    taskkill) is invoked. The implementation lives in `process_tree` (shared with
     sandbox.py since audit6 P1-2), so that's where the patches land; the call
     still goes through `claude_cli._kill_process_tree` to pin the re-export.
     """
-    monkeypatch.setattr(proc_util.sys, "platform", "win32")
+    monkeypatch.setattr(process_tree.sys, "platform", "win32")
+    monkeypatch.setenv("SystemRoot", r"C:\WinDir")
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -404,7 +468,7 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
 
         return Result()
 
-    monkeypatch.setattr(proc_util.subprocess, "run", fake_run)
+    monkeypatch.setattr(process_tree.subprocess, "run", fake_run)
 
     class FakeProc:
         pid = 4242
@@ -417,14 +481,60 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch):
     assert invoked_tree_kill is True
     assert len(calls) == 1
     cmd = calls[0]
-    assert cmd[0] == "taskkill"
+    # 3A C14: by full path, never a bare name CreateProcess would look up in
+    # the app dir / cwd first.
+    assert cmd[0] == os.path.join(r"C:\WinDir", "System32", "taskkill.exe")
     assert "/T" in cmd and "/F" in cmd
     assert "/PID" in cmd
     assert str(FakeProc.pid) in cmd
 
 
+def test_taskkill_falls_back_to_the_bare_name_without_systemroot(monkeypatch):
+    monkeypatch.setattr(process_tree.sys, "platform", "win32")
+    monkeypatch.delenv("SystemRoot", raising=False)
+    monkeypatch.delenv("SYSTEMROOT", raising=False)
+    calls = []
+    monkeypatch.setattr(process_tree.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+
+    class FakeProc:
+        pid = 4242
+
+    assert claude_cli._kill_process_tree(FakeProc()) is True
+    assert calls[0][0] == "taskkill"
+
+
+def test_kill_process_tree_taskkill_timeout_falls_back_to_terminate(monkeypatch):
+    """SP2 M6 review: `taskkill` was run with no timeout, so a hung/wedged
+    taskkill (rare, but observed on some Windows setups) could block the
+    caller forever. It must be bounded and, on a timeout, fall through to the
+    same terminate() backstop used when taskkill itself is unusable.
+    """
+    import subprocess
+
+    monkeypatch.setattr(process_tree.sys, "platform", "win32")
+
+    def fake_run(cmd, **kwargs):
+        assert kwargs.get("timeout") == 10
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
+
+    monkeypatch.setattr(process_tree.subprocess, "run", fake_run)
+
+    terminated = {"called": False}
+
+    class FakeProc:
+        pid = 4242
+
+        def terminate(self):
+            terminated["called"] = True
+
+    invoked_tree_kill = claude_cli._kill_process_tree(FakeProc())
+
+    assert invoked_tree_kill is False
+    assert terminated["called"] is True
+
+
 def test_kill_process_tree_falls_back_to_terminate_on_non_windows(monkeypatch):
-    monkeypatch.setattr(proc_util.sys, "platform", "linux")
+    monkeypatch.setattr(process_tree.sys, "platform", "linux")
     terminated = {"called": False}
 
     class FakeProc:
@@ -547,3 +657,60 @@ def test_real_runner_surfaces_stderr_on_nonzero_exit():
         assert "3" in str(exc)
     else:
         raise AssertionError("expected ClaudeUnavailableError on nonzero exit")
+
+
+# --- SP2 M6: the suite fails closed ------------------------------------------
+
+def test_suite_default_binary_is_unresolvable_so_default_spawns_fail_closed():
+    import shutil
+
+    import pytest
+
+    assert shutil.which(config.claude_bin()) is None
+    # The real-runner path (no runner=) refuses before spawning anything.
+    with pytest.raises(claude_cli.ClaudeUnavailableError, match="not found on PATH"):
+        list(claude_cli.run("x"))
+    assert claude_cli.auth_status() == claude_cli.AuthStatus(installed=False, logged_in=False)
+
+
+# --- claude_cli: the concrete model id ----------------------------------------
+
+def _lines(*objs):
+    return [json.dumps(o) for o in objs]
+
+
+def test_parser_captures_model_from_system_init():
+    handle = claude_cli.ClaudeRun()
+    lines = _lines(
+        {"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-opus-5-5"},
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+                                           "delta": {"type": "text_delta", "text": "hi"}}},
+        {"type": "assistant", "message": {"model": "other", "content": []}},
+        {"type": "result", "subtype": "success", "result": "hi"},
+    )
+    assert list(claude_cli._iter_text_deltas(lines, handle)) == ["hi"]
+    assert handle.model == "claude-opus-5-5"
+    assert handle.session_id == "s1"
+
+
+def test_parser_falls_back_to_the_assistant_message_model():
+    handle = claude_cli.ClaudeRun()
+    lines = _lines(
+        {"type": "system", "subtype": "init", "model": None},
+        {"type": "assistant", "message": {"model": "claude-sonnet-5-5",
+                                          "content": [{"type": "text", "text": "x"}]}},
+        {"type": "result", "subtype": "success", "result": "x"},
+    )
+    assert "".join(claude_cli._iter_text_deltas(lines, handle)) == "x"
+    assert handle.model == "claude-sonnet-5-5"
+
+
+def test_parser_ignores_odd_model_shapes():
+    handle = claude_cli.ClaudeRun()
+    lines = _lines(
+        {"type": "system", "subtype": "init", "model": ["x"]},
+        {"type": "system", "subtype": "other", "model": "nope"},
+        {"type": "result", "subtype": "success", "result": "y"},
+    )
+    assert "".join(claude_cli._iter_text_deltas(lines, handle)) == "y"
+    assert handle.model is None

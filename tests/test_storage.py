@@ -19,8 +19,7 @@ from pathlib import Path
 
 import pytest
 
-import config
-import storage
+from leetcoach import config, storage
 
 
 @pytest.fixture
@@ -33,12 +32,13 @@ def out_root(tmp_path, monkeypatch):
 
 # --- config: default output dir is anchored, not CWD-relative (P2-10) ----
 
-def test_default_output_dir_is_anchored_next_to_config(monkeypatch):
+def test_default_output_dir_is_anchored_at_the_repo_root(monkeypatch):
     # Without the env override, output_dir() must be an ABSOLUTE path anchored
-    # to the directory containing config.py — launching from another CWD
-    # (e.g. `flask run` elsewhere) must not fork the study library.
+    # to the repo root (where output/ has always lived, also after the code
+    # moved into leetcoach/) — launching from another CWD (e.g. `flask run`
+    # elsewhere) must not fork the study library.
     monkeypatch.delenv("LEETCOACH_OUTPUT_DIR", raising=False)
-    expected = Path(config.__file__).resolve().parent / "output"
+    expected = Path(__file__).resolve().parent.parent / "output"
     assert config.output_dir() == expected
     assert config.output_dir().is_absolute()
 
@@ -111,6 +111,56 @@ def test_problem_name_uses_title_line():
     assert storage._problem_name(problem) == "two_sum"
 
 
+# --- 3A S6: a generic / labelled first line no longer names the file ----------
+
+@pytest.mark.parametrize("paste,stem", [
+    ("Description\n1. Two Sum\nGiven an array...", "1_two_sum"),
+    ("## Problem Description\n\n1. Two Sum\nEasy\n", "1_two_sum"),
+    ("Problem:\nValid Parentheses\n", "valid_parentheses"),
+    ("Problem: Two Sum\nGiven...", "two_sum"),
+    ("Title - 3Sum\nMedium", "3sum"),
+    ("---\nDescription\nLongest Substring\n", "longest_substring"),
+])
+def test_problem_name_skips_generic_first_lines_like_the_problem_id(paste, stem):
+    assert storage._problem_name(paste) == stem
+
+
+@pytest.mark.parametrize("paste,stem", [
+    # every paste whose first line names the problem keeps its old file name
+    ("1. Two Sum (Easy)\nGiven...", "1_two_sum_easy"),
+    ("# Two Sum\n", "two_sum"),
+    ("Problem 42 Trapping Rain Water\n", "problem_42_trapping_rain_water"),
+    ("Descriptions of graphs\n", "descriptions_of_graphs"),
+    ("  Two Sum  \r\nGiven...", "two_sum"),
+    # no line names a problem at all: unchanged too
+    ("Description\n---\n", "description"),
+    ("", "untitled"),
+])
+def test_problem_name_is_unchanged_when_the_first_line_names_the_problem(paste, stem):
+    assert storage._problem_name(paste) == stem
+
+
+def test_pastes_starting_with_description_save_to_their_own_files(out_root):
+    a = storage.save_learning("Description\nTwo Sum\nGiven...", "hashing", "# A\n")
+    b = storage.save_learning("Description\nThree Sum\nGiven...", "hashing", "# B\n")
+    assert Path(a).name == "two_sum.md"
+    assert Path(b).name == "three_sum.md"
+
+
+# --- 3A S5: a CRLF body re-saves idempotently, without doubled CRs ------------
+
+def test_crlf_body_is_saved_once_and_rerun_reuses_the_slot(out_root):
+    body = "# Review\r\n\r\n```python\r\nprint(1)\r\n```\r\n"
+    first = storage.save_review("Two Sum", "hashing", body)
+    again = storage.save_review("Two Sum", "hashing", body)
+    assert first == again
+    raw = Path(first).read_bytes()
+    assert b"\r\r" not in raw
+    assert Path(first).read_text(encoding="utf-8") == body.replace("\r\n", "\n")
+    # the LF form of the same body is the same content, too
+    assert storage.save_review("Two Sum", "hashing", body.replace("\r\n", "\n")) == first
+
+
 # --- regression: a full pasted problem must not blow past the path limit -----
 
 def test_save_answer_full_problem_paste_stays_short(out_root):
@@ -173,20 +223,20 @@ def test_save_answer_python_paths(out_root):
 )
 def test_save_answer_extension_per_language(out_root, language, ext):
     code_path, _ = storage.save_answer(
-        "Add Two", "linked_list", tier="simple", language=language,
+        "Add Two", "linked_list", tier="basic", language=language,
         code="x", reasoning="r",
     )
-    assert Path(code_path).name == f"add_two__simple.{ext}"
+    assert Path(code_path).name == f"add_two__basic.{ext}"
 
 
 def test_save_answer_creates_parent_dirs(out_root):
     # nothing exists yet; save must create the full tree
     assert not out_root.exists()
     storage.save_answer(
-        "Brand New", "fresh_type", tier="complex", language="python",
+        "Brand New", "fresh_type", tier="optimal", language="python",
         code="x", reasoning="r",
     )
-    assert (out_root / "answers" / "fresh_type" / "brand_new__complex.py").exists()
+    assert (out_root / "answers" / "fresh_type" / "brand_new__optimal.py").exists()
 
 
 # --- security: cannot escape output/ -------------------------------------
@@ -228,6 +278,46 @@ def test_returned_path_is_within_configured_root(out_root):
     assert common == str(out_root.resolve())
 
 
+# --- B24: no extracted code -> don't write an empty code husk -------------
+
+def test_save_answer_blank_code_writes_no_code_file(out_root):
+    """When ``extract_code`` found nothing, ``code`` is ``""``. Writing a
+    0-byte ``.py`` "solution" file would silently look like a real (if empty)
+    answer in the library, so B24 says: write the reasoning .md only and
+    return ``None`` for the code path."""
+    code_path, reasoning_path = storage.save_answer(
+        "Two Sum", "two_pointers", tier="normal", language="python",
+        code="", reasoning="No code block was found in the response.",
+    )
+    assert code_path is None
+    assert Path(reasoning_path).exists()
+    answers_dir = out_root / "answers" / "two_pointers"
+    files = [p for p in answers_dir.iterdir() if p.is_file()]
+    assert files == [Path(reasoning_path)], f"unexpected extra files: {files}"
+
+
+def test_save_answer_whitespace_only_code_writes_no_code_file(out_root):
+    """Whitespace-only ``code`` (e.g. a fence containing only blank lines)
+    counts as "no code" too."""
+    code_path, reasoning_path = storage.save_answer(
+        "Two Sum", "two_pointers", tier="normal", language="python",
+        code="   \n\t\n", reasoning="r",
+    )
+    assert code_path is None
+    assert Path(reasoning_path).exists()
+
+
+def test_save_answer_non_blank_code_still_writes_both_files(out_root):
+    # regression guard: the ordinary path (non-empty code) is unaffected
+    code_path, reasoning_path = storage.save_answer(
+        "Two Sum", "two_pointers", tier="normal", language="python",
+        code="def two_sum(): pass", reasoning="r",
+    )
+    assert code_path is not None
+    assert Path(code_path).exists()
+    assert Path(reasoning_path).exists()
+
+
 # --- collisions: suffix instead of clobber (P2-11) ------------------------
 
 def test_rerun_identical_content_is_idempotent(out_root):
@@ -263,7 +353,7 @@ def test_suffixed_slot_is_idempotent_too(out_root):
 
 
 def test_answer_rerun_identical_pair_is_idempotent(out_root):
-    kwargs = dict(tier="normal", language="python", code="code", reasoning="why")
+    kwargs = {"tier": "normal", "language": "python", "code": "code", "reasoning": "why"}
     first = storage.save_answer("Two Sum", "arrays", **kwargs)
     second = storage.save_answer("Two Sum", "arrays", **kwargs)
     assert first == second
@@ -375,3 +465,163 @@ def test_concurrent_save_answer_pairs_stay_matched(out_root):
         sibling_md = py.with_suffix(".md")
         assert sibling_md.exists(), f"{py.name} has no sibling reasoning file"
         assert sibling_md.read_text(encoding="utf-8") == f"reasoning_{i}"
+
+
+# --- one-time tier rename migration (simple/complex -> basic/optimal) -----
+
+def _touch(path: Path, body: str = "x") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_migrate_renames_simple_and_complex_pairs(out_root):
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "two_sum__simple.py", "code")
+    _touch(ans / "two_sum__simple.md", "why")
+    _touch(ans / "three_sum__complex.py", "code")
+    _touch(ans / "three_sum__complex.md", "why")
+
+    renamed = storage.migrate_tier_suffixes(out_root)
+
+    # both siblings of both answers moved (4 files)
+    assert len(renamed) == 4
+    assert (ans / "two_sum__basic.py").exists()
+    assert (ans / "two_sum__basic.md").exists()
+    assert (ans / "three_sum__optimal.py").exists()
+    assert (ans / "three_sum__optimal.md").exists()
+    # the old names are gone
+    assert not (ans / "two_sum__simple.py").exists()
+    assert not (ans / "three_sum__complex.md").exists()
+    # content is preserved through the rename
+    assert (ans / "two_sum__basic.py").read_text(encoding="utf-8") == "code"
+
+
+def test_migrate_leaves_normal_and_unrelated_files_alone(out_root):
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "two_sum__normal.py", "code")
+    _touch(ans / "notes.md", "loose")  # no tier segment at all
+    # a problem whose slug contains "simple" as a word must NOT be touched:
+    # the tier is the SECOND __-segment, not any substring.
+    _touch(ans / "simplify_path__normal.py", "code")
+
+    renamed = storage.migrate_tier_suffixes(out_root)
+
+    assert renamed == []
+    assert (ans / "two_sum__normal.py").exists()
+    assert (ans / "notes.md").exists()
+    assert (ans / "simplify_path__normal.py").exists()
+
+
+def test_migrate_handles_slot_suffix(out_root):
+    # A collision slot appends __N after the tier: <problem>__<tier>__2. The
+    # tier is still the second segment and must migrate, keeping the slot.
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "two_sum__complex__2.py", "code")
+
+    storage.migrate_tier_suffixes(out_root)
+
+    assert (ans / "two_sum__optimal__2.py").exists()
+    assert not (ans / "two_sum__complex__2.py").exists()
+
+
+def test_migrate_is_idempotent_and_never_clobbers(out_root):
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "two_sum__simple.py", "old")
+    # a hand-created file already occupies the destination name
+    _touch(ans / "two_sum__basic.py", "already here")
+
+    renamed = storage.migrate_tier_suffixes(out_root)
+
+    # the rename is skipped rather than clobbering the existing destination
+    assert renamed == []
+    assert (ans / "two_sum__simple.py").read_text(encoding="utf-8") == "old"
+    assert (ans / "two_sum__basic.py").read_text(encoding="utf-8") == "already here"
+
+
+def test_migrate_no_answers_dir_is_noop(out_root):
+    # Nothing saved yet: the answers/ tree doesn't exist. Must be a safe no-op.
+    assert storage.migrate_tier_suffixes(out_root) == []
+
+
+def test_migrate_second_run_finds_nothing(out_root):
+    ans = out_root / "answers" / "arrays"
+    _touch(ans / "x__simple.py", "code")
+    first = storage.migrate_tier_suffixes(out_root)
+    second = storage.migrate_tier_suffixes(out_root)
+    assert len(first) == 1
+    assert second == []  # already migrated; a repeat launch does nothing
+
+
+# --- B25: non-ASCII titles, save fallback, atomic Answer pair --------------
+
+def test_slug_transliterates_accents_via_nfkd():
+    assert storage.slug("Café Crème") == "cafe_creme"
+    assert storage.slug("Ｔｗｏ Sum") == "two_sum"  # full-width letters
+
+
+def test_slug_hash_fallback_for_titles_with_no_ascii_letters():
+    a = storage.slug("两数之和")      # "two sum" in Chinese
+    b = storage.slug("三数之和")      # "three sum"
+    assert a != b                                      # no more shared "untitled"
+    assert a.startswith("untitled_") and b.startswith("untitled_")
+    assert a == storage.slug("两数之和")  # deterministic
+    assert storage._UNSAFE.sub("", a) == a              # still a safe token
+    assert a == storage.slug(a)                         # idempotent
+
+
+def test_slug_pure_punctuation_still_untitled():
+    assert storage.slug("!!!") == "untitled"
+    assert storage.slug("") == "untitled"
+
+
+def test_non_ascii_problems_save_to_distinct_files(out_root):
+    p1 = storage.save_learning("两数之和\n...", "hash_map", "A")
+    p2 = storage.save_learning("三数之和\n...", "hash_map", "B")
+    assert Path(p1).name != Path(p2).name
+    assert "__2" not in Path(p2).name
+
+
+def test_save_unsorted_writes_hash_named_fallback(out_root):
+    path = Path(storage.save_unsorted("# Doc\n\nbody"))
+    assert path.parent == out_root / "_unsorted"
+    assert path.suffix == ".md"
+    assert path.read_text(encoding="utf-8") == "# Doc\n\nbody"
+    again = Path(storage.save_unsorted("# Doc\n\nbody"))
+    assert again == path  # same content, same name (idempotent)
+
+
+def test_answer_pair_is_written_all_or_nothing(out_root, monkeypatch):
+    from leetcoach import atomic_files
+
+    real_replace = os.replace
+
+    def fail_md(src, dst):
+        if os.fspath(dst).endswith(".md"):
+            raise OSError(28, "disk full")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(atomic_files, "_replace", fail_md)
+    with pytest.raises(OSError):
+        storage.save_answer("Two Sum", "hash_map", tier="normal", language="python",
+                            code="print(1)", reasoning="notes")
+    folder = out_root / "answers" / "hash_map"
+    leftovers = list(folder.iterdir()) if folder.exists() else []
+    assert leftovers == []  # no orphaned .py without its .md
+
+
+# --- SP4 review M8: mostly non-ASCII titles get a hash suffix ------------------
+
+def test_slug_appends_hash_when_most_letters_have_no_ascii_form():
+    a = storage.slug("跳跃游戏 II")
+    b = storage.slug("买卖股票的最佳时机 II")
+    assert a != b  # both used to collapse to "ii"
+    assert a.startswith("ii_") and b.startswith("ii_")
+    assert len(a.split("_")[-1]) == 8
+    assert storage.slug("跳跃游戏 II") == a  # deterministic
+
+
+def test_slug_keeps_plain_form_when_most_letters_are_ascii():
+    assert storage.slug("Café Crème") == "cafe_creme"
+    assert storage.slug("Ｔｗｏ Sum") == "two_sum"  # full-width transliterates
+    assert storage.slug("Two Sum 二") == "two_sum"  # 1 of 7 letters lost

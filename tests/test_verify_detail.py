@@ -23,9 +23,8 @@ import pytest
 from _helpers import CLASSIFY_JSON
 from _helpers import parse_sse as _parse_sse
 
-import app as app_module
-import parsing
-import topic_index
+from leetcoach import app as app_module
+from leetcoach import code_blocks, topic_index
 
 # A problem with one parseable sample (mirrors test_sandbox.py's fixture).
 PROBLEM_WITH_SAMPLE = (
@@ -151,6 +150,62 @@ def test_passing_run_saves_no_detail_block(tmp_path, monkeypatch):
     assert "Got:" not in saved
 
 
+# --- B4: the error reason (e.g. a timeout) reaches the saved .md -----------
+
+TIMEOUT_ANSWER = (
+    "Reasoning: this one hangs forever.\n\n"
+    "```python\n"
+    "while True:\n"
+    "    pass\n"
+    "```\n\n"
+    "Complexity: O(n).\n"
+)
+
+
+def test_timed_out_sample_note_lands_in_saved_md(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "1")
+    c = _make_client(tmp_path, monkeypatch, TIMEOUT_ANSWER)
+    resp = _post_run(c, "answer")
+    assert resp.status_code == 200
+    resp.get_data(as_text=True)
+
+    saved = _saved_md(tmp_path, "answers")
+    assert "✗ Sample tests ERROR" in saved
+    # the per-sample block must name WHY it errored, not just "error" with no
+    # reason (the old aggregation dropped the note for a timeout entirely).
+    assert "timed out" in saved.lower()
+
+
+# --- Phase 4: the saved traceback names solution.py, not the temp run dir ---
+
+CRASHING_ANSWER = (
+    "Reasoning: this one crashes.\n\n"
+    "```python\n"
+    "def solve():\n"
+    "    raise ValueError('crash marker')\n"
+    "solve()\n"
+    "```\n\n"
+    "Complexity: O(1).\n"
+)
+
+
+def test_saved_traceback_does_not_leak_the_temp_run_dir(tmp_path, monkeypatch):
+    # The library is the user's to share; a saved doc must not carry the
+    # absolute temp path (and with it the OS user name) of the sandbox run.
+    from leetcoach import sandbox
+
+    c = _make_client(tmp_path, monkeypatch, CRASHING_ANSWER)
+    resp = _post_run(c, "answer")
+    assert resp.status_code == 200
+    resp.get_data(as_text=True)
+
+    saved = _saved_md(tmp_path, "answers")
+    assert "crash marker" in saved  # the stderr is still there...
+    assert 'File "solution.py", line 2' in saved  # ...naming just the script
+    assert sandbox._RUN_DIR_PREFIX not in saved
+    assert __import__("tempfile").gettempdir() not in saved
+
+
 # --- P2-13: extract_code runs exactly once per run --------------------------
 
 @pytest.mark.parametrize(
@@ -159,13 +214,13 @@ def test_passing_run_saves_no_detail_block(tmp_path, monkeypatch):
 )
 def test_extract_code_called_exactly_once(tmp_path, monkeypatch, mode, markdown):
     calls = []
-    real = parsing.extract_code
+    real = code_blocks.extract_code
 
     def counting_extract(markdown_text, language):
         calls.append(language)
         return real(markdown_text, language)
 
-    monkeypatch.setattr(parsing, "extract_code", counting_extract)
+    monkeypatch.setattr(code_blocks, "extract_code", counting_extract)
 
     c = _make_client(tmp_path, monkeypatch, markdown)
     resp = _post_run(c, mode)

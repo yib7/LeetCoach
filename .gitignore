@@ -1,35 +1,41 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
 .pytest_cache/
 .ruff_cache/
 .venv/
+# The README makes .venv; this catches a venv made under the other common name
+# before its thousands of files get committed.
 venv/
 
-# Env / secrets
+# Env / secrets (.env.example is the tracked template)
 .env
+.env.*
+!.env.example
+*.pem
+*.key
 
-# Generated study library (personal output; not source)
+# The generated study library (the default LEETCOACH_OUTPUT_DIR, topic index
+# included): personal output, not source
 output/
-topic_index.json
 
-# Autopilot / AI working files — kept on disk for continuity, never published
+# Local AI-assistant working files: kept on disk, never published.
+# NEW_UPDATES.md and LeetCoach_Code_Audit_Report.md are the owner's local
+# planning notes and audit report in the repo root.
 .autopilot/
 CLAUDE.md
 .claude/
-# superpowers plugin work dir; absent now but ignored so a future run never commits it
 .superpowers/
+docs/superpowers/
 NEW_UPDATES.md
-# code-audit report (dev scaffolding — findings are fixed in-tree, report never ships)
 LeetCoach_Code_Audit_Report.md
 
-# IDE / editor
+# Contributors' editor settings and swap files (the repo ships none)
 .vscode/
 .idea/
 *.swp
 *~
 
-# OS
+# OS metadata (development is on Windows; CI also runs on macOS)
 .DS_Store
 Thumbs.db

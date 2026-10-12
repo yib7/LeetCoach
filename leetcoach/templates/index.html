@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LeetCoach</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/vendor/highlight-github-dark.min.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body data-claude-available="__CLAUDE_AVAILABLE__" data-claude-logged-in="__CLAUDE_LOGGED_IN__" data-claude-model="__CLAUDE_MODEL__">
+  <div class="app" id="app">
+
+    <!-- ===== top bar ===== -->
+    <header class="topbar">
+      <button class="iconbtn nav-toggle" id="sidebar-toggle" type="button"
+              aria-controls="sidebar" aria-expanded="false" aria-label="Open the sidebar">
+        <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <div class="brand">
+        <div class="mark"><span class="bk">[</span><span class="lc">lc</span><span class="bk">]</span></div>
+        <div class="wm">Leet<span class="b">Coach</span></div>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <a class="on" data-view="console" role="button" tabindex="0" aria-current="page">Console</a>
+        <a data-view="library" role="button" tabindex="0">Library</a>
+        <a data-view="stats" role="button" tabindex="0">Stats</a>
+      </nav>
+      <div class="tb-spacer"></div>
+      <div class="tb-search" id="tb-search" role="button" tabindex="0"
+           title="Search your library" aria-label="Search your library" aria-haspopup="dialog">
+        <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+        <span class="ph">Search…</span>
+        <span class="k"><kbd data-mod>Ctrl</kbd><kbd>K</kbd></span>
+      </div>
+      <span class="tb-status" id="claude-status">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="tb-status-label"><span class="tb-status-pre">claude CLI </span><span class="tb-status-state"></span></span>
+      </span>
+      <button class="iconbtn" id="shortcuts-btn" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-haspopup="dialog">
+        <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>
+      </button>
+    </header>
+
+    <div class="main">
+
+      <!-- ===== sidebar (a drawer below 900px: #sidebar-toggle) ===== -->
+      <aside class="sidebar" id="sidebar" aria-label="Sidebar">
+        <button class="newrun" id="new-run" type="button">
+          <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+          New run
+        </button>
+        <nav class="side-nav" aria-label="Sections">
+          <a class="on" data-view="console" role="button" tabindex="0" aria-current="page"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m8 6-4 6 4 6M16 6l4 6-4 6"/></svg> Console</a>
+          <a data-view="library" role="button" tabindex="0"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4h3v16H5zM10.5 4h3v16h-3z"/><path d="m16 5 3 .8-3.2 14-3-.8z"/></svg> Library</a>
+          <a data-view="stats" role="button" tabindex="0"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M4 19h16M8 16v-5M12 16V8M16 16v-3"/></svg> Stats</a>
+        </nav>
+        <div class="side-lbl" id="recents-label">Recent runs</div>
+        <div class="recents" id="recents" role="group" aria-labelledby="recents-label"></div>
+        <div class="side-foot">
+          <div class="t"><span class="dot"></span> Local &amp; offline</div>
+          <div class="d">Runs stream from the claude CLI on your machine. <kbd>?</kbd> for shortcuts.</div>
+        </div>
+      </aside>
+      <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+
+      <!-- ===== content (the scroll container; each view keeps its own position) ===== -->
+      <main class="content" id="content">
+
+        <!-- claude CLI availability / sign-in warning (JS reveals from body flags) -->
+        <section id="claude-warning" class="banner" hidden>
+          <div class="ic"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 4 3 19h18Z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg></div>
+          <div>
+            <!-- shown when the binary isn't on PATH -->
+            <div data-banner="missing" hidden>
+              <div class="bt">The <code>claude</code> CLI was not found on PATH</div>
+              <div class="bd">Runs will fail until Claude Code is installed (or set
+                <code>LEETCOACH_CLAUDE_BIN</code> to its full path), then reload this page.</div>
+            </div>
+            <!-- shown when the binary is present but signed out -->
+            <div data-banner="signedout" hidden>
+              <div class="bt">You&#8217;re signed out of the <code>claude</code> CLI</div>
+              <div class="bd">Runs will fail until you sign in. In a terminal, run
+                <code>claude auth login</code>, then reload this page (the sign-in check refreshes in the background, so it can take a second reload to show).</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===== CONSOLE VIEW ===== -->
+        <section id="view-console">
+          <div class="ctx">
+            <div>
+              <h1>Console</h1>
+              <div class="sub">Paste a problem, pick a mode, and <b>run</b> — coaching streams in and saves to your library.</div>
+            </div>
+            <div class="r">
+              <span class="streak-badge" id="streak-badge" hidden></span>
+              <span class="hint"><span class="kbd"><kbd data-mod>Ctrl</kbd><kbd>Enter</kbd></span> to run</span>
+            </div>
+          </div>
+
+          <!-- topic chips (JS fills from the real library; each opens search prefilled) -->
+          <div class="topics" id="topics" role="group" aria-label="Topics in your library"></div>
+
+          <!-- D4: the review queue (JS fills from GET /review; hidden until a problem is scheduled) -->
+          <section class="panel due-panel" id="due-panel" aria-labelledby="due-title" hidden>
+            <div class="p-head">
+              <h2 class="p-title" id="due-title">Due today <span class="tag" id="due-count">0</span></h2>
+              <div class="p-tools">
+                <button class="btn ghost" id="due-flashcards" type="button" aria-haspopup="dialog">Flashcards</button>
+              </div>
+            </div>
+            <div class="due-list" id="due-list" role="list"></div>
+            <div class="due-empty" id="due-empty" hidden></div>
+          </section>
+
+          <!-- composer -->
+          <section class="panel">
+            <div class="p-head">
+              <label class="p-title" for="problem">Problem <span class="tag">input</span></label>
+              <div class="p-tools">
+                <button class="btn ghost" id="sample" type="button"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3h6l1 4H8zM8 7h8l1 14H7z"/></svg> Sample: Two Sum</button>
+                <button class="btn ghost" id="clear" type="button"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6 6 18"/></svg> Clear</button>
+                <button class="btn green" id="paste" type="button"><svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M8 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/></svg> Paste</button>
+              </div>
+            </div>
+            <div class="editor" id="editor">
+              <textarea id="problem" class="problem" spellcheck="false" aria-describedby="problem-help"
+                placeholder="Paste the full LeetCode problem here — title, description, examples, and constraints…"></textarea>
+              <span class="sr-only" id="problem-help">Your draft is kept in this browser until you clear it.</span>
+            </div>
+            <!-- D5: Code Review mode's attempt box (JS shows it for mode=review) -->
+            <div class="review-code" id="review-code-wrap" hidden>
+              <label class="rc-label" for="review-code">Your code <span class="tag">critiqued, not run</span></label>
+              <textarea id="review-code" class="problem code-input" spellcheck="false" maxlength="65536"
+                aria-describedby="review-code-help"
+                placeholder="Paste your attempt — the review points out bugs, complexity and edge cases without rewriting it."></textarea>
+              <span class="code-help" id="review-code-help">Tab indents, Shift+Tab outdents. Press Esc, then Tab, to move on.</span>
+            </div>
+            <div class="toolbar">
+              <div class="tgroup" data-seg="mode">
+                <span class="tlabel" id="lbl-mode">Mode</span>
+                <div class="seg" data-seg="mode" role="group" aria-labelledby="lbl-mode">
+                  <button class="seg-btn on" type="button" data-val="answer" aria-pressed="true">Answer</button>
+                  <button class="seg-btn" type="button" data-val="learning" aria-pressed="false">Learning</button>
+                  <button class="seg-btn" type="button" data-val="guided" aria-pressed="false">Guided</button>
+                  <button class="seg-btn" type="button" data-val="review" aria-pressed="false" title="Paste your own attempt and get it critiqued">Code Review</button>
+                </div>
+              </div>
+              <div class="tgroup" data-seg="lang">
+                <span class="tlabel" id="lbl-lang">Lang</span>
+                <div class="seg" data-seg="lang" role="group" aria-labelledby="lbl-lang">
+                  <button class="seg-btn on" type="button" data-val="python" aria-pressed="true">Python</button>
+                  <button class="seg-btn" type="button" data-val="cpp" aria-pressed="false">C++</button>
+                  <button class="seg-btn" type="button" data-val="java" aria-pressed="false">Java</button>
+                </div>
+              </div>
+              <div class="tgroup" data-seg="tier">
+                <span class="tlabel" id="lbl-tier">Code Quality</span>
+                <div class="seg" data-seg="tier" role="group" aria-labelledby="lbl-tier">
+                  <button class="seg-btn" type="button" data-val="basic" aria-pressed="false">Basic</button>
+                  <button class="seg-btn on" type="button" data-val="normal" aria-pressed="true">Normal</button>
+                  <button class="seg-btn" type="button" data-val="optimal" aria-pressed="false">Optimal</button>
+                </div>
+              </div>
+              <div class="tgroup" data-seg="model">
+                <span class="tlabel" id="lbl-model">Model</span>
+                <div class="seg" data-seg="model" role="group" aria-labelledby="lbl-model">
+                  <button class="seg-btn" type="button" data-val="fable" aria-pressed="false" title="__MODEL_LABEL_FABLE__ - most capable; uses more of your plan">Fable</button>
+                  <button class="seg-btn" type="button" data-val="opus" aria-pressed="false" title="__MODEL_LABEL_OPUS__">Opus</button>
+                  <button class="seg-btn" type="button" data-val="sonnet" aria-pressed="false" title="__MODEL_LABEL_SONNET__">Sonnet</button>
+                  <button class="seg-btn" type="button" data-val="haiku" aria-pressed="false" title="__MODEL_LABEL_HAIKU__">Haiku</button>
+                </div>
+              </div>
+              <div class="tb-spacer"></div>
+              <button class="btn-run" id="run" type="button">Run <span class="g">&#9656;</span></button>
+            </div>
+          </section>
+
+          <!-- quick ask (one-shot; independent of the run stream) -->
+          <section class="panel qa" id="quickask">
+            <div class="p-head">
+              <label class="p-title" for="qa-input">Quick Ask <span class="tag" title="Quick Ask model (LEETCOACH_QUICK_ASK_MODEL)">__QUICK_ASK_MODEL__</span></label>
+              <button class="btn ghost" id="qa-toggle" type="button" aria-expanded="true" aria-controls="qa-body">Hide</button>
+            </div>
+            <div id="qa-body">
+              <div class="qa-row">
+                <input id="qa-input" type="text" maxlength="500" spellcheck="false"
+                       data-problem-cap="__QUICK_ASK_PROBLEM_CONTEXT_CAP__"
+                       aria-label="Quick Ask question"
+                       placeholder="Syntax / stdlib lookup — e.g. &#8220;C++ syntax for a min-heap?&#8221; (Enter to ask)">
+                <button class="btn green" id="qa-ask" type="button">Ask</button>
+              </div>
+              <div class="qa-status" id="qa-status" role="status" aria-live="polite" hidden></div>
+              <div class="qa-answer md" id="qa-answer" aria-live="polite" hidden></div>
+            </div>
+          </section>
+
+          <!-- ===== session lifecycle (JS shows/hides these) ===== -->
+          <div id="session">
+            <div class="section-h">
+              <div class="l"><h2>Session</h2><span class="n" data-session-state>idle</span></div>
+            </div>
+
+            <!-- idle placeholder -->
+            <div class="console-idle">
+              <div class="prompt"><span class="p">leetcoach</span> &#9656; waiting for a run<span class="c"></span></div>
+              <div class="steps">
+                <div class="st"><span class="k">1</span> Paste</div>
+                <div class="st"><span class="k">2</span> Configure</div>
+                <div class="st"><span class="k">3</span> Run &amp; save</div>
+              </div>
+            </div>
+
+            <!-- run header (sibling ABOVE #output; JS writes label/chips/timer, toggles state class) -->
+            <div class="runhead" hidden>
+              <span class="rh-state"><span class="pulse"></span> <span class="rh-label" id="rh-label">Running</span></span>
+              <div class="rh-chips"></div>
+              <span class="spacer"></span>
+              <span class="timer" role="timer" aria-label="Elapsed time"></span>
+              <button id="stop" class="btn-stop" type="button" hidden disabled><span class="sq"></span> <span class="stop-lbl">Stop</span></button>
+            </div>
+
+            <!-- streamed output node (its innerHTML is replaced per throttled frame; keep chrome OUTSIDE it) -->
+            <div class="outwrap" hidden>
+              <div class="obody">
+                <article id="output" class="output md" aria-labelledby="rh-label" aria-busy="false"></article>
+              </div>
+            </div>
+
+            <!-- streaming caret + phase note (sibling BELOW #output) -->
+            <div class="stream-foot" hidden><span class="caret"></span> <span class="stream-note">streaming…</span></div>
+
+            <!-- terminal states (JS fills + reveals) -->
+            <div class="summary" hidden></div>
+            <div class="errbox" role="alert" hidden></div>
+            <div class="stopmark" hidden></div>
+          </div>
+
+          <!-- recent runs table (JS appends .trow rows into #recent-table) -->
+          <div class="section-h">
+            <div class="l"><h2 id="recent-h">Recent runs</h2><span class="n" data-recent-count>output/</span></div>
+            <div class="filterpills" data-filter-group="recent" role="group" aria-label="Filter recent runs by mode">
+              <button class="fp on" type="button" data-recent-filter="all" aria-pressed="true">All</button>
+              <button class="fp" type="button" data-recent-filter="answer" aria-pressed="false">Answer</button>
+              <button class="fp" type="button" data-recent-filter="learning" aria-pressed="false">Learning</button>
+              <button class="fp" type="button" data-recent-filter="guided" aria-pressed="false">Guided</button>
+              <button class="fp" type="button" data-recent-filter="code review" aria-pressed="false">Code Review</button>
+            </div>
+          </div>
+          <div id="recent-table" class="table" role="group" aria-labelledby="recent-h">
+            <div class="thead" aria-hidden="true"><span>Diff.</span><span>Problem</span><span>Topic</span><span>Mode</span><span>Lang</span><span>Saved</span><span>Status</span></div>
+          </div>
+        </section>
+
+        <!-- ===== LIBRARY VIEW ===== -->
+        <section id="view-library" hidden>
+          <div class="ctx">
+            <div>
+              <h1>Study Library</h1>
+              <div class="sub">Saved runs in <b>output/</b> — grouped by problem type.</div>
+            </div>
+            <div class="r">
+              <div class="filterpills" data-filter-group="library" role="group" aria-label="Filter library files">
+                <button class="fp on" type="button" data-lib-filter="all" aria-pressed="true">All</button>
+                <button class="fp" type="button" data-lib-filter="md" aria-pressed="false">Markdown</button>
+                <button class="fp" type="button" data-lib-filter="code" aria-pressed="false">Code</button>
+              </div>
+            </div>
+          </div>
+          <div class="lib">
+            <nav id="library-tree" class="lib-tree" aria-label="Library files"></nav>
+            <div id="library-viewer" class="lib-view" hidden>
+              <div class="vw-head">
+                <code id="library-viewer-path"></code>
+                <button id="library-viewer-reattempt" class="mini" type="button" hidden>Re-attempt</button>
+                <button id="library-viewer-cards" class="mini" type="button" aria-haspopup="dialog" hidden>Flashcards</button>
+                <button id="library-viewer-delete" class="mini danger" type="button" aria-haspopup="dialog">Delete run</button>
+                <button id="library-viewer-close" class="mini" type="button">Close</button>
+              </div>
+              <div id="library-viewer-body" class="md pad"></div>
+              <!-- D6: a follow-up question on this doc (Markdown docs only) -->
+              <section id="library-viewer-followup" class="vw-followup" aria-labelledby="followup-title" hidden>
+                <div class="fu-head">
+                  <h3 id="followup-title" class="fu-label">Ask a follow-up</h3>
+                  <span id="followup-source" class="chip mono fu-source" hidden></span>
+                </div>
+                <textarea id="followup-input" class="fu-input" rows="3" maxlength="__FOLLOWUP_MAX_QUESTION__"
+                          aria-label="Follow-up question about this doc" aria-describedby="followup-hint"
+                          placeholder="Ask about this doc, e.g. &#8220;Why store the index after the check?&#8221;"></textarea>
+                <div class="fu-row">
+                  <button id="followup-ask" class="btn green" type="button">Ask</button>
+                  <button id="followup-stop" class="btn ghost" type="button" hidden>Stop</button>
+                  <span id="followup-hint" class="fu-hint"><kbd data-mod>Ctrl</kbd> + <kbd>Enter</kbd> to ask · <kbd>Esc</kbd> to stop · the answer is added to the end of this doc</span>
+                </div>
+                <div id="followup-status" class="fu-status" role="status" aria-live="polite"></div>
+                <div id="followup-answer" class="md fu-answer" hidden></div>
+              </section>
+              <!-- D9: per-problem notes (problem-linked docs only) -->
+              <div id="library-viewer-notes" class="vw-notes" hidden></div>
+            </div>
+            <div class="lib-empty" aria-hidden="true">
+              <div class="le-t">Open a file to read it here</div>
+              <div class="le-d">Docs keep their hints, follow-up questions and your notes; code files open with a copy button.</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===== PRACTICE (RE-ATTEMPT) VIEW (D3) ===== -->
+        <section id="view-practice" hidden>
+          <div class="ctx">
+            <div>
+              <h1 id="practice-title">Re-attempt</h1>
+              <div class="sub" id="practice-sub">Solve it again from memory, test it, then grade yourself.</div>
+            </div>
+            <div class="r">
+              <span class="hint"><span class="kbd"><kbd data-mod>Ctrl</kbd><kbd>Enter</kbd></span> to test</span>
+              <button class="btn ghost" id="practice-back" type="button">Back</button>
+            </div>
+          </div>
+
+          <div class="practice">
+            <section class="panel pr-statement" aria-labelledby="practice-statement-h">
+              <div class="p-head">
+                <h2 class="p-title" id="practice-statement-h">Problem <span class="tag" id="practice-due"></span></h2>
+              </div>
+              <div class="pr-text" id="practice-statement" tabindex="0" role="region" aria-labelledby="practice-statement-h"></div>
+            </section>
+
+            <section class="panel pr-work">
+              <div class="p-head">
+                <label class="p-title" for="practice-code">Your code</label>
+                <div class="p-tools">
+                  <label class="pr-lang-label" for="practice-lang">Language</label>
+                  <select id="practice-lang" class="pr-select">
+                    <option value="python">Python</option>
+                    <option value="cpp">C++</option>
+                    <option value="java">Java</option>
+                  </select>
+                  <button class="btn ghost" id="practice-starter" type="button">Insert starter</button>
+                </div>
+              </div>
+              <div class="editor pr-editor">
+                <textarea id="practice-code" class="problem code-input" spellcheck="false" maxlength="65536"
+                  aria-describedby="practice-code-help"
+                  placeholder="Write your solution. It reads one example's Input line on stdin and prints the Output."></textarea>
+              </div>
+              <div class="code-help" id="practice-code-help">Tab indents, Shift+Tab outdents; press Esc, then Tab, to leave the editor. Your draft is kept in this browser.</div>
+
+              <div class="pr-cases">
+                <div class="pr-cases-h">
+                  <span class="tlabel" id="practice-cases-h">Custom cases</span>
+                  <label class="pr-check"><input type="checkbox" id="practice-samples" checked> Include the statement's examples</label>
+                  <button class="btn ghost" id="practice-add-case" type="button">Add a case</button>
+                </div>
+                <div class="pr-case-list" id="practice-cases" role="group" aria-labelledby="practice-cases-h"></div>
+              </div>
+
+              <div class="toolbar pr-toolbar">
+                <button class="btn green" id="practice-test" type="button">Test my code</button>
+                <button class="btn" id="practice-cancel" type="button" hidden>Cancel</button>
+                <div class="tb-spacer"></div>
+                <button class="btn ghost" id="practice-giveup" type="button" aria-haspopup="dialog">Give up / show solution</button>
+              </div>
+              <div class="pr-results" id="practice-results" role="status" aria-live="polite"></div>
+            </section>
+
+            <section class="panel pr-grade" aria-labelledby="practice-grade-h">
+              <div class="p-head">
+                <h2 class="p-title" id="practice-grade-h">How did it go?</h2>
+                <span class="hint" id="practice-box"></span>
+              </div>
+              <div class="grade-btns" id="practice-grade" role="group" aria-labelledby="practice-grade-h">
+                <button class="grade-btn" type="button" data-grade="solo"><span class="gl">Solved it solo</span><span class="gd" data-grade-desc></span></button>
+                <button class="grade-btn" type="button" data-grade="hints"><span class="gl">Needed hints</span><span class="gd" data-grade-desc></span></button>
+                <button class="grade-btn" type="button" data-grade="peeked"><span class="gl">Peeked at the solution</span><span class="gd" data-grade-desc></span></button>
+              </div>
+              <div class="pr-grade-status" id="practice-grade-status" role="status" aria-live="polite"></div>
+            </section>
+
+            <section class="panel pr-solution" id="practice-solution" aria-labelledby="practice-solution-h" hidden>
+              <div class="p-head">
+                <h2 class="p-title" id="practice-solution-h">Solution</h2>
+                <code class="pr-sol-path" id="practice-solution-path"></code>
+              </div>
+              <div class="md pad" id="practice-solution-body"></div>
+            </section>
+
+            <section class="panel pr-notes-panel" aria-label="Notes">
+              <div id="practice-notes"></div>
+            </section>
+          </div>
+        </section>
+
+        <!-- ===== STATS VIEW ===== -->
+        <section id="view-stats" hidden>
+          <div class="ctx">
+            <div>
+              <h1>Stats</h1>
+              <div class="sub">Your practice activity — derived from the <b>study library</b> you build as you run.</div>
+            </div>
+            <div class="r">
+              <span class="hint">Local &amp; offline · from <b>output/</b></span>
+            </div>
+          </div>
+
+          <!-- empty state (JS toggles vs #stats-body once the library has loaded) -->
+          <div class="stats-empty" id="stats-empty" hidden>
+            <div class="se-flame" aria-hidden="true">&#128293;</div>
+            <div class="se-t">No runs yet</div>
+            <div class="se-d">Solve your first problem to start your streak.</div>
+            <button class="btn green" id="stats-empty-cta" type="button">Go to the Console</button>
+          </div>
+
+          <!-- populated stats -->
+          <div id="stats-body" hidden>
+            <div class="stat-tiles">
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic" aria-hidden="true">&#128293;</span><span class="st-lbl">Current streak</span></div>
+                <div class="st-val" id="stat-streak">0</div>
+                <div class="st-sub" id="stat-streak-sub">days</div>
+              </div>
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic" aria-hidden="true">&#127942;</span><span class="st-lbl">Longest streak</span></div>
+                <div class="st-val" id="stat-longest">0</div>
+                <div class="st-sub" id="stat-longest-sub">days best</div>
+              </div>
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic" aria-hidden="true">&#9989;</span><span class="st-lbl">Solved today</span></div>
+                <div class="st-val" id="stat-today">0</div>
+                <div class="st-sub" id="stat-today-sub">this week: 0</div>
+              </div>
+              <div class="stat-tile">
+                <div class="st-top"><span class="st-ic" aria-hidden="true">&#128218;</span><span class="st-lbl">Total solved</span></div>
+                <div class="st-val" id="stat-total">0</div>
+                <div class="st-sub" id="stat-total-sub">0 problems</div>
+              </div>
+            </div>
+
+            <section class="panel stats-panel">
+              <div class="p-head">
+                <span class="p-title">Activity <span class="tag">last 17 weeks</span></span>
+                <div class="hm-legend" aria-hidden="true">
+                  <span>Less</span>
+                  <span class="hm-cell hm-0"></span>
+                  <span class="hm-cell hm-1"></span>
+                  <span class="hm-cell hm-2"></span>
+                  <span class="hm-cell hm-3"></span>
+                  <span class="hm-cell hm-4"></span>
+                  <span>More</span>
+                </div>
+              </div>
+              <div class="hm-scroll">
+                <div class="hm-inner">
+                  <div class="hm-months" id="hm-months"></div>
+                  <div class="hm-grid" id="hm-grid"></div>
+                </div>
+              </div>
+            </section>
+
+            <!-- D4 + D10: the review queue and the flashcard export -->
+            <section class="panel stats-panel" id="stats-review" aria-labelledby="stats-review-h">
+              <div class="p-head">
+                <h2 class="p-title" id="stats-review-h">Review queue <span class="tag">spaced repetition</span></h2>
+                <div class="p-tools">
+                  <button class="btn ghost" id="stats-flashcards" type="button" aria-haspopup="dialog">Review flashcards</button>
+                  <a class="btn ghost" id="stats-tsv" href="/flashcards.tsv" download="leetcoach-flashcards.tsv">Export flashcards (Anki TSV)</a>
+                </div>
+              </div>
+              <div class="rv-tiles">
+                <div class="rv-tile"><span class="rv-val" id="rv-due">0</span><span class="rv-lbl">due now</span></div>
+                <div class="rv-tile"><span class="rv-val" id="rv-today">0</span><span class="rv-lbl">reviewed today</span></div>
+                <div class="rv-tile"><span class="rv-val" id="rv-scheduled">0</span><span class="rv-lbl">scheduled</span></div>
+                <div class="rv-tile"><span class="rv-val rv-next" id="rv-next">—</span><span class="rv-lbl">next due</span></div>
+              </div>
+              <div class="bd-list" id="bd-box" role="group" aria-label="Problems per review box"></div>
+            </section>
+
+            <div class="stats-breakdowns">
+              <section class="panel stats-panel">
+                <div class="p-head"><span class="p-title">By mode</span></div>
+                <div class="bd-list" id="bd-mode"></div>
+              </section>
+              <section class="panel stats-panel">
+                <div class="p-head"><span class="p-title">By language</span></div>
+                <div class="bd-list" id="bd-language"></div>
+              </section>
+              <section class="panel stats-panel">
+                <div class="p-head"><span class="p-title">Top topics</span></div>
+                <div class="bd-list" id="bd-topic"></div>
+              </section>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- D11: shown while streaming when the reader has scrolled away from the live edge -->
+  <button class="jump-pill" id="jump-latest" type="button" hidden>Jump to latest <span aria-hidden="true">&#8595;</span></button>
+
+  <!-- status messages: run progress for screen readers (C9) + visible toasts (C10) -->
+  <div class="sr-only" id="run-status" role="status" aria-live="polite"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <!-- ===== keyboard shortcuts help modal ===== -->
+  <div class="overlay" id="shortcuts-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+      <div class="modal-head">
+        <h2 class="modal-title" id="shortcuts-title">Keyboard shortcuts</h2>
+        <button class="iconbtn" id="shortcuts-close" type="button" aria-label="Close shortcuts">
+          <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <div class="sc-row">
+          <span class="sc-desc">Run the current problem (from any view)</span>
+          <span class="sc-keys"><kbd data-mod>Ctrl</kbd><kbd>Enter</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Search your library</span>
+          <span class="sc-keys"><kbd data-mod>Ctrl</kbd><kbd>K</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Show this shortcuts dialog</span>
+          <span class="sc-keys"><kbd>?</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Ask in Quick Ask (Esc cancels)</span>
+          <span class="sc-keys"><kbd>Enter</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Close a dialog, search or the sidebar</span>
+          <span class="sc-keys"><kbd>Esc</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Code box: indent / outdent (Esc, then Tab, leaves it)</span>
+          <span class="sc-keys"><kbd>Tab</kbd><kbd>Shift</kbd><kbd>Tab</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Re-attempt: test your code</span>
+          <span class="sc-keys"><kbd data-mod>Ctrl</kbd><kbd>Enter</kbd></span>
+        </div>
+        <div class="sc-row">
+          <span class="sc-desc">Flashcards: flip / previous / next</span>
+          <span class="sc-keys"><kbd>Space</kbd><kbd>&#8592;</kbd><kbd>&#8594;</kbd></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== confirm dialog (Delete run) ===== -->
+  <div class="overlay" id="confirm-modal" hidden>
+    <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+      <div class="modal-head">
+        <h2 class="modal-title" id="confirm-title">Delete this run?</h2>
+      </div>
+      <div class="modal-body" id="confirm-body"></div>
+      <div class="modal-foot">
+        <button class="btn" id="confirm-cancel" type="button">Cancel</button>
+        <button class="btn danger" id="confirm-ok" type="button">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== flashcards review (D10) ===== -->
+  <div class="overlay" id="flashcards-modal" hidden>
+    <div class="modal fc-modal" role="dialog" aria-modal="true" aria-labelledby="fc-title">
+      <div class="modal-head">
+        <h2 class="modal-title" id="fc-title">Flashcards</h2>
+        <span class="fc-scope" id="fc-scope"></span>
+        <button class="iconbtn" id="fc-close" type="button" aria-label="Close flashcards">
+          <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body fc-body">
+        <div class="fc-empty" id="fc-empty" hidden></div>
+        <div class="fc-card" id="fc-card">
+          <div class="fc-side-lbl">Question</div>
+          <div class="fc-q" id="fc-q"></div>
+          <div class="fc-answer" id="fc-answer" hidden>
+            <div class="fc-side-lbl">Answer</div>
+            <div class="fc-a" id="fc-a"></div>
+          </div>
+          <div class="fc-src" id="fc-src"></div>
+        </div>
+        <div class="sr-only" id="fc-live" role="status" aria-live="polite"></div>
+      </div>
+      <div class="modal-foot fc-foot">
+        <button class="btn" id="fc-prev" type="button" aria-label="Previous card">&#8592; Prev</button>
+        <span class="fc-count" id="fc-count" aria-hidden="true"></span>
+        <button class="btn green" id="fc-flip" type="button" aria-expanded="false" aria-controls="fc-answer">Show answer</button>
+        <button class="btn" id="fc-next" type="button" aria-label="Next card">Next &#8594;</button>
+        <div class="tb-spacer"></div>
+        <a class="btn ghost" id="fc-download" href="/flashcards.tsv" download="leetcoach-flashcards.tsv">Download TSV</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== search palette ===== -->
+  <div class="overlay overlay-top" id="search-palette" hidden>
+    <div class="palette" role="dialog" aria-modal="true" aria-label="Search your library">
+      <div class="pal-head">
+        <svg class="pal-ic" aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+        <input id="search-input" class="pal-input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Search problems, topics, modes, languages…"
+               role="combobox" aria-controls="search-results" aria-expanded="true" aria-autocomplete="list"
+               aria-label="Search your library" />
+        <kbd class="pal-esc">Esc</kbd>
+      </div>
+      <div class="pal-results" id="search-results" role="listbox" aria-label="Search results"></div>
+    </div>
+  </div>
+
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/highlight.min.js"></script>
+  <script src="/static/vendor/hljs-python.min.js"></script>
+  <script src="/static/vendor/hljs-cpp.min.js"></script>
+  <script src="/static/vendor/hljs-java.min.js"></script>
+  <script src="/static/lib/core.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

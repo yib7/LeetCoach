@@ -1,0 +1,1788 @@
+"""Flask web layer for LeetCoach: a single page, the SSE `/run` and `/followup`
+endpoints, the library browser (`/library`, `/library/file` GET + DELETE), the
+problem store and review queue (`/problems`, `/review`), the re-attempt sandbox
+(`/attempt/test`), flashcards, `/stats`, and the plain-JSON Quick Ask `/ask`.
+
+This module is the routes. What they lean on lives next door:
+:mod:`leetcoach.request_guard` (who may call them), :mod:`leetcoach.streaming`
+(SSE frames, heartbeat, run cancel state), :mod:`leetcoach.library` (the
+library listing and its read/delete gate) and :mod:`leetcoach.launcher`
+(``python app.py``: port choice, single instance, browser).
+
+Design mirrors the Xeno RAG pattern, in Flask flavour:
+
+* ``create_app(*, run_fn=claude_cli.run)`` is a factory with an **injectable**
+  Claude runner. The SAME ``run_fn`` is threaded into BOTH the classifier and
+  the answer stream, so a single injected fake (tests) covers every Claude call
+  while the real orchestration + save still runs end-to-end.
+* ``/run`` returns ``Response(stream_with_context(event_stream()),
+  mimetype="text/event-stream")``. The generator yields ``data:`` text events
+  for each delta and a terminal ``event: done`` (or ``error`` / ``cancelled``) so the
+  stream always closes cleanly; a last-resort ``except`` guarantees it.
+
+All four modes (Answer / Learning / Guided Learning / Code Review) are wired here.
+They share one shape (classify -> build a mode-specific prompt -> stream +
+accumulate the deltas -> save the result -> emit a terminal ``done``), so the
+streaming and the ``done``/``error`` plumbing live in one place (``event_stream`` +
+``_stream_and_accumulate``); only the per-mode prompt-builder and save call differ.
+
+SSE event protocol (shared by every mode):
+    data: "<text delta>"\n\n                 # incremental answer text (json string)
+    event: phase\ndata: {json}\n\n            # progress (D11), any number:
+        {"phase": "streaming"} | {"phase": "verifying"[, "i": int, "n": int]}
+        | {"phase": "saving"}
+    event: meta\ndata: {"model": str}\n\n    # the concrete model id from the
+                                              # CLI's system/init, once
+    event: done\ndata: {json}\n\n             # terminal success:
+        { "problem_type": str, "topics": [str], "paths": [str], "mode": str,
+          "verification": str (Answer/Guided only: the sandbox verdict line),
+          "model": str (when the CLI reported one) }
+    event: error\ndata: "<message>"\n\n        # terminal failure (json string)
+    event: cancelled\ndata: "<message>"\n\n    # terminal: stopped via POST
+                                              # /run/cancel (B14); not a
+                                              # failure, nothing saved
+    : ping\n\n                                # heartbeat comment (C3)
+
+Clients must ignore event names they do not know (phase/meta are additive).
+
+``POST /followup`` (D6) uses the same framing: text deltas, ``meta``,
+``phase`` ({"phase": "streaming", "source": "resume"|"fallback"[, "reason"]}
+then {"phase": "saving"}), a terminal ``done`` {"path", "source", "resumed",
+"heading"[, "reason", "model"]} / ``error`` / ``cancelled`` (via
+``POST /followup/cancel``), and the ``: ping`` heartbeat.
+"""
+from __future__ import annotations
+
+import inspect
+import io
+import os
+import queue
+import re
+import threading
+import time
+import uuid
+from html import escape as html_escape
+from pathlib import Path
+
+from dotenv import load_dotenv
+from flask import Flask, Response, jsonify, request, stream_with_context
+
+from leetcoach import (
+    classifier,
+    claude_cli,
+    code_blocks,
+    config,
+    flashcards,
+    library,
+    practice,
+    problem_store,
+    prompts,
+    request_guard,
+    sandbox,
+    stats,
+    storage,
+    streaming,
+    topic_index,
+)
+from leetcoach.streaming import (
+    HEARTBEAT,
+    RunState,
+    call_with_heartbeat,
+    iter_with_heartbeat,
+    sse_event,
+    sse_text,
+)
+
+
+def _maybe_load_dotenv(path: Path) -> None:
+    """Load ``path`` as a dotenv file, unless ``LEETCOACH_NO_DOTENV`` is set
+    (B8). Never overrides vars already set in the real environment; a missing
+    ``.env`` is a silent no-op either way. Split out as its own function (not
+    inlined at import time) so it's directly unit-testable without reloading
+    this module or touching the real project ``.env``.
+    """
+    if os.environ.get("LEETCOACH_NO_DOTENV", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    # B12: decode it ourselves (UTF-8 with/without BOM, UTF-16 as written by
+    # Windows PowerShell). python-dotenv assumes plain UTF-8, so it would crash
+    # on a UTF-16 .env and corrupt the first key after a BOM. A file that
+    # still can't be read is skipped with a warning, never a crash.
+    try:
+        text = config.read_env_text(path)
+    except (OSError, ValueError) as exc:
+        print(f"WARNING: could not read {path} ({exc}); ignoring it.")
+        return
+    if text:
+        load_dotenv(stream=io.StringIO(text))
+
+
+# Load .env from the repo root (config.DOTENV_FILE) if present, so LEETCOACH_*
+# settings written to a .env take effect for `python app.py` and WSGI imports.
+# The test suite sets LEETCOACH_NO_DOTENV=1 (tests/conftest.py) so importing
+# this module never reads the developer's real .env or leaks its settings into
+# the test process.
+_maybe_load_dotenv(config.DOTENV_FILE)
+
+# The page and its assets ship inside the package.
+TEMPLATES = config.PACKAGE_DIR / "templates"
+STATIC = config.PACKAGE_DIR / "static"
+
+
+# Reported by GET /healthz (D16) so a second launch can recognise a running
+# LeetCoach. Matches the CHANGELOG's current release line.
+VERSION = "1.5.0"
+
+
+# Cap on how many already-learned topics get interpolated into the Learning
+# prompt: the index grows forever, the prompt must not. The
+# stored list is insertion-ordered, so "the most recent N" is its tail.
+LEARNED_TOPICS_CAP = 50
+
+# A6: the longest a finished answer waits on the background classifier before
+# saving under the fallback type (and cancelling the classifier call). The
+# classifier normally answers in a few seconds on the cheap model.
+CLASSIFIER_JOIN_TIMEOUT = 60.0
+
+
+# B10: the longest a cached /library listing is served without a re-walk, even
+# when no directory mtime moved (an in-place edit of a file). Read at call time.
+LIBRARY_CACHE_TTL = 30.0
+
+# B19: the sibling extensions that make up one saved run (an Answer's notes +
+# code). ``DELETE /library/file?scope=run`` removes all of them together.
+RUN_SIBLING_EXTENSIONS = (".md", ".py", ".cpp", ".java", ".txt")
+
+# Quick Ask bounds: the question stays small (it's a syntax lookup, not an
+# essay), and the optional problem CONTEXT is capped server-side so a pasted
+# novel can't balloon the Quick Ask prompt (LEETCOACH_QUICK_ASK_MODEL, Haiku
+# by default).
+QUICK_ASK_MAX_QUESTION = 500
+QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
+
+# Abuse cap: every /run and Quick Ask spends the user's Claude
+# subscription. A tab streams one run at a time, so a handful of tabs fit
+# under these; a runaway script or retry loop does not. Past the cap the
+# request is a 429 and nothing is started. Read at call time (tests lower it).
+MAX_CONCURRENT_RUNS = 4
+MAX_CONCURRENT_ASKS = 4
+
+# The longest problem /run accepts. The 2 MiB body cap alone would let
+# ~2 MB of text reach the prompt; a LeetCode statement is a few KB. Same as
+# what the problem record stores, so nothing accepted is later truncated.
+PROBLEM_MAX_CHARS = problem_store.STATEMENT_CAP
+
+# D6: a follow-up question on a saved doc. Longer than a Quick Ask (it
+# can quote a line of the doc or some code) but still a question, not a paste.
+FOLLOWUP_MAX_QUESTION = 2000
+
+# How long a new "Test my code" waits for a CANCELLED test to
+# release the one-at-a-time slot (the sandbox kills its child within a poll
+# tick; this only bounds a pathological cleanup).
+ATTEMPT_CANCEL_GRACE_S = 10.0
+
+# GET /problems lists these fields of each record - everything but the
+# (possibly long) statement and notes - plus ``run_count`` (saved runs: the
+# run-log entries of the problem, merged aliases included) and ``file_count``
+# (len(runs): the library files those runs produced; an Answer run adds two).
+PROBLEM_SUMMARY_FIELDS = ("id", "number", "title", "difficulty", "pattern",
+                          "created", "updated", "review", "runs", "aliases")
+
+# Allowlists: never pass an arbitrary string downstream to prompts/storage.
+MODES = ("answer", "learning", "guided", "review")
+# Modes without a code-quality tier (Learning teaches; a Code Review critiques
+# the learner's own code).
+UNTIERED_MODES = ("learning", "review")
+LANGUAGES = prompts.LANGUAGES          # ("python", "cpp", "java")
+TIERS = prompts.TIERS                  # ("basic", "normal", "optimal")
+
+
+def _json_object() -> tuple[dict, Response | None]:
+    """Parse the request body as JSON and return ``(data, None)``, or
+    ``(_, error_response)`` if the body isn't a JSON OBJECT (B23).
+
+    ``request.get_json(silent=True)`` returns a list/string/number for a JSON
+    array/string/number body, and every route below immediately calls
+    ``.get()`` on the result, which would be an ``AttributeError`` (a bare 500)
+    for any script/curl that posts a non-object body. A missing/empty body
+    parses to ``None`` and is treated as ``{}`` (every field is then
+    "missing", handled by each route's own validation) since it's
+    indistinguishable from an explicit JSON ``null``.
+
+    ``silent=True`` only swallows ``ValueError``; a body of a few hundred
+    thousand nested ``[`` makes the decoder raise ``RecursionError``, which
+    would otherwise be an HTML 500 from every JSON route.
+    """
+    not_object = (jsonify({"error": "Request body must be a JSON object."}), 400)
+    try:
+        data = request.get_json(silent=True)
+    except RecursionError:
+        return {}, not_object
+    if data is None:
+        # A body that is present but is not JSON at all gets the not-an-object
+        # error, not "Problem text is required." as if it were empty.
+        if request.get_data(cache=True).strip():
+            return {}, not_object
+        return {}, None
+    if not isinstance(data, dict):
+        return {}, not_object
+    return data, None
+
+
+def _log_failure(logger, exc: BaseException, msg: str, *args) -> None:
+    """Log a failed run / ask / follow-up. An expected CLI failure (not
+    installed, signed out, offline: :class:`claude_cli.ClaudeUnavailableError`
+    already says what is wrong, and the page shows it) is one warning line,
+    not a traceback in the console window the launcher keeps open;
+    anything else keeps its full traceback."""
+    if isinstance(exc, claude_cli.ClaudeUnavailableError):
+        logger.warning(msg + ": %s", *args, exc)
+    else:
+        logger.exception(msg, *args)
+
+
+def _non_string_field_error(data: dict, fields) -> str | None:
+    """Return a 400-worthy message if any named field is PRESENT but not a
+    string, else ``None``. ``fields`` is an iterable of ``(key, Label)`` pairs.
+
+    These endpoints are unauthenticated local routes any script/curl can hit,
+    so a JSON number/list/object in a text field must yield a clean 400, not an
+    ``AttributeError``/``TypeError`` 500 from a downstream ``.strip()`` or slice.
+    A missing field (``None``) and a string both pass, so each route's own
+    missing/empty handling still applies."""
+    for key, label in fields:
+        value = data.get(key)
+        if value is not None and not isinstance(value, str):
+            return f"{label} must be text."
+    return None
+
+
+def _attempt_summary(value) -> tuple[dict | None, str | None]:
+    """The optional ``attempt`` summary a grade carries (what the last
+    "Test my code" run showed) -> ``(clean dict or None, error or None)``.
+    Only ``language`` (allowlisted) and small non-negative ``passed`` /
+    ``total`` counts are kept - nothing free-form reaches the record."""
+    if value is None:
+        return None, None
+    if not isinstance(value, dict):
+        return None, "Attempt must be an object."
+    out: dict = {}
+    language = value.get("language")
+    if language is not None:
+        if language not in LANGUAGES:
+            return None, "Unknown attempt language."
+        out["language"] = language
+    for key in ("passed", "total"):
+        n = value.get(key)
+        if n is None:
+            continue
+        if isinstance(n, bool) or not isinstance(n, int) or not 0 <= n <= 1000:
+            return None, f"Attempt {key} must be a small whole number."
+        out[key] = n
+    if "passed" in out and "total" in out and out["passed"] > out["total"]:
+        return None, "Attempt passed cannot exceed total."
+    return (out or None), None
+
+
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _verification_line(result) -> str:
+    """A short one-line human verdict for the stream + saved markdown, derived
+    from a ``sandbox.VerifyResult``."""
+    status = getattr(result, "status", "not_verified")
+    note = practice.strip_run_dir(getattr(result, "note", "") or "")
+    if status == "pass":
+        return f"✓ Sample tests PASS ({note})" if note else "✓ Sample tests PASS"
+    if status == "fail":
+        return f"✗ Sample tests FAIL ({note})" if note else "✗ Sample tests FAIL"
+    if status == "error":
+        return f"✗ Sample tests ERROR ({note})" if note else "✗ Sample tests ERROR"
+    # not_verified
+    return f"⚠ not auto-verified ({note})" if note else "⚠ not auto-verified"
+
+
+def _accepts_kwarg(fn, name: str) -> bool:
+    """True if ``fn`` can be called with keyword ``name`` (or **kwargs)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def _verify_code(code: str, problem: str, language: str, *, cancel=None, progress=None):
+    """Best-effort sandbox verification of pre-extracted ``code`` (the caller
+    extracts it exactly once). Returns ``(result, verdict_line)``;
+    never raises (a verifier hiccup must not break a run). ``result`` may be
+    ``None`` if verification couldn't even start. ``cancel`` (a
+    ``threading.Event``) stops the sandbox early; ``progress`` (D11) is passed
+    on when the verifier accepts it."""
+    try:
+        extra = {}
+        if progress is not None and _accepts_kwarg(sandbox.verify_answer, "progress"):
+            extra["progress"] = progress
+        result = sandbox.verify_answer(code, problem, language, cancel=cancel, **extra)
+        return result, _verification_line(result)
+    except Exception as exc:  # noqa: BLE001 - verification is strictly best-effort
+        return None, f"⚠ not auto-verified (verifier error: {exc})"
+
+
+def _verification_detail(result) -> str:
+    """A compact markdown block describing each NON-passing sample, appended
+    to the SAVED reasoning ``.md`` only; the stream keeps the one-line verdict
+    (which already carries the pass/fail counts).
+
+    Empty string unless ``result`` is a fail/error with per-sample detail.
+    Input/expected/got/stderr are rendered in fenced blocks so multi-line
+    sample bodies stay readable; the sandbox has already truncated and
+    capped every captured field.
+    """
+    if result is None or getattr(result, "status", None) not in ("fail", "error"):
+        return ""
+    blocks = []
+    for entry in getattr(result, "detail", None) or []:
+        status = entry.get("status", result.status)
+        if status == "pass":
+            continue  # the verdict line's counts already cover passing samples
+        header = f"**Sample {entry.get('sample', '?')} — {status}**"
+        rc = entry.get("returncode")
+        if rc is not None:
+            header = header[:-2] + f" (exit code {rc})**"
+        lines = [header, ""]
+        # B4: the verifier's own reason (e.g. "timed out after 10s"). Some
+        # error paths (timeout, couldn't launch) have a note but no captured
+        # stdout at all; without the note the user sees "errored 1/1" and no
+        # explanation.
+        note = practice.strip_run_dir(str(entry.get("note") or "")).strip()
+        if note:
+            lines += [note, ""]
+        for label, key in (("Input", "stdin"), ("Expected", "expected"), ("Got", "stdout")):
+            value = str(entry.get(key, "")).rstrip("\n")
+            lines += [f"{label}:", "```", value, "```"]
+        # The saved doc is the user's to share, so a traceback names
+        # `solution.py`, not the temp run dir (and the OS user name in it).
+        stderr = practice.strip_run_dir(str(entry.get("stderr") or "")).rstrip("\n")
+        if stderr:
+            lines += ["Stderr:", "```", stderr, "```"]
+        blocks.append("\n".join(lines))
+    if not blocks:
+        return ""
+    return "\n**Failed samples:**\n\n" + "\n\n".join(blocks) + "\n"
+
+
+def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_status) -> Flask:
+    """Build the Flask app.
+
+    ``run_fn`` is the injectable Claude runner used by BOTH the classifier and
+    the answer stream (tests pass a fake). ``auth_probe`` is the injectable
+    sign-in probe the page uses to decide which (if any) CLI banner to show;
+    injectable so tests never spawn the real ``claude auth status``. The
+    default is the cached probe (B1), so ``GET /`` does not run the CLI
+    synchronously on every page load.
+    """
+    app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
+
+    # Reject oversized request bodies with a clean 413 instead of buffering an
+    # unbounded POST into memory. A LeetCode problem is a few KB; 2 MiB is
+    # generous headroom while still capping a hostile/accidental flood.
+    app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+
+    @app.errorhandler(413)
+    def _too_large(_exc):
+        # Flask's own 413 is an HTML page the front end can only show
+        # as "Request rejected (413)"; every page fetch reads a JSON `error`.
+        limit_mb = app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024)
+        return jsonify({"error": (
+            f"That request is too large (the limit is {limit_mb} MB). A LeetCode "
+            "problem is a few KB - paste just the problem statement and try again.")}), 413
+
+    # Where the model picker persists its choice. A config value (not a bare
+    # constant) so tests can redirect it to a temp file instead of the real
+    # project `.env`. It honours LEETCOACH_DOTENV_PATH (set by the test
+    # suite's autouse fixture, tests/conftest.py) so EVERY create_app() call
+    # across the whole suite is redirected away from the real `.env` by
+    # default, not just the couple of tests that override app.config by hand.
+    app.config["DOTENV_PATH"] = os.environ.get(
+        "LEETCOACH_DOTENV_PATH", str(config.DOTENV_FILE)
+    )
+
+    # In-flight /run de-duplication: a single-user local tool should not
+    # fan the same (problem, mode, language, tier, model) into N concurrent
+    # Claude runs (double-click, impatient re-submit). ``_inflight_runs`` maps
+    # each key to the run_id that owns it, ``_runs`` maps run_id -> RunState;
+    # both guarded by one lock. The key is registered after validation and
+    # released when the stream ends (normal completion, client disconnect via
+    # GeneratorExit, or error) or right away by POST /run/cancel (B14), and
+    # only ever by its owner, so a finishing old run can't free a new one's key.
+    _inflight_runs: dict = {}
+    _runs: dict = {}
+    _asks: dict = {}  # B20: ask_id -> [call or None, cancelled Event] for /ask/cancel
+    _asks_running = [0]  # Quick Asks in flight, for MAX_CONCURRENT_ASKS
+    _attempts: dict = {}  # test_id -> cancel Event for /attempt/cancel
+    _attempt_slot = threading.Lock()  # one "Test my code" run at a time
+    # The running test's cancel Event. A test cancelled (e.g. the
+    # learner opened another problem) still holds the slot while the sandbox
+    # kills its child, so the next test waits briefly for it instead of 409.
+    _attempt_running: dict = {"cancel": None}
+    # D6: follow-ups have their own slot - one at a time per app,
+    # independent of /run (a follow-up may stream while a study run does).
+    _followups: dict = {}  # followup_id -> RunState, for /followup/cancel
+    _inflight_lock = threading.Lock()
+
+    def _cancel_ask_call(call) -> None:
+        cancel = getattr(call, "cancel", None)
+        if callable(cancel):
+            try:
+                cancel()
+            except Exception:  # cancelling is best-effort
+                app.logger.exception("could not cancel the quick ask call")
+
+    def _release_run(run_id: str, state: RunState) -> None:
+        with _inflight_lock:
+            if _inflight_runs.get(state.key) == run_id:
+                del _inflight_runs[state.key]
+            if _runs.get(run_id) is state:
+                del _runs[run_id]
+
+    # Library-listing cache: without it the /library walk (rglob + a stat per
+    # file) would rerun on every tab-open and post-run refresh. The result is
+    # keyed on a cheap freshness signature: an app-owned version counter (bumped
+    # whenever the app itself saves or deletes a library file) combined with the
+    # mtime of every directory in the tree (B10: catches a nested change made
+    # outside the app, not just a top-level one). A short TTL on top means an
+    # in-place edit (which changes no directory mtime) still shows up.
+    _lib_cache: dict = {"sig": None, "files": None, "at": 0.0}
+    _lib_version = [0]
+    _lib_lock = threading.Lock()
+
+    def _invalidate_library_cache():
+        with _lib_lock:
+            _lib_version[0] += 1
+
+    def _cached_library_files() -> list[dict]:
+        root = config.output_dir().resolve()
+        dirs = library.signature(root) if root.is_dir() else ()
+        with _lib_lock:
+            sig = (_lib_version[0], dirs)
+            now = time.monotonic()
+            if (
+                _lib_cache["files"] is None
+                or _lib_cache["sig"] != sig
+                or now - _lib_cache["at"] >= LIBRARY_CACHE_TTL
+            ):
+                _lib_cache["files"] = library.list_files(root)
+                _lib_cache["sig"] = sig
+                _lib_cache["at"] = now
+            return _lib_cache["files"]
+
+    @app.before_request
+    def _reject_foreign_hosts():
+        # DNS-rebinding defense: a malicious page can point its own
+        # hostname at 127.0.0.1 and drive /run (spending subscription budget and
+        # executing generated code in the sandbox). The browser still sends the
+        # attacker's hostname in Host, so rejecting non-loopback hostnames
+        # blocks the attack for every route.
+        # The peer itself must also be this machine. `python app.py`
+        # binds 127.0.0.1, but `flask run --host 0.0.0.0` or a WSGI server on
+        # a LAN address would expose every route, and a LAN client can send
+        # `Host: 127.0.0.1` itself - the Host check alone does not stop it.
+        if not request_guard.is_loopback_peer(request.remote_addr):
+            return jsonify({"error": "LeetCoach only serves this computer."}), 403
+        if request_guard.hostname(request.host) not in request_guard.ALLOWED_HOSTNAMES:
+            return jsonify({"error": "Forbidden host."}), 403
+        # C2: a hostile page on another origin can still POST to loopback
+        # (the Host check can't see that) - refuse it by Origin/Sec-Fetch-Site.
+        reason = request_guard.cross_site_rejection(
+            request.method, request.path, request.headers, request.host, request.scheme
+        )
+        if reason:
+            return jsonify({"error": reason}), 403
+
+    @app.after_request
+    def _response_headers(resp):
+        # Force revalidation of the frontend code so an edited app.js/style.css
+        # is never silently served stale during local iteration.
+        if request.path == "/" or request.path.startswith("/static/"):
+            resp.headers["Cache-Control"] = "no-cache"
+        # Defense-in-depth for the untrusted-markdown surface (Claude's output,
+        # incl. the cheaper Quick Ask model, is rendered into the page). Every
+        # script/style/font is a self-hosted file and the only images the
+        # renderer emits are inline data: URIs, so a strict policy holds without
+        # 'unsafe-inline'. connect-src 'self' keeps /run, /ask, /library fetches
+        # same-origin. nosniff protects the text/plain /library/file route.
+        resp.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        )
+        # C1: no other page may frame LeetCoach (clickjacking of Run, Delete
+        # and the model picker). X-Frame-Options covers older browsers.
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        # A link in a study doc (model output) opens another site;
+        # it must not learn the local URL, port or doc path from Referer.
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        return resp
+
+    @app.get("/")
+    def index():
+        # The auth state is probed at request time (not import) so the app
+        # constructs without a live claude (tests / CI). The page surfaces the
+        # state (installed? signed in? which model?) and never crashes here.
+        try:
+            status = auth_probe()
+            installed, logged_in = status.installed, status.logged_in
+        except Exception:  # noqa: BLE001 - the probe must never 500 the page
+            installed, logged_in = False, False
+        html = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+        # Inject tiny flags the page reads (kept out of a template engine so the
+        # page stays a plain static file editable by hand).
+        html = html.replace("__CLAUDE_AVAILABLE__", "true" if installed else "false")
+        html = html.replace("__CLAUDE_LOGGED_IN__", "true" if logged_in else "false")
+        html = html.replace("__CLAUDE_MODEL__", config.model_alias())
+        # C13: the Quick Ask tag names the model /ask uses (escaped: it
+        # comes from LEETCOACH_QUICK_ASK_MODEL).
+        html = html.replace("__QUICK_ASK_MODEL__", html_escape(config.quick_ask_model()))
+        html = html.replace("__FOLLOWUP_MAX_QUESTION__", str(FOLLOWUP_MAX_QUESTION))
+        # Quick Ask trims its problem context to what /ask uses.
+        html = html.replace("__QUICK_ASK_PROBLEM_CONTEXT_CAP__",
+                            str(QUICK_ASK_PROBLEM_CONTEXT_CAP))
+        # Display-only version labels for the picker tooltips (the alias, not
+        # this label, is what reaches `--model`).
+        for alias in config.ALLOWED_MODEL_ALIASES:
+            html = html.replace(
+                f"__MODEL_LABEL_{alias.upper()}__", config.model_label(alias)
+            )
+        return Response(html, mimetype="text/html")
+
+    @app.get("/healthz")
+    def healthz():
+        # D16: lets a second launch recognise a running LeetCoach (and not
+        # some other app) on the preferred port. No probe, no filesystem.
+        return jsonify({"app": "leetcoach", "version": VERSION})
+
+    @app.get("/favicon.ico")
+    def favicon():
+        # The page links /static/favicon.svg, but a browser still asks for
+        # /favicon.ico on pages without that <link> (a JSON route, a text/plain
+        # library file); this route answers it instead of a console 404.
+        # Same-origin, so the CSP's img-src 'self' allows it.
+        return app.send_static_file("favicon.svg")
+
+    @app.post("/config/model")
+    def config_model():
+        # Persist the in-app model picker's choice as the default. The alias is
+        # allowlisted (it becomes a `--model` argv token) and written to `.env`
+        # so it survives a restart; os.environ is updated so the very next run
+        # uses it with no restart (config.model() reads env at call time).
+        data, err = _json_object()
+        if err:
+            return err
+        alias = data.get("model")
+        if alias not in config.ALLOWED_MODEL_ALIASES:
+            return jsonify({"error": "Unknown model."}), 400
+        try:
+            config.upsert_env_var(app.config["DOTENV_PATH"], "LEETCOACH_MODEL", alias)
+        except (OSError, ValueError):
+            # B12: an unreadable/undecodable .env aborts the upsert (the file
+            # is left untouched) instead of being wiped.
+            app.logger.exception("could not persist the model choice")
+            return jsonify({"error": "Could not save the model setting."}), 500
+        os.environ["LEETCOACH_MODEL"] = alias
+        return jsonify({"ok": True, "model": alias})
+
+    @app.get("/library")
+    def library_listing():
+        # Listing of the study library. A missing/empty output dir is an
+        # empty listing: the library just hasn't accumulated yet.
+        # Served from the freshness-keyed cache.
+        return jsonify({"files": _cached_library_files()})
+
+    @app.get("/library/file")
+    def library_file():
+        # One library file's raw text. Served as text/plain (never HTML) so
+        # nothing in the library can execute in the browser; rendering happens
+        # client-side through the same hardened pipeline as run output. Every
+        # rejection is the same 404, so it doesn't leak which check failed or what
+        # exists outside the root.
+        resolved = library.resolve_file(request.args.get("path", ""))
+        if resolved is None:
+            return jsonify({"error": "Not found."}), 404
+        try:
+            body = resolved.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return jsonify({"error": "Not found."}), 404
+        return Response(body, mimetype="text/plain")
+
+    @app.delete("/library/file")
+    def delete_library_file():
+        # Delete ONE library file. Reuses the exact containment gate as
+        # the read path, so a traversal / escape / absolute path / non-library
+        # suffix / missing file is the SAME uniform 404: a rejection never
+        # leaks whether a target exists or where the root sits, matching the
+        # GET /library/file no-leak design. There is deliberately no mass-delete.
+        #
+        # B19: ``scope=run`` deletes the whole saved run - the file plus its
+        # same-stem siblings in the same folder (an Answer's .md AND its code
+        # file), so a delete never orphans a .py. A different slot
+        # (``<stem>__2``) or tier is a different run and is left alone.
+        scope = request.args.get("scope", "file")
+        if scope not in ("file", "run"):
+            return jsonify({"error": "Unknown delete scope."}), 400
+        resolved = library.resolve_file(request.args.get("path", ""))
+        if resolved is None:
+            return jsonify({"error": "Not found."}), 404
+        targets = [resolved]
+        if scope == "run":
+            for ext in RUN_SIBLING_EXTENSIONS:
+                sibling = resolved.with_suffix(ext)
+                if sibling == resolved:
+                    continue
+                rel_sibling = sibling.relative_to(config.output_dir().resolve()).as_posix()
+                if library.resolve_file(rel_sibling) is not None:
+                    targets.append(sibling)
+        root = config.output_dir().resolve()
+        deleted = []
+        # Under the library write lock, so a delete never lands
+        # between a follow-up append's read and its atomic write (which would
+        # resurrect the doc) - the append then sees the doc gone and saves nothing.
+        with storage.WRITE_LOCK:
+            for target in targets:
+                try:
+                    target.unlink()
+                except OSError:
+                    # Vanished between the resolve and the unlink, or a
+                    # permission/lock issue. Never 500 the caller.
+                    continue
+                deleted.append(target.relative_to(root).as_posix())
+        _invalidate_library_cache()  # next /library reflects the removal
+        if not deleted:
+            return jsonify({"error": "Not found."}), 404
+        return jsonify({"deleted": True, "paths": deleted})
+
+    @app.get("/problems")
+    def problems():
+        # D1: every problem record, without the (possibly long)
+        # statement; GET /problems/<id> has the full record.
+        # ``runs`` (the record's library paths) is included;
+        # ``run_count`` counts saved runs from the log, ``file_count`` files.
+        # ``runs`` / ``file_count`` list only files that still
+        # exist; ``run_count`` keeps counting the append-only log (A8).
+        counts: dict = {}
+        for entry in problem_store.read_runs():
+            pid = entry.get("problem_id")
+            if isinstance(pid, str):
+                counts[pid] = counts.get(pid, 0) + 1
+        listed = {f["path"] for f in _cached_library_files()}
+        listing = []
+        for rec in problem_store.list_problems():
+            item = {k: rec.get(k) for k in PROBLEM_SUMMARY_FIELDS}
+            runs = library.existing_runs(rec.get("runs"), listed)
+            # A hand-edited record may hold non-string aliases; an
+            # unhashable one would crash the set below, so keep strings only.
+            raw_aliases = rec.get("aliases")
+            aliases = ([a for a in raw_aliases if isinstance(a, str)]
+                       if isinstance(raw_aliases, list) else [])
+            item["runs"] = runs
+            item["aliases"] = aliases
+            item["run_count"] = sum(counts.get(i, 0) for i in {rec.get("id"), *aliases})
+            item["file_count"] = len(runs)
+            listing.append(item)
+        return jsonify({"problems": listing})
+
+    @app.get("/problems/<pid>")
+    def problem_detail(pid):
+        rec = problem_store.load_problem(pid)  # None for an invalid id too
+        if rec is None:
+            return jsonify({"error": "Not found."}), 404
+        # An alias (an id merged into this record) resolves to the record.
+        log = problem_store.runs_for(pid)
+        # A deleted doc drops out of ``runs`` (the log keeps it).
+        return jsonify({**rec, "runs": library.existing_runs(rec.get("runs")), "log": log})
+
+    @app.get("/review")
+    def review_queue():
+        # D4: the Console "Due today" panel and the Stats review counts.
+        return jsonify(problem_store.review_summary())
+
+    @app.post("/problems/<pid>/grade")
+    def grade_problem(pid):
+        # D4: a self-grade after a re-attempt moves the problem's
+        # Leitner box and due date (solo -> next box, hints -> same box,
+        # peeked -> box 1).
+        if not problem_store.valid_problem_id(pid):
+            return jsonify({"error": "Not found."}), 404
+        data, err = _json_object()
+        if err:
+            return err
+        grade = data.get("grade")
+        if grade not in problem_store.GRADES:
+            return jsonify({"error": "Grade must be one of: "
+                            + ", ".join(problem_store.GRADES) + "."}), 400
+        attempt, attempt_err = _attempt_summary(data.get("attempt"))
+        if attempt_err:
+            return jsonify({"error": attempt_err}), 400
+        result = problem_store.grade_problem(pid, grade, attempt=attempt)
+        if result is None:
+            return jsonify({"error": "Not found."}), 404
+        _invalidate_library_cache()
+        return jsonify(result)
+
+    @app.put("/problems/<pid>/notes")
+    def problem_notes(pid):
+        # D9: the notes editor in the library viewer (debounced saves).
+        if not problem_store.valid_problem_id(pid):
+            return jsonify({"error": "Not found."}), 404
+        data, err = _json_object()
+        if err:
+            return err
+        notes = data.get("notes")
+        if not isinstance(notes, str):
+            return jsonify({"error": "Notes must be text."}), 400
+        notes = notes.replace("\r\n", "\n")
+        if len(notes) > problem_store.NOTES_CAP:
+            return jsonify({"error": f"Notes are too long (max {problem_store.NOTES_CAP} "
+                            "characters)."}), 400
+        rec = problem_store.set_notes(pid, notes)
+        if rec is None:
+            return jsonify({"error": "Not found."}), 404
+        return jsonify({"ok": True, "id": rec["id"], "notes_updated": rec.get("notes_updated"),
+                        "length": len(notes)})
+
+    @app.post("/attempt/test")
+    def attempt_test():
+        # D3: "Test my code" in the re-attempt view. Python only, run
+        # through the hardened sandbox against the saved statement's samples
+        # plus the learner's own cases. Plain JSON; one test run at a time
+        # (the sandbox is CPU-heavy); POST /attempt/cancel {test_id} stops it.
+        data, err = _json_object()
+        if err:
+            return err
+        type_err = _non_string_field_error(
+            data, (("problem_id", "Problem id"), ("code", "Code"),
+                   ("language", "Language"), ("test_id", "Test id")))
+        if type_err:
+            return jsonify({"error": type_err}), 400
+        pid = data.get("problem_id") or ""
+        if not problem_store.valid_problem_id(pid):
+            return jsonify({"error": "A valid problem_id is required."}), 400
+        test_id = data.get("test_id")
+        if test_id is not None and not _RUN_ID_RE.fullmatch(test_id):
+            return jsonify({"error": "Invalid test id."}), 400
+        language = (data.get("language") or "").strip().lower()
+        if language not in LANGUAGES:
+            return jsonify({"error": f"Unknown language {language!r}."}), 400
+        code = (data.get("code") or "").replace("\r\n", "\n")
+        if len(code) > practice.CODE_CAP:
+            return jsonify({"error": f"Code is too long (max {practice.CODE_CAP} "
+                            "characters)."}), 400
+        include_samples = data.get("include_samples", True)
+        if not isinstance(include_samples, bool):
+            return jsonify({"error": "include_samples must be true or false."}), 400
+        try:
+            custom = practice.parse_custom_cases(data.get("cases"))
+        except practice.CaseError as exc:
+            return jsonify({"error": str(exc)}), 400
+        rec = problem_store.load_problem(pid)
+        if rec is None:
+            return jsonify({"error": "Not found."}), 404
+        if language != "python":
+            return jsonify({"supported": False, "status": "not_supported",
+                            "message": practice.unsupported_message(language)})
+        if not code.strip():
+            return jsonify({"error": "Write some code first."}), 400
+        statement = rec.get("statement") or ""
+        cases = (practice.sample_cases(statement) if include_samples else []) + custom
+        if not cases:
+            return jsonify({"error": "No test cases: the saved statement has no sample "
+                            "Input/Output - add a case of your own."}), 400
+        acquired = _attempt_slot.acquire(blocking=False)
+        if not acquired:
+            with _inflight_lock:
+                running = _attempt_running["cancel"]
+            if running is not None and running.is_set():
+                acquired = _attempt_slot.acquire(timeout=ATTEMPT_CANCEL_GRACE_S)
+        if not acquired:
+            return jsonify({"error": "A test run is already in progress."}), 409
+        cancel = threading.Event()
+        try:
+            with _inflight_lock:
+                _attempt_running["cancel"] = cancel
+                if test_id:
+                    _attempts[test_id] = cancel
+            try:
+                result = practice.run_cases(code, cases, problem_text=statement, cancel=cancel)
+            except Exception as exc:  # answer in JSON, never an HTML 500
+                # Like /run's _verify_code: a sandbox that cannot even start
+                # (most often a full / unwritable temp dir) is reported, not raised.
+                app.logger.exception("test run failed (problem=%s)", pid)
+                reason = getattr(exc, "strerror", None) or str(exc) or type(exc).__name__
+                return jsonify({"error": (
+                    f"the test sandbox could not start ({reason}). Check that your temp "
+                    "folder exists, is writable and has free space, then try again.")}), 500
+        finally:
+            with _inflight_lock:
+                if test_id and _attempts.get(test_id) is cancel:
+                    del _attempts[test_id]
+                if _attempt_running["cancel"] is cancel:
+                    _attempt_running["cancel"] = None
+            _attempt_slot.release()
+        if cancel.is_set():
+            result["cancelled"] = True
+        return jsonify({"supported": True, "problem_id": rec.get("id"), **result})
+
+    @app.post("/attempt/cancel")
+    def attempt_cancel():
+        data, err = _json_object()
+        if err:
+            return err
+        test_id = data.get("test_id")
+        if not isinstance(test_id, str) or not _RUN_ID_RE.fullmatch(test_id):
+            return jsonify({"error": "A valid test_id is required."}), 400
+        with _inflight_lock:
+            event = _attempts.get(test_id)
+        if event is None:
+            return jsonify({"cancelled": False}), 404
+        event.set()  # the sandbox kills the running case within a poll tick
+        return jsonify({"cancelled": True})
+
+    def _flashcard_scope():
+        """The ``problem_id`` / ``path`` filters of a flashcards request, or
+        an error response."""
+        pid = request.args.get("problem_id")
+        if pid is not None and not problem_store.valid_problem_id(pid):
+            return None, None, (jsonify({"error": "Invalid problem id."}), 400)
+        path = request.args.get("path")
+        if path is not None:
+            resolved = library.resolve_file(path)
+            if resolved is None or resolved.suffix.lower() != ".md":
+                return None, None, (jsonify({"error": "Not found."}), 404)
+            path = resolved.relative_to(config.output_dir().resolve()).as_posix()
+        if pid is not None:
+            rec = problem_store.load_problem(pid)
+            pid = rec.get("id") if rec else pid  # an alias names its record
+        return pid, path, None
+
+    @app.get("/flashcards")
+    def flashcards_list():
+        # D10: the cards of every doc's ## Flashcards section (newest
+        # doc first) for the in-app flip review; ?problem_id= / ?path= narrow.
+        pid, path, err = _flashcard_scope()
+        if err:
+            return err
+        root = config.output_dir().resolve()
+        cards = flashcards.collect(root, _cached_library_files(), problem_id=pid, path=path)
+        return jsonify({"cards": cards, "count": len(cards)})
+
+    @app.get("/flashcards.tsv")
+    def flashcards_tsv():
+        # D10: the same cards as an Anki-importable TSV download.
+        pid, path, err = _flashcard_scope()
+        if err:
+            return err
+        root = config.output_dir().resolve()
+        cards = flashcards.collect(root, _cached_library_files(), problem_id=pid, path=path)
+        return Response(
+            flashcards.to_tsv(cards).encode("utf-8"),
+            content_type="text/tab-separated-values; charset=utf-8",
+            headers={
+                "Content-Disposition": 'attachment; filename="leetcoach-flashcards.tsv"',
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.get("/stats")
+    def stats_route():
+        # A8: computed from the run log, legacy files (no log entry)
+        # counted per saved run by their own mtime.
+        return jsonify(stats.compute_stats(
+            problem_store.read_runs(), _cached_library_files()))
+
+    @app.post("/run")
+    def run():
+        data, err = _json_object()
+        if err:
+            return err
+
+        # Type-check before any .strip()/.lower(): a non-string field (a script
+        # posting a JSON number/list) must be a clean 400, not a 500.
+        type_err = _non_string_field_error(
+            data,
+            (("problem", "Problem"), ("mode", "Mode"),
+             ("language", "Language"), ("tier", "Tier"), ("model", "Model"),
+             ("run_id", "Run id"), ("code", "Code")),
+        )
+        if type_err:
+            return jsonify({"error": type_err}), 400
+
+        problem = (data.get("problem") or "").strip()
+        mode = (data.get("mode") or "").strip().lower()
+        language = (data.get("language") or "").strip().lower()
+        tier = (data.get("tier") or "").strip().lower()
+        # B12: an optional per-run model (the picker sends it with every run,
+        # so two tabs never share one global choice). Allowlisted because
+        # it becomes a `--model` argv token; absent/empty -> config default.
+        model = (data.get("model") or "").strip().lower()
+        if model and model not in config.ALLOWED_MODEL_ALIASES:
+            return jsonify({"error": f"Unknown model {model!r}."}), 400
+        # The picker's highlighted button for a pinned id in
+        # .env (claude-sonnet-4-5 -> "sonnet") runs the pinned id, not the
+        # generic alias.
+        model = config.resolve_run_model(model)
+        # B14: the client names its run so Stop can POST /run/cancel; a
+        # client that doesn't gets a server-made id (echoed in X-Run-Id).
+        run_id = data.get("run_id")
+        if run_id is None:
+            run_id = uuid.uuid4().hex
+        elif not _RUN_ID_RE.fullmatch(run_id):
+            return jsonify({"error": "Invalid run id."}), 400
+
+        # --- validation (reject unknown values up front, before any Claude call)
+        if not problem:
+            return jsonify({"error": "Problem text is required."}), 400
+        if len(problem) > PROBLEM_MAX_CHARS:
+            return jsonify({"error": (
+                f"The problem is too long (max {PROBLEM_MAX_CHARS} characters). "
+                "Paste just the problem statement and its examples.")}), 400
+        if mode not in MODES:
+            return jsonify({"error": f"Unknown mode {mode!r}."}), 400
+        if language not in LANGUAGES:
+            return jsonify({"error": f"Unknown language {language!r}."}), 400
+        # Learning / Code Review have no tier; Answer/Guided require a valid one.
+        if mode not in UNTIERED_MODES and tier not in TIERS:
+            return jsonify({"error": f"Unknown tier {tier!r}."}), 400
+        if mode in UNTIERED_MODES:
+            tier = ""
+        # D5: Code Review reviews the learner's own attempt ("code").
+        attempt_code = ""
+        if mode == "review":
+            attempt_code = (data.get("code") or "").replace("\r\n", "\n")
+            if not attempt_code.strip():
+                return jsonify({"error": "Paste your code to review."}), 400
+            if len(attempt_code) > practice.CODE_CAP:
+                return jsonify({"error": f"Code is too long (max {practice.CODE_CAP} "
+                                "characters)."}), 400
+
+        # De-dup identical in-flight runs. Register atomically after
+        # validation; an exact duplicate that's still streaming gets a 409.
+        run_key = (problem, mode, language, tier, model, attempt_code)
+        study_kwargs = {"model": model} if model else {}
+        state = RunState(run_key)
+        with _inflight_lock:
+            if run_key in _inflight_runs or run_id in _runs:
+                return jsonify(
+                    {"error": "An identical run is already in progress."}
+                ), 409
+            if len(_runs) >= MAX_CONCURRENT_RUNS:
+                return jsonify({"error": (
+                    f"{MAX_CONCURRENT_RUNS} runs are already in progress. Wait for "
+                    "one to finish (or stop one) and try again.")}), 429
+            _inflight_runs[run_key] = run_id
+            _runs[run_id] = state
+
+        def _stream_and_accumulate(prompt):
+            """Stream ``run_fn(prompt)`` deltas to the client (yielding SSE text
+            events) while accumulating the full text. Returns the joined text via
+            a one-element list trick: generators can't ``return`` a value the
+            caller easily reads while also yielding, so we stash it on ``out[0]``.
+
+            If iterating ``run_fn`` fails mid-stream (e.g. the `claude` subprocess
+            dies part-way through a response), the exception is caught HERE and
+            re-raised only after the accumulator is left in a defined state, so
+            the outer ``event_stream`` handler converts it into a terminal SSE
+            ``error`` event instead of the stream cutting off silently. Whatever
+            text arrived before the failure has already been yielded to the
+            client; we do NOT proceed to save a partial/incomplete answer.
+            """
+            out[0] = ""  # reset accumulator for this call
+            full = []
+            # A7: study runs carry the tutor persona and KEEP their session
+            # (in the neutral cwd's project bucket) for a later --resume.
+            try:
+                state.check()  # cancelled before the stream even started
+                yield sse_event("phase", {"phase": "streaming"})
+                call = run_fn(
+                    prompt,
+                    system_prompt=prompts.TUTOR_SYSTEM_PROMPT,
+                    persist_session=True,
+                    **study_kwargs,
+                )
+                # B14: POST /run/cancel kills this call's process tree.
+                state.add_cancel_hook(lambda: _cancel_call(call, "study call"))
+                # C3: pings keep flowing while Claude thinks in silence.
+                for delta in iter_with_heartbeat(call):
+                    yield from _announce_model(call)
+                    if delta is HEARTBEAT:
+                        yield streaming.SSE_PING
+                        continue
+                    state.check()
+                    if delta:
+                        full.append(delta)
+                        yield sse_text(delta)
+                yield from _announce_model(call)
+                # The session id (from system/init or result) goes into
+                # the run log; D6's follow-up resumes it.
+                session_id = getattr(call, "session_id", None)
+                if isinstance(session_id, str) and session_id:
+                    run_meta["session_id"] = session_id
+                state.check()
+                # A stream that ends without producing any text is a failure,
+                # not an empty success: raising here (one place covering
+                # every mode) aborts before any save, and the
+                # last-resort handler turns it into the terminal SSE error.
+                # A client disconnect instead raises GeneratorExit at the yield
+                # above, so it can never reach (or be misreported by) this line.
+                if not full:
+                    raise RuntimeError("Claude returned an empty answer")
+            finally:
+                # Publish whatever we accumulated even if the loop raised, so any
+                # cleanup path sees a consistent value (the raise still aborts the
+                # mode's save/done steps below).
+                out[0] = "".join(full)
+
+        out = [""]  # accumulator shared with the helper above
+        run_meta: dict = {}  # what the client is told about the run
+
+        def _announce_model(call):
+            """Model chip: once the CLI has named the concrete model it
+            runs (``ClaudeRun.model``, from system/init), send it to the
+            client - the picker only knows the alias. Once per run."""
+            model_id = getattr(call, "model", None)
+            if isinstance(model_id, str) and model_id and "model" not in run_meta:
+                run_meta["model"] = model_id
+                yield sse_event("meta", {"model": model_id})
+
+        # A6: the classifier call(s) this run started, so they can be
+        # cancelled when the run no longer needs them (bounded join expired,
+        # client disconnected, answer failed). Anything run_fn returns that
+        # has a cancel() (claude_cli.ClaudeRun does) is cancellable; test
+        # fakes without one are simply left to finish.
+        cls_calls: list = []
+        cls_calls_lock = threading.Lock()
+        cls_cancelled = [False]
+
+        def _cancel_call(call, what: str = "classifier call") -> None:
+            cancel = getattr(call, "cancel", None)
+            if callable(cancel):
+                try:
+                    cancel()
+                except Exception:  # cancelling is best-effort
+                    app.logger.exception("could not cancel the %s", what)
+
+        def _classifier_run_fn(prompt, **kwargs):
+            call = run_fn(prompt, **kwargs)
+            with cls_calls_lock:
+                cls_calls.append(call)
+                late = cls_cancelled[0]
+            if late:  # the run was already over when this call started
+                _cancel_call(call)
+            return call
+
+        def _cancel_classifier() -> None:
+            with cls_calls_lock:
+                cls_cancelled[0] = True
+                calls = list(cls_calls)
+            for call in calls:
+                _cancel_call(call)
+
+        def _learned_topics() -> list:
+            """Topics already studied in THIS language (plus legacy,
+            language-agnostic ones), capped to the most recent
+            LEARNED_TOPICS_CAP so the prompt stays bounded."""
+            try:
+                return topic_index.known_topics(limit=LEARNED_TOPICS_CAP, language=language)
+            except Exception:  # noqa: BLE001 - index is best-effort
+                return []
+
+        def _record_topics(cls) -> None:
+            try:
+                topic_index.record(cls.problem_type, cls.topics, language=language)
+            except Exception:  # recording is best-effort
+                app.logger.exception("could not record topics")
+
+        def _save_with_fallback(save, fallback_body):
+            """Run the mode's ``save()`` (returns the saved paths) and return
+            ``(paths, warning)``. B25: if it raises ``OSError`` (a path past
+            the OS limit, a locked or unwritable folder, a full disk), the
+            fully streamed doc is written to ``output/_unsorted/<hash>.md``
+            instead of being thrown away, and ``warning`` tells the user where
+            it went. If even that fails the run ends in an error that says so."""
+            try:
+                return save(), None
+            except OSError as exc:
+                app.logger.exception("save failed (mode=%s); using the fallback", mode)
+                try:
+                    path = storage.save_unsorted(fallback_body)
+                except OSError as exc2:
+                    raise RuntimeError(
+                        f"the answer could not be saved ({exc}); the fallback save "
+                        f"failed too ({exc2}). Copy it from the page before leaving."
+                    ) from exc2
+                return [path], (
+                    f"Could not save to the usual library folder ({exc}). "
+                    f"Saved to {path} instead."
+                )
+
+        def _verify(code):
+            """Sandbox-verify ``code`` with heartbeats (C3). A Stop
+            (POST /run/cancel) or a client disconnect sets ``stop``, and
+            the sandbox kills the running solution at once instead of letting
+            it run out its timeout unobserved."""
+            stop = threading.Event()
+            state.add_cancel_hook(stop.set)
+            # D11: "verifying i/n" progress frames ride the heartbeat loop.
+            updates: queue.Queue = queue.Queue()
+
+            def progress(i, n):
+                updates.put(sse_event("phase", {"phase": "verifying", "i": i, "n": n}))
+
+            yield sse_event("phase", {"phase": "verifying"})
+            verified = yield from call_with_heartbeat(
+                lambda: _verify_code(
+                    code, problem, language, cancel=stop, progress=progress
+                ),
+                on_abandon=stop.set,
+                updates=updates,
+            )
+            state.check()  # cancelled while verifying: report that, not a verdict
+            return verified
+
+        def _record_run(paths, verification, cls, doc):
+            """D1: upsert the problem record and append the run-log
+            line. Best-effort: a metadata failure is logged, never fails a
+            run whose files are already saved. Returns the problem id."""
+            try:
+                return problem_store.record_run(
+                    problem,
+                    mode=mode,
+                    language=language,
+                    tier=tier if mode == "answer" else None,  # Answer only
+                    model=run_meta.get("model") or model or config.model(),
+                    verdict=library.verdict_from_line(verification),
+                    paths=paths,
+                    session_id=run_meta.get("session_id"),
+                    duration_s=time.monotonic() - started,
+                    pattern=cls.problem_type,
+                    doc=doc,
+                )
+            except Exception:  # metadata is best-effort
+                app.logger.exception("could not record the run (mode=%s)", mode)
+                return None
+
+        started = time.monotonic()
+
+        def event_stream():
+            save_warning = None
+            try:
+                state.check()  # B14: cancelled before the stream even started
+                state.add_cancel_hook(_cancel_classifier)
+                # 1) classify on a background thread. Its result is only
+                #    needed at save time, so it runs concurrently with the
+                #    answer stream (same injected run_fn -> tests still cover
+                #    it) on the cheap classifier model instead of holding the
+                #    first answer delta behind a full Claude call. The
+                #    pre-seeded fallback in ``cls_holder`` keeps the run alive
+                #    even if the thread dies: classify never raises by
+                #    contract, but a crash here must degrade to "uncategorized",
+                #    never abort the run.
+                cls_holder = [classifier.Classification(classifier.FALLBACK_TYPE, [])]
+
+                def _classify_in_background():
+                    try:
+                        cls_holder[0] = classifier.classify(
+                            problem,
+                            run_fn=_classifier_run_fn,
+                            model=config.classifier_model(),
+                        )
+                    except Exception:  # fallback already seeded above
+                        app.logger.exception("background classification failed")
+
+                cls_thread = threading.Thread(
+                    target=_classify_in_background,
+                    name="leetcoach-classify",
+                    daemon=True,
+                )
+                cls_thread.start()
+
+                def _classification():
+                    """Join the classifier thread and return its result.
+
+                    A6: the join is bounded. The answer is complete and
+                    streamed by now; a classifier that is still not back after
+                    CLASSIFIER_JOIN_TIMEOUT (a wedged CLI, or a fake that never
+                    returns) must not hold the save hostage for the full run
+                    watchdog. Its call is cancelled and the run saves under
+                    the fallback type."""
+                    deadline = time.monotonic() + CLASSIFIER_JOIN_TIMEOUT
+                    while cls_thread.is_alive():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        cls_thread.join(min(streaming.SSE_PING_INTERVAL, remaining))
+                        if cls_thread.is_alive() and time.monotonic() < deadline:
+                            yield streaming.SSE_PING  # C3: keep the stream alive meanwhile
+                    if cls_thread.is_alive():
+                        app.logger.warning(
+                            "classifier still running after %ss; saving as %s",
+                            CLASSIFIER_JOIN_TIMEOUT,
+                            classifier.FALLBACK_TYPE,
+                        )
+                        _cancel_classifier()
+                        return classifier.Classification(classifier.FALLBACK_TYPE, [])
+                    return cls_holder[0]
+
+                # 2) build the mode-specific prompt; 3) stream + accumulate;
+                #    4) save with the mode's own storage call. Only these two
+                #    bits differ between modes; the stream/accumulate/done
+                #    plumbing is shared. ``verification`` (Answer/Guided) is the
+                #    sandbox verdict reported in the stream, saved .md and done
+                #    payload; it stays None when a mode doesn't verify.
+                verification = None
+                # D2: the number + difficulty parsed from the paste
+                # (locally) feed the doc contract's header lines.
+                paste_meta = problem_store.parse_problem(problem)
+                if mode == "answer":
+                    prompt = prompts.build_answer(
+                        problem, tier=tier, language=language, meta=paste_meta
+                    )
+                    yield from _stream_and_accumulate(prompt)
+                    body = out[0]
+                    code = code_blocks.extract_code(body, language)
+
+                    # Best-effort sample-I/O verification. Stream a short
+                    # verdict line; the saved reasoning .md gets the verdict
+                    # PLUS the per-sample failure detail.
+                    result, verdict = yield from _verify(code)
+                    verification = verdict
+                    yield sse_text("\n\n" + verdict + "\n")
+                    reasoning = (
+                        body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                        + _verification_detail(result)
+                    )
+
+                    yield sse_event("phase", {"phase": "saving"})  # D11
+                    cls = yield from _classification()  # join before the save
+                    state.commit()  # B14: cancel wins only before this point
+
+                    def _save_answer():
+                        code_path, reasoning_path = storage.save_answer(
+                            problem,
+                            cls.problem_type,
+                            tier=tier,
+                            language=language,
+                            code=code,
+                            reasoning=reasoning,
+                        )
+                        # B24: code_path is None when no code block was
+                        # extracted (an empty code file would otherwise land
+                        # in the library).
+                        return [p for p in (code_path, reasoning_path) if p]
+
+                    # The reasoning .md already carries the code block, so it
+                    # alone is the fallback copy.
+                    paths, save_warning = _save_with_fallback(_save_answer, reasoning)
+                elif mode == "learning":
+                    # Feed already-learned topics so Claude skips/cross-links
+                    # covered tech, then record this run's topics afterward.
+                    # Capped to the most recent LEARNED_TOPICS_CAP so the
+                    # prompt stays bounded as the index grows.
+                    learned = _learned_topics()
+                    prompt = prompts.build_learning(
+                        problem,
+                        language=language,
+                        already_learned_topics=learned or None,
+                        meta=paste_meta,
+                    )
+                    yield from _stream_and_accumulate(prompt)
+                    yield sse_event("phase", {"phase": "saving"})  # D11
+                    cls = yield from _classification()  # join before the save
+                    state.commit()  # B14: cancel wins only before this point
+                    paths, save_warning = _save_with_fallback(
+                        lambda: [storage.save_learning(problem, cls.problem_type, out[0])],
+                        out[0],
+                    )
+                    _record_topics(cls)
+                elif mode == "guided":  # validation guarantees a valid tier
+                    # B22: Guided teaches the stack too - skip what is known,
+                    # and remember what this run covered.
+                    learned = _learned_topics()
+                    prompt = prompts.build_guided(
+                        problem,
+                        tier=tier,
+                        language=language,
+                        already_learned_topics=learned or None,
+                        meta=paste_meta,
+                    )
+                    yield from _stream_and_accumulate(prompt)
+                    body = out[0]
+
+                    # Verify Guided's answer step the same way as Answer:
+                    # extract the code from the full piped doc exactly once
+                    # and save verdict + failure detail.
+                    code = code_blocks.extract_code(body, language)
+                    result, verdict = yield from _verify(code)
+                    verification = verdict
+                    yield sse_text("\n\n" + verdict + "\n")
+                    saved = (
+                        body + "\n\n---\n\n**Verification:** " + verdict + "\n"
+                        + _verification_detail(result)
+                    )
+                    yield sse_event("phase", {"phase": "saving"})  # D11
+                    cls = yield from _classification()  # join before the save
+                    state.commit()  # B14: cancel wins only before this point
+                    paths, save_warning = _save_with_fallback(
+                        lambda: [storage.save_guided(problem, cls.problem_type, saved)],
+                        saved,
+                    )
+                    _record_topics(cls)
+                elif mode == "review":
+                    # D5: critique the learner's attempt (fenced as
+                    # untrusted data like the problem); nothing is verified.
+                    prompt = prompts.build_review(
+                        problem, attempt_code, language=language, meta=paste_meta
+                    )
+                    yield from _stream_and_accumulate(prompt)
+                    # The saved doc keeps the attempt it reviewed.
+                    saved = (
+                        out[0].rstrip("\n") + "\n\n---\n\n## Your attempt\n\n"
+                        + storage.attempt_block(attempt_code, language)
+                    )
+                    yield sse_event("phase", {"phase": "saving"})
+                    cls = yield from _classification()  # join before the save
+                    state.commit()  # B14: cancel wins only before this point
+                    paths, save_warning = _save_with_fallback(
+                        lambda: [storage.save_review(problem, cls.problem_type, saved)],
+                        saved,
+                    )
+
+                problem_id = _record_run(paths, verification, cls, out[0])
+
+                # A new artifact just landed under output/, so drop the library
+                # cache so the next /library (the frontend refreshes right after
+                # a run) reflects it even for a nested save the root mtime misses.
+                _invalidate_library_cache()
+
+                # 5) terminal success event
+                done_payload = {
+                    "mode": mode,
+                    "problem_type": cls.problem_type,
+                    "topics": cls.topics,
+                    "paths": paths,
+                }
+                if verification is not None:
+                    done_payload["verification"] = verification
+                if save_warning:
+                    done_payload["save_warning"] = save_warning
+                if run_meta.get("model"):
+                    done_payload["model"] = run_meta["model"]
+                if problem_id:
+                    done_payload["problem_id"] = problem_id
+                yield sse_event("done", done_payload)
+            except Exception as exc:  # noqa: BLE001 - last resort, logged by _log_failure
+                if state.cancelled:
+                    # B14: Stop -> POST /run/cancel. Whatever the killed call
+                    # raised (ClaudeCancelledError, RunCancelled), say so -
+                    # as its own terminal `cancelled` event: a
+                    # user Stop is not a failure, and the page shows it as
+                    # the neutral "Stopped" state, not "Run failed".
+                    yield sse_event("cancelled", "Run cancelled.")
+                else:
+                    # Keep the full traceback in the server log;
+                    # the client still gets only the short message below.
+                    _log_failure(app.logger, exc, "run failed (mode=%s)", mode)
+                    yield sse_event("error", f"Run failed: {exc}")
+            finally:
+                # A6: a classifier call still running is no longer needed -
+                # the client left (GeneratorExit), the answer failed, or the
+                # save is done - so stop its `claude` process. A no-op for a
+                # call that already finished.
+                _cancel_classifier()
+                # Release the in-flight key no matter how the stream ends:
+                # normal completion, error, or a client disconnect (which raises
+                # GeneratorExit here, bypassing the except above). Frees an
+                # identical run to start again.
+                _release_run(run_id, state)
+
+        resp = Response(
+            stream_with_context(event_stream()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",  # disable proxy buffering if present
+                "X-Run-Id": run_id,
+            },
+        )
+        # A client that leaves before the generator ever starts never reaches
+        # event_stream's finally; the response's close still frees the slot
+        # (idempotent with that finally, and only for this run's own key).
+        resp.call_on_close(lambda: _release_run(run_id, state))
+        return resp
+
+    @app.post("/run/cancel")
+    def cancel_run():
+        # B14: Stop in the UI. Kills the named run's Claude call(s) and frees
+        # its in-flight slot at once, so re-running the same settings is not
+        # a 409 until the server happens to notice the dropped connection.
+        data, err = _json_object()
+        if err:
+            return err
+        run_id = data.get("run_id")
+        if not isinstance(run_id, str) or not _RUN_ID_RE.fullmatch(run_id):
+            return jsonify({"error": "A valid run_id is required."}), 400
+        with _inflight_lock:
+            state = _runs.get(run_id)
+        if state is None:
+            return jsonify({"cancelled": False}), 404
+        if not state.cancel():
+            # Too late: the run already committed to saving. It finishes
+            # (and frees its own slot); the client keeps reading for `done`.
+            return jsonify({"cancelled": False})
+        _release_run(run_id, state)
+        return jsonify({"cancelled": True})
+
+    @app.post("/ask")
+    def ask():
+        # Quick Ask: a small syntax/stdlib question answered by the cheap
+        # quick-ask model via the SAME injected run_fn as /run. The answer is
+        # ephemeral: plain JSON, no SSE, nothing saved to the library.
+        data, err = _json_object()
+        if err:
+            return err
+
+        # Type-check before any .strip()/.lower() OR the problem-context slice
+        # below (which sits outside the try/except): a non-string field must be
+        # a clean 400, not a 500, mirroring /run.
+        type_err = _non_string_field_error(
+            data,
+            (("question", "Question"), ("language", "Language"),
+             ("problem", "Problem"), ("ask_id", "Ask id")),
+        )
+        if type_err:
+            return jsonify({"error": type_err}), 400
+        # B20: an optional client id so the page's Cancel (or its 60 s
+        # timeout) can kill the call via POST /ask/cancel.
+        ask_id = data.get("ask_id")
+        if ask_id is not None and not _RUN_ID_RE.fullmatch(ask_id):
+            return jsonify({"error": "Invalid ask id."}), 400
+
+        question = (data.get("question") or "").strip()
+        language = (data.get("language") or "").strip().lower() or "python"
+        problem = data.get("problem") or ""
+
+        # --- validation (reject before any Claude call, mirroring /run)
+        if not question:
+            return jsonify({"error": "A question is required."}), 400
+        if len(question) > QUICK_ASK_MAX_QUESTION:
+            return jsonify(
+                {"error": f"Question too long (max {QUICK_ASK_MAX_QUESTION} chars)."}
+            ), 400
+        if language not in LANGUAGES:
+            return jsonify({"error": f"Unknown language {language!r}."}), 400
+
+        prompt = prompts.build_quick_ask(
+            question,
+            language=language,
+            problem=problem[:QUICK_ASK_PROBLEM_CONTEXT_CAP],
+        )
+        cancelled = threading.Event()
+        # Register the ask BEFORE run_fn, so a Cancel (or the
+        # client timeout) that lands while the call is still starting finds
+        # it and sets the flag instead of 404-ing; the call itself is filled
+        # in (and cancelled, if the flag is already set) once run_fn returns.
+        entry = [None, cancelled]
+        with _inflight_lock:
+            if _asks_running[0] >= MAX_CONCURRENT_ASKS:
+                return jsonify({"error": (
+                    f"{MAX_CONCURRENT_ASKS} Quick Asks are already in progress. "
+                    "Wait for one to answer and try again.")}), 429
+            _asks_running[0] += 1
+            if ask_id:
+                _asks[ask_id] = entry
+        try:
+            try:
+                call = run_fn(
+                    prompt,
+                    model=config.quick_ask_model(),
+                    system_prompt=prompts.QUICK_ASK_SYSTEM_PROMPT,
+                    persist_session=False,  # A7: utility call, never resumed
+                )
+                with _inflight_lock:
+                    entry[0] = call
+                if cancelled.is_set():
+                    _cancel_ask_call(call)
+                    return jsonify({"error": "Quick Ask cancelled."}), 409
+                answer = "".join(call).strip()
+            finally:
+                with _inflight_lock:
+                    _asks_running[0] -= 1
+                    if ask_id and _asks.get(ask_id) is entry:
+                        del _asks[ask_id]
+        except Exception as exc:  # noqa: BLE001 - a clean 502, logged by _log_failure
+            if cancelled.is_set():
+                return jsonify({"error": "Quick Ask cancelled."}), 409
+            _log_failure(app.logger, exc, "quick ask failed")
+            return jsonify({"error": f"Quick Ask failed: {exc}"}), 502
+        if cancelled.is_set():
+            return jsonify({"error": "Quick Ask cancelled."}), 409
+        if not answer:
+            # Same stance as /run's empty-stream guard: no text is a failure,
+            # not an empty success.
+            return jsonify({"error": "Claude returned an empty answer."}), 502
+        return jsonify({"answer": answer})
+
+    @app.post("/ask/cancel")
+    def cancel_ask():
+        # B20: the Quick Ask Cancel button / 60 s client timeout. Kills the
+        # named call's `claude` process so it doesn't run out its watchdog.
+        data, err = _json_object()
+        if err:
+            return err
+        ask_id = data.get("ask_id")
+        if not isinstance(ask_id, str) or not _RUN_ID_RE.fullmatch(ask_id):
+            return jsonify({"error": "A valid ask_id is required."}), 400
+        with _inflight_lock:
+            entry = _asks.get(ask_id)
+            if entry is None:
+                return jsonify({"cancelled": False}), 404
+            entry[1].set()
+            call = entry[0]  # None while run_fn is still starting
+        if call is not None:
+            _cancel_ask_call(call)
+        return jsonify({"cancelled": True})
+
+    def _release_followup(followup_id: str, state: RunState) -> None:
+        with _inflight_lock:
+            if _followups.get(followup_id) is state:
+                del _followups[followup_id]
+
+    @app.post("/followup")
+    def followup():
+        # D6: a follow-up question on a saved doc, streamed as SSE. The
+        # study run's own session is resumed (`claude -p --resume <id>`, same
+        # isolation + neutral cwd) so Claude still has the whole conversation;
+        # without a usable session it falls back to a fresh isolated call with
+        # the doc as context. The answer is appended to the doc under
+        # "## Follow-up — <question>". Same event protocol as /run.
+        data, err = _json_object()
+        if err:
+            return err
+        type_err = _non_string_field_error(
+            data,
+            (("path", "Path"), ("question", "Question"), ("model", "Model"),
+             ("followup_id", "Follow-up id")),
+        )
+        if type_err:
+            return jsonify({"error": type_err}), 400
+        question = (data.get("question") or "").replace("\r\n", "\n").strip()
+        if not question:
+            return jsonify({"error": "A question is required."}), 400
+        if len(question) > FOLLOWUP_MAX_QUESTION:
+            return jsonify(
+                {"error": f"Question too long (max {FOLLOWUP_MAX_QUESTION} chars)."}
+            ), 400
+        model = (data.get("model") or "").strip().lower()
+        if model and model not in config.ALLOWED_MODEL_ALIASES:
+            return jsonify({"error": f"Unknown model {model!r}."}), 400
+        model = config.resolve_run_model(model)
+        followup_id = data.get("followup_id")
+        if followup_id is None:
+            followup_id = uuid.uuid4().hex
+        elif not _RUN_ID_RE.fullmatch(followup_id):
+            return jsonify({"error": "Invalid follow-up id."}), 400
+
+        # The library's containment gate (traversal, absolute paths, hidden
+        # .leetcoach/ metadata all 404), and only a Markdown doc takes one.
+        resolved = library.resolve_file(data.get("path") or "")
+        if resolved is None or resolved.suffix.lower() != ".md":
+            return jsonify({"error": "Not found."}), 404
+        rel_path = resolved.relative_to(config.output_dir().resolve()).as_posix()
+        try:
+            raw_doc = resolved.read_bytes()
+        except OSError:
+            return jsonify({"error": "Not found."}), 404
+        # The append reads the doc strictly (re-encoding replaced
+        # bytes would corrupt it), so a doc that is not UTF-8 is refused HERE,
+        # before a Claude call is spent on an answer that could not be saved.
+        try:
+            doc_text = raw_doc.decode("utf-8")
+        except UnicodeDecodeError:
+            return jsonify({"error": "This doc is not valid UTF-8 text, so a follow-up "
+                            "can't be added to it. Re-save it as UTF-8 and try again."}), 422
+        doc_text = doc_text.replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            logged = problem_store.session_for_doc(rel_path)
+        except Exception:  # no log: a legacy doc, use the fallback
+            app.logger.exception("could not read the run log for %s", rel_path)
+            logged = None
+        logged = logged or {}
+        session_id = logged.get("session_id")
+        if not (isinstance(session_id, str)
+                and claude_cli.SESSION_ID_RE.fullmatch(session_id)):
+            session_id = None
+
+        state = RunState(("followup", followup_id))
+        with _inflight_lock:
+            if _followups:
+                return jsonify({"error": "A follow-up is already running."}), 409
+            _followups[followup_id] = state
+
+        run_meta: dict = {}
+        started = time.monotonic()
+
+        def _announce_model(call):
+            model_id = getattr(call, "model", None)
+            if isinstance(model_id, str) and model_id and "model" not in run_meta:
+                run_meta["model"] = model_id
+                yield sse_event("meta", {"model": model_id})
+
+        def _stream(prompt, acc, *, resume):
+            """Stream one claude call's deltas (SSE text) into ``acc``."""
+            kwargs = {
+                "system_prompt": prompts.FOLLOWUP_SYSTEM_PROMPT,
+                # The resumed study session keeps the follow-up turn (a later
+                # follow-up sees it); the fresh fallback call is a utility call.
+                "persist_session": resume is not None,
+            }
+            if resume is not None:
+                kwargs["resume"] = resume
+            if model:
+                kwargs["model"] = model
+            state.check()
+            call = run_fn(prompt, **kwargs)
+            state.add_cancel_hook(lambda: _cancel_ask_call(call))
+            for delta in iter_with_heartbeat(call):
+                yield from _announce_model(call)
+                if delta is HEARTBEAT:
+                    yield streaming.SSE_PING
+                    continue
+                state.check()
+                if delta:
+                    acc.append(delta)
+                    yield sse_text(delta)
+            yield from _announce_model(call)
+            state.check()
+
+        def event_stream():
+            try:
+                state.check()
+                acc: list = []
+                source = None
+                reason = None
+                if session_id is None:
+                    reason = "no_session"
+                else:
+                    yield sse_event("phase", {"phase": "streaming", "source": "resume"})
+                    try:
+                        yield from _stream(prompts.build_followup(question), acc,
+                                           resume=session_id)
+                        source = "resume"
+                    except claude_cli.ClaudeUnavailableError as exc:
+                        # Fall back only when the resume failed BEFORE any text
+                        # (session not found, a nonzero exit, a CLI without
+                        # --resume). A sign-in / usage-limit failure would hit
+                        # the fresh call too, so it is reported as is - and so
+                        # is a watchdog timeout: a second full call
+                        # would double an already maximal wait.
+                        if (acc or state.cancelled
+                                or isinstance(exc, claude_cli.ClaudeTimeoutError)
+                                or claude_cli.is_auth_or_limit_error(str(exc))):
+                            raise
+                        reason = ("unsupported"
+                                  if isinstance(exc, claude_cli.ResumeUnsupportedError)
+                                  else "resume_failed")
+                        app.logger.info("follow-up resume failed (%s); falling back", exc)
+                if source is None:
+                    yield sse_event(
+                        "phase", {"phase": "streaming", "source": "fallback", "reason": reason}
+                    )
+                    acc = []
+                    yield from _stream(prompts.build_followup(question, doc=doc_text), acc,
+                                       resume=None)
+                    source = "fallback"
+                answer = "".join(acc).strip()
+                if not answer:
+                    raise RuntimeError("Claude returned an empty answer")
+                yield sse_event("phase", {"phase": "saving"})
+                state.commit()  # cancel wins only before this point
+                try:
+                    heading = storage.append_followup(resolved, question, answer)
+                except FileNotFoundError:
+                    raise RuntimeError(
+                        "the doc was moved or deleted while Claude answered; nothing was saved"
+                    ) from None
+                except UnicodeDecodeError:
+                    raise RuntimeError(
+                        "the doc was changed to non-UTF-8 text while Claude answered; "
+                        "nothing was saved"
+                    ) from None
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"could not add the answer to the doc ({exc.strerror or exc})"
+                    ) from exc
+                try:
+                    problem_store.record_followup(
+                        rel_path,
+                        problem_id=logged.get("problem_id"),
+                        resumed=source == "resume",
+                        session_id=session_id if source == "resume" else None,
+                        model=run_meta.get("model") or model or config.model(),
+                        duration_s=time.monotonic() - started,
+                    )
+                except Exception:  # the doc already holds the answer
+                    app.logger.exception("could not log the follow-up on %s", rel_path)
+                _invalidate_library_cache()
+                done = {"path": rel_path, "source": source, "resumed": source == "resume",
+                        "heading": heading}
+                if reason:
+                    done["reason"] = reason
+                if run_meta.get("model"):
+                    done["model"] = run_meta["model"]
+                yield sse_event("done", done)
+            except Exception as exc:  # noqa: BLE001 - last resort, logged by _log_failure
+                if state.cancelled:
+                    yield sse_event("cancelled", "Follow-up cancelled.")
+                else:
+                    _log_failure(app.logger, exc, "follow-up failed on %s", rel_path)
+                    yield sse_event("error", f"Follow-up failed: {exc}")
+            finally:
+                _release_followup(followup_id, state)
+
+        resp = Response(
+            stream_with_context(event_stream()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Followup-Id": followup_id,
+            },
+        )
+        resp.call_on_close(lambda: _release_followup(followup_id, state))
+        return resp
+
+    @app.post("/followup/cancel")
+    def cancel_followup():
+        # D6: Stop / Esc on the follow-up box. Same contract as
+        # /run/cancel: 200 {"cancelled": true}; 200 {"cancelled": false} once
+        # the answer is being appended (too late); 404 unknown; 400 invalid.
+        data, err = _json_object()
+        if err:
+            return err
+        followup_id = data.get("followup_id")
+        if not isinstance(followup_id, str) or not _RUN_ID_RE.fullmatch(followup_id):
+            return jsonify({"error": "A valid followup_id is required."}), 400
+        with _inflight_lock:
+            state = _followups.get(followup_id)
+        if state is None:
+            return jsonify({"cancelled": False}), 404
+        if not state.cancel():
+            return jsonify({"cancelled": False})
+        _release_followup(followup_id, state)
+        return jsonify({"cancelled": True})
+
+    return app
+
+
+# Module-level app for `flask run` / WSGI servers (real claude runner).
+app = create_app()

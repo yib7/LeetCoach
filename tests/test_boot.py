@@ -8,9 +8,10 @@ free).
 """
 from __future__ import annotations
 
+import pytest
 from flask import Flask
 
-import app as app_module
+from leetcoach import app as app_module
 
 
 def test_app_module_imports_and_has_module_level_app():
@@ -39,11 +40,100 @@ def test_create_app_constructs_without_live_claude():
 def test_all_core_modules_import():
     """Every first-party module imports cleanly (no import-time side effects that
     need a live claude / network)."""
-    import classifier  # noqa: F401
-    import claude_cli  # noqa: F401
-    import config  # noqa: F401
-    import parsing  # noqa: F401
-    import prompts  # noqa: F401
-    import sandbox  # noqa: F401
-    import storage  # noqa: F401
-    import topic_index  # noqa: F401
+    import importlib
+
+    for name in ("classifier", "claude_cli", "code_blocks", "config", "prompts",
+                 "sandbox", "storage", "topic_index"):
+        assert importlib.import_module(f"leetcoach.{name}").__name__ == f"leetcoach.{name}"
+
+
+# --- B8: LEETCOACH_NO_DOTENV must actually gate the dotenv load ------------
+
+def test_maybe_load_dotenv_skips_when_no_dotenv_flag_set(tmp_path, monkeypatch):
+    import os
+
+    envfile = tmp_path / ".env"
+    envfile.write_text("LEETCOACH_SENTINEL_B8=from_dotenv\n", encoding="utf-8")
+    monkeypatch.delenv("LEETCOACH_SENTINEL_B8", raising=False)
+    monkeypatch.setenv("LEETCOACH_NO_DOTENV", "1")
+
+    app_module._maybe_load_dotenv(envfile)
+
+    assert "LEETCOACH_SENTINEL_B8" not in os.environ
+
+
+def test_maybe_load_dotenv_loads_when_flag_unset(tmp_path, monkeypatch):
+    import os
+
+    envfile = tmp_path / ".env"
+    envfile.write_text("LEETCOACH_SENTINEL_B8=from_dotenv\n", encoding="utf-8")
+    monkeypatch.delenv("LEETCOACH_SENTINEL_B8", raising=False)
+    monkeypatch.delenv("LEETCOACH_NO_DOTENV", raising=False)
+
+    app_module._maybe_load_dotenv(envfile)
+
+    assert os.environ.get("LEETCOACH_SENTINEL_B8") == "from_dotenv"
+    monkeypatch.delenv("LEETCOACH_SENTINEL_B8", raising=False)
+
+
+def test_suite_env_isolation_sets_no_dotenv_and_private_output_dir():
+    """The autouse fixture in tests/conftest.py (B8) must have already isolated
+    this test's environment by the time it runs."""
+    import os
+
+    assert os.environ.get("LEETCOACH_NO_DOTENV") == "1"
+    assert "leetcoach-output" in os.environ.get("LEETCOACH_OUTPUT_DIR", "")
+
+
+# --- B12: a UTF-16 / BOM .env must not crash the boot ------------------------
+
+def test_maybe_load_dotenv_reads_utf16_and_bom_files(tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.delenv("LEETCOACH_NO_DOTENV", raising=False)
+    for raw in ("LEETCOACH_SENTINEL_B12=ok\n".encode("utf-16"),
+                b"\xef\xbb\xbfLEETCOACH_SENTINEL_B12=ok\n"):
+        envfile = tmp_path / ".env"
+        envfile.write_bytes(raw)
+        monkeypatch.delenv("LEETCOACH_SENTINEL_B12", raising=False)
+        app_module._maybe_load_dotenv(envfile)
+        assert os.environ.get("LEETCOACH_SENTINEL_B12") == "ok"
+    monkeypatch.delenv("LEETCOACH_SENTINEL_B12", raising=False)
+
+
+def test_maybe_load_dotenv_survives_an_undecodable_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("LEETCOACH_NO_DOTENV", raising=False)
+    envfile = tmp_path / ".env"
+    envfile.write_bytes(b"A=\xff\xfe\xfa\n")
+    app_module._maybe_load_dotenv(envfile)  # must not raise
+
+
+# --- 6.x: the documented Python floor (3.12) is enforced at import ----------
+
+def test_python_floor_message_names_both_versions():
+    import leetcoach
+
+    msg = leetcoach.python_too_old((3, 11, 9, "final", 0))
+    assert msg is not None
+    assert "3.12" in msg and "3.11" in msg
+    assert leetcoach.python_too_old((3, 12, 0, "final", 0)) is None
+    assert leetcoach.python_too_old((3, 14, 1, "final", 0)) is None
+    assert leetcoach.python_too_old((4, 0, 0, "final", 0)) is None
+
+
+def test_importing_the_package_on_an_old_python_exits_with_that_message(monkeypatch):
+    """`python app.py` on Python 3.11 must stop with one clear line instead of
+    failing somewhere deep in a run (the README's floor is 3.12)."""
+    import importlib
+    import sys
+
+    import leetcoach
+
+    monkeypatch.setattr(sys, "version_info", (3, 11, 9, "final", 0))
+    try:
+        with pytest.raises(SystemExit) as exc:
+            importlib.reload(leetcoach)
+        assert "3.12" in str(exc.value.code)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(leetcoach)

@@ -1,51 +1,104 @@
 # Architecture
 
-A five-minute tour of how LeetCoach is put together, for anyone reading the code for
-the first time.
+A short tour of how LeetCoach fits together, for anyone reading the code for the first
+time. Read down to **Design decisions** for the tour (about five minutes); the routes,
+follow-ups, Quick Ask and commands after it are reference.
 
 ## What it is
 
 LeetCoach is a small Flask web app that runs on `localhost`. You paste a LeetCode-style
-problem, pick a language and a mode, and the app shells out to the **`claude` CLI**
-(`claude -p`, no API key) to generate study material. The response streams back to the
-browser live over server-sent events (SSE) and is saved under `output/` so your notes
-accumulate into a personal study library.
+problem and pick a language and a mode. The app then shells out to the `claude` CLI
+(`claude -p`, no API key) to generate a study doc. The response streams back to the
+browser live over server-sent events (SSE) and is saved under `output/`, so your study
+docs accumulate into a personal study library.
 
-There is one external dependency that does the heavy lifting (the `claude` CLI) and a
-handful of small, single-purpose Python modules around it. Nothing here talks to a
-database or a cloud service.
+The library also feeds a practice loop:
+
+- problem records and an append-only run log;
+- re-attempts with "Test my code" in the sandbox;
+- a spaced-repetition review queue;
+- notes and flashcards;
+- follow-up questions appended to a saved doc.
+
+One external dependency does the heavy lifting: the `claude` CLI. Around it sit a
+handful of small, single-purpose Python modules and two front-end scripts. Nothing talks
+to a database or a cloud service. All state lives in files under `output/`.
+
+## Where things are
+
+```
+app.py           entry point: `python app.py` (a few lines that call leetcoach.launcher)
+LeetCoach.cmd    Windows double-click launcher (first run calls scripts/setup.ps1, then app.py)
+leetcoach/       the app: Python modules (table below) + static/ and templates/
+tests/           pytest suite (tests/js/: node tests for leetcoach/static/lib/core.js)
+scripts/         setup.ps1 (Windows setup: .venv + base.txt at the lock.txt versions),
+                 desktop shortcut, claude sign-in check, dev/ fake CLI harness
+docs/            this file, CHANGELOG, SECURITY, CREDITS, README media
+requirements/    base.txt (runtime), dev.txt (+ pytest, ruff), lock.txt (exact pins)
+.env, output/    yours, not tracked: settings and the study library (repo root)
+```
+
+`.env` and `output/` stay at the repo root even though the code lives in `leetcoach/`.
+Every default path is built from `config.REPO_ROOT`, so a checkout that already has a
+library keeps it.
 
 ## How the pieces fit
 
 ```mermaid
 flowchart TD
-    Browser["Browser<br/>index.html + app.js"]
-    App["app.py<br/>Flask factory + SSE /run"]
+    Browser["Browser<br/>index.html + app.js + lib/core.js"]
+    Launcher["launcher.py<br/>python app.py: port, single instance"]
+    App["app.py<br/>Flask factory + every route"]
+    Guard["request_guard.py<br/>loopback, Host, same-origin"]
+    Stream["streaming.py<br/>SSE frames, heartbeat, cancel"]
+    Library["library.py<br/>listing + read/delete gate"]
     Cli["claude_cli.py<br/>claude -p wrapper"]
-    Classifier["classifier.py<br/>problem type + topics"]
+    Classifier["classifier.py<br/>pattern + topics"]
+    Patterns["patterns.py<br/>fixed pattern list"]
     Prompts["prompts.py<br/>mode x tier x language templates"]
-    Parsing["parsing.py<br/>extract code from markdown"]
+    CodeBlocks["code_blocks.py<br/>extract the solution block"]
     Sandbox["sandbox.py<br/>sample-I/O verify"]
-    Proc["proc_util.py<br/>job caps + tree kill (Windows)"]
-    Storage["storage.py<br/>safe-slug writes"]
+    Boot["sandbox_bootstrap.py<br/>child first stage + audit hook"]
+    Practice["practice.py<br/>Test my code"]
+    Proc["process_tree.py<br/>job caps + tree kill"]
+    Storage["storage.py<br/>safe-slug writes, follow-up append"]
+    Store["problem_store.py<br/>records + run log + reviews"]
+    Stats["stats.py<br/>/stats from the log"]
+    Cards["flashcards.py<br/>cards + Anki TSV"]
+    Fs["atomic_files.py<br/>atomic writes"]
     Topic["topic_index.py<br/>skip learned topics"]
     Config["config.py<br/>env-overridable settings"]
     Claude(["claude CLI<br/>subscription, no API key"])
-    Output[("output/<br/>study library")]
+    Output[("output/<br/>study library + .leetcoach/")]
 
-    Browser -->|"POST /run (SSE)"| App
+    Launcher --> App
+    Browser -->|"fetch / SSE"| App
+    App --> Guard
+    App --> Stream
+    App --> Library
+    Library --> Store
     App --> Classifier
+    Classifier --> Patterns
     App --> Prompts
-    App --> Parsing
+    App --> CodeBlocks
     App --> Sandbox
+    App --> Practice
+    Practice --> Sandbox
+    Sandbox --> Boot
+    Sandbox --> Proc
     App --> Storage
+    App --> Store
+    App --> Stats
+    App --> Cards
     App --> Topic
     Classifier --> Cli
     App --> Cli
     Cli --> Claude
-    Sandbox --> Proc
     Cli --> Proc
-    Storage --> Output
+    Storage --> Fs
+    Store --> Fs
+    Topic --> Fs
+    Fs --> Output
     App -.->|reads| Config
     Cli -.->|reads| Config
 ```
@@ -53,85 +106,218 @@ flowchart TD
 ## What happens on a run
 
 ```mermaid
+%%{init: {"sequence": {"wrap": true, "width": 170, "actorMargin": 60, "diagramMarginX": 270}}}%%
 sequenceDiagram
     participant U as Browser
     participant F as Flask /run
     participant CL as classifier
     participant CC as claude CLI
     participant SB as sandbox
-    participant ST as storage
+    participant ST as storage + problem_store
 
-    U->>F: POST /run {problem, mode, language, tier}
-    F->>F: validate against allowlists (400 on bad input)
+    U->>F: POST /run {problem, mode, language, tier, model, run_id}
+    F->>F: validate against allowlists (400), same-origin check (403), run cap (429)
     par classification (background thread, cheap model)
         F->>CL: classify(problem)
-        CL->>CC: claude -p (one short call)
-        CC-->>CL: problem_type + topics
+        CL->>CC: claude -p (one short call, no session kept)
+        CC-->>CL: pattern + topics
     and answer stream
-        F->>CC: claude -p (stream the answer)
-        CC-->>F: text deltas (stream-json)
-        F-->>U: SSE data: delta (rendered live)
+        F->>CC: claude -p (stream the answer, session kept)
+        CC-->>F: system/init (model, session_id) + text deltas
+        F-->>U: event: meta {model} then data: delta (rendered live)
     end
-    Note over F,SB: Answer and Guided modes only
+    Note over F,SB: Answer and Guided Learning, Python only
+    F-->>U: event: phase verifying i/n
     F->>SB: verify_answer(code, sample I/O)
-    SB-->>F: pass / fail / not_verified
-    F->>ST: save to output/...
-    F-->>U: SSE event: done {paths, verification}
+    SB-->>F: pass / fail / error / not_verified
+    F-->>U: event: phase saving
+    F->>ST: save doc (+ code) and record problem, append runs.jsonl
+    F-->>U: event: done {paths, verification, model}
 ```
 
-## Quick Ask
-
-Alongside the main study flow there is a lightweight side channel. `POST /ask`
-takes a small syntax, standard-library, or concept question and answers it in a
-few sentences using the same injected Claude runner as `/run`, but pointed at the
-cheap quick-ask model (Haiku by default, see `config.quick_ask_model()`). It is a
-lookup, not a lesson: the reply is plain JSON rather than an SSE stream, and
-nothing is written to the library. `prompts.build_quick_ask` carries a guardrail
-so the cheap model refuses questions that are really asking how to solve the
-current problem, with a deliberate carve-out that keeps genuinely abstract
-questions ("what does `defaultdict` do?") answerable. The pasted problem, when
-present, is fenced as context only to power that guardrail.
+A `: ping` comment is sent every ~15 s while the CLI is thinking, so a closed tab is
+noticed. `POST /run/cancel {run_id}` stops a run, and nothing is saved.
 
 ## The modules
 
+All of these live in `leetcoach/`, grouped by area.
+
+**Web layer**
+
 | Module | Responsibility |
 | --- | --- |
-| `app.py` | Flask app factory, the streaming `/run` endpoint, and the read-only library browser (`GET /library` lists the output tree, `GET /library/file` serves one file as plain text), and the plain-JSON Quick Ask endpoint (`POST /ask`, see above). Validates input (including a loopback Host-header check), orchestrates classify → prompt → stream → verify → save, and emits SSE events. The Claude runner is injectable so tests never spawn a real process. |
-| `claude_cli.py` | The keystone. Wraps `claude -p --output-format stream-json`. The prompt is piped on **stdin** (never argv), and the stream-json output is parsed into incremental text deltas. |
-| `classifier.py` | One short Claude call to label the problem (a `problem_type` slug plus a topic list). Never raises; falls back to `uncategorized`. |
-| `prompts.py` | Prompt templates per mode x tier x language, with the always-on Big-O instruction. |
-| `parsing.py` | Pulls the runnable code block out of Claude's markdown answer. Flask-free so the sandbox can import it. |
-| `sandbox.py` | Best-effort sample-I/O verification: runs the generated Python against the problem's examples in a throwaway, secret-free directory with a timeout, capped output capture, and resource limits (a Windows Job Object caps memory and process count; POSIX rlimits elsewhere). |
-| `proc_util.py` | Windows process containment shared by `sandbox.py` and `claude_cli.py`: Job Object creation (memory / process-count / kill-on-close caps) and whole-tree kill. No-ops cleanly on POSIX. |
-| `storage.py` | Writes outputs under `output/`. The `slug()` function is the single containment chokepoint that keeps every write inside the output tree. |
-| `topic_index.py` | Records what Learning has covered and feeds it back so later runs skip and cross-link known topics. |
-| `config.py` | All machine-specific settings, read from the environment at call time (model ids, `claude` binary, output dir, topic-index path, run timeout). |
+| `app.py` | The Flask app factory and every route (see Routes below). It loads `.env` at import, validates input (allowlists, JSON-object bodies, length and concurrency caps), runs classify → prompt → stream → verify → save for `/run`, and sets the CSP, anti-framing, `nosniff` and `Referrer-Policy` headers. The Claude runner is injectable, so tests never spawn a real process. |
+| `request_guard.py` | The checks every request passes first: a loopback peer, a loopback `Host` (DNS-rebinding defense), and the same-origin rule for state-changing requests and for loading `/`. |
+| `streaming.py` | SSE plumbing for `/run` and `/followup`: frame formatters, the `: ping` heartbeat that notices a closed tab, and `RunState`, which lets either a cancel or the save win, never both. |
+| `library.py` | The `/library` listing (verdict, difficulty and title from the run log, or parsed from a legacy doc) and `resolve_file`, the containment gate every library read and delete goes through. |
+| `launcher.py` | `main()`, what `python app.py` runs: reuse a LeetCoach already serving nearby, otherwise pick a free port near 5000, do startup housekeeping, report the `claude` sign-in state, open the browser and serve. |
+| `static/app.js` | The single-page UI: Console, Library viewer, Stats, review queue, flashcards and search. Model-derived DOM is built with `el()` and `textContent`; markdown goes through a hardened `marked` renderer. |
+| `static/lib/core.js` | DOM-free helpers shared by `app.js` and the node tests: the SSE parser, run and cancel outcomes, hint and verdict helpers, the notes save queue. |
 
-## Design decisions worth knowing
+**Claude**
 
-- **No API key.** The app uses your Claude Code subscription via the CLI. There is no
-  secret to configure or leak.
-- **Injectable Claude runner.** `claude_cli.run` and `create_app` both take an injectable
+| Module | Responsibility |
+| --- | --- |
+| `claude_cli.py` | The keystone. It runs `claude -p --output-format stream-json` with the prompt on stdin, parses the stream into text deltas plus the model and `session_id`, gates optional flags on a cached `claude --help` probe, and kills the whole process tree on timeout. It also holds the cached sign-in probe. |
+| `classifier.py` | One short Claude call that labels the problem with a pattern and topics. It never raises; anything unreadable becomes `uncategorized`. |
+| `patterns.py` | The fixed list of about 18 patterns, and the mapping of free-form labels onto it. |
+| `prompts.py` | The personas and prompt builders for every mode, tier and language, the shared study-doc contract, and the random-nonce fences around pasted text. |
+| `code_blocks.py` | Pulls the runnable solution block out of Claude's markdown. |
+
+**Running code**
+
+| Module | Responsibility |
+| --- | --- |
+| `sandbox.py` | Best-effort sample-I/O verification: parse the samples, run the code in a throwaway, secret-free directory under time and resource caps, compare the output structurally. It fails closed. |
+| `sandbox_bootstrap.py` | The stdlib-only first stage of the sandbox child (run with `python -I`): it sets the POSIX limits, installs the audit hook, and waits for the go signal the parent sends once its caps are in place (the Windows Job Object). |
+| `practice.py` | "Test my code": the sample and custom cases, each run in a fresh sandbox. |
+| `process_tree.py` | Process containment shared by `sandbox.py` and `claude_cli.py`: Windows Job Objects and whole-tree kill. |
+
+**Files on disk**
+
+| Module | Responsibility |
+| --- | --- |
+| `storage.py` | Writes study docs under `output/`. `slug()` is the one containment chokepoint for path segments; re-runs go to `__2`, `__3`, ... slots. It also appends follow-up sections. |
+| `problem_store.py` | Problem records and the append-only run log under `.leetcoach/`, plus review scheduling, grading, notes and the doc-to-session lookup follow-ups use. |
+| `stats.py` | `/stats` (streaks, heatmap, totals) from the run log, with a per-file fallback for older libraries. |
+| `flashcards.py` | Parses `## Flashcards` sections and writes the Anki TSV. |
+| `topic_index.py` | What Learning and Guided Learning have already covered, per language, so later runs can skip it. |
+| `atomic_files.py` | The shared atomic write (temp file + `os.replace`, retried on a Windows lock) used for every file the app owns. |
+| `config.py` | Every setting, read from the environment at call time, plus `REPO_ROOT` (where `.env` and `output/` live), `PACKAGE_DIR` and the `.env` upsert. |
+
+Outside the package, `scripts/dev/` is the developer harness: `fake_claude.py` (with a
+`.cmd` shim) is a stand-in CLI that emits canned stream-json, and `run_fake.py` starts the
+app on port 5057 against it with a freshly seeded scratch library.
+
+## What lives in `output/`
+
+```
+output/
+  learning/<pattern>_learning/<problem>.md
+  guided/<pattern>/<problem>.md
+  answers/<pattern>/<problem>__<tier>.<ext>    (+ the sibling .md with reasoning + verdict)
+  reviews/<pattern>/<problem>__review.md       (Code Review mode)
+  _unsorted/<hash>.md                          (fallback when a normal save fails)
+  topic_index.json
+  .leetcoach/                                  (hidden from list / read / delete)
+    problems/<problem_id>.json                 (record: statement, notes, review box/due/history, runs)
+    runs.jsonl                                 (one line per saved run or follow-up)
+    .lock                                      (cross-process lock for the store)
+```
+
+The library is not read-only. The app writes new runs, appends follow-ups to existing
+docs, and deletes files or whole runs on request. Every write is atomic
+(`atomic_files.py`). Libraries saved before the run log existed still work: their files are
+listed, counted in Stats by their own mtime, and accept follow-ups through the fallback
+path.
+
+## Design decisions
+
+- **No API key:** the app uses your Claude Code subscription through the CLI, so there
+  is no secret to configure or leak.
+- **Isolated Claude calls:** every call gets `--safe-mode`, `--tools ""`,
+  `--strict-mcp-config` and a `--system-prompt` persona, and runs in a neutral cwd. Each
+  flag is passed only if `claude --help` lists it, and `--bare` is never passed. Study
+  runs keep their session for follow-ups. Utility calls use `--no-session-persistence`.
+- **Injectable Claude runner:** `claude_cli.run` and `create_app` both take an injectable
   runner, so the whole suite mocks the subprocess and runs offline. No test spawns a real
   `claude`.
-- **Prompt on stdin.** A pasted problem can be large; sending it on stdin avoids argument
-  length limits and any shell-escaping surface.
-- **One containment chokepoint.** Every user/model-supplied path segment goes through
-  `storage.slug()` before it touches the filesystem.
-- **The sandbox is a convenience, not a security boundary.** See [SECURITY.md](../SECURITY.md).
+- **Prompt on stdin:** a pasted problem can be large. Sending it on stdin avoids
+  argument-length limits and any shell-escaping surface.
+- **One containment chokepoint:** every user- or model-supplied path segment goes through
+  `storage.slug()`. Every library path a request names goes through
+  `library.resolve_file`, which also hides dot-prefixed paths.
+- **The sandbox is a convenience, not a security boundary.** See
+  [SECURITY.md](SECURITY.md).
+
+## Routes
+
+These are all the routes in `app.url_map`. Every request must come from a loopback
+address and pass the loopback `Host` check. Unsafe methods (POST/PUT/DELETE) also pass
+the same-origin check. `/run` and `/ask` each allow 4 calls in flight (429 past that).
+
+| Method | Route | What it does |
+| --- | --- | --- |
+| GET | `/` | The single page. It shows the CLI sign-in banner from a cached `claude auth status` probe. |
+| GET | `/healthz` | `{"app": "leetcoach", "version"}`. A second launch uses it to find a running instance. |
+| GET | `/favicon.ico` | The app icon (`/static/favicon.svg`), for pages without the `<link rel="icon">` (JSON and plain-text routes). |
+| POST | `/run` | Study run (Answer / Learning / Guided Learning / Code Review) as an SSE stream. |
+| POST | `/run/cancel` | Cancel a run by `run_id`. |
+| POST | `/followup` | Follow-up question on a saved doc, as an SSE stream (see below). |
+| POST | `/followup/cancel` | Cancel a follow-up by `followup_id`. |
+| POST | `/ask` | Quick Ask (plain JSON). |
+| POST | `/ask/cancel` | Cancel a Quick Ask. |
+| POST | `/config/model` | Model picker: validates the alias and upserts `LEETCOACH_MODEL` into `.env`. |
+| GET | `/library` | Lists the library tree: path, size and mtime, plus verdict, problem id, title, number and difficulty when known. Dot-prefixed paths and `topic_index.json` are hidden. |
+| GET | `/library/file` | Serves one library file as plain text. |
+| DELETE | `/library/file` | Deletes one file, or a whole run (`scope=run`: the `.md` plus its code siblings). |
+| GET | `/problems` | Problem record summaries. |
+| GET | `/problems/<pid>` | One problem record, with its statement and notes. |
+| PUT | `/problems/<pid>/notes` | Saves the notes for a problem. |
+| POST | `/problems/<pid>/grade` | Self-grade a re-attempt and reschedule its review (Leitner). |
+| GET | `/review` | The review queue: problems due today and overdue. |
+| POST | `/attempt/test` | "Test my code": runs the learner's Python in the sandbox against the samples and custom cases. |
+| POST | `/attempt/cancel` | Cancel a running test. |
+| GET | `/stats` | Stats computed from the run log, plus legacy files. |
+| GET | `/flashcards` | Flashcards parsed from the docs' `## Flashcards` sections. |
+| GET | `/flashcards.tsv` | Anki export (tab-separated; formula-like cells neutralised). |
+| GET | `/static/<path>` | Flask static files: the vendored libraries, `app.js`, `lib/core.js` and `style.css`. |
+
+## Follow-up questions (D6)
+
+`POST /followup {path, question}` streams an answer to a question about a saved `.md` doc
+and appends it to that doc under `## Follow-up — <question>`.
+
+1. The server looks up the doc's `session_id` in `runs.jsonl`, taking the most recent
+   study run whose files include the path.
+2. If there is a session and `claude --help` lists `--resume`, it runs
+   `claude -p --resume <id>`. The run uses the same isolation flags and neutral cwd as a
+   study run, with session persistence on.
+3. Otherwise it falls back to a fresh isolated call with the doc as fenced context,
+   capped at 24k chars. The fallback also runs when the resume fails before any text.
+   The `phase`/`done` events say which source answered (`resume` or `fallback`).
+4. The answer is sanitised so it cannot add H1/H2 headings or forge the verdict. It is
+   then appended atomically under the storage lock and logged as a `followup` entry.
+   Stats does not count these entries.
+
+One follow-up runs at a time, on a slot separate from `/run`. `POST /followup/cancel`
+stops it.
+
+## Quick Ask
+
+`POST /ask` is a lightweight side channel next to the main study flow. It takes a small
+syntax, standard-library or concept question and answers it in a few sentences. It uses
+the same injected Claude runner as `/run`, pointed at the cheap Quick Ask model (Haiku by
+default; see `config.quick_ask_model()`). The page's Quick Ask tag shows that configured
+model.
+
+The reply is plain JSON rather than an SSE stream, and nothing is written to the
+library. `prompts.build_quick_ask` carries a guardrail so the cheap model refuses
+questions that amount to asking how to solve the current problem. A deliberate carve-out
+keeps purely abstract questions ("what does `defaultdict` do?") answerable. When a
+problem is pasted, it is fenced as context and used only for that guardrail.
 
 ## Environment and commands
 
-- Windows 11 with PowerShell is the developed/tested platform; the code is plain
-  cross-platform Python with no OS-specific dependencies.
-- Python 3.12+ (via the `py` launcher on Windows). A project `.venv` is recommended.
+- Windows 11 with PowerShell is the developed and hand-tested platform. CI also runs the
+  suite on Ubuntu and macOS. The only OS-specific code is the process containment in
+  `process_tree.py` and `sandbox.py`: Job Objects through `ctypes` on Windows, rlimits
+  and process groups on POSIX. There are no OS-specific third-party dependencies.
+- Python 3.12+ (CI runs 3.12, 3.13 and 3.14) in the project `.venv` that `LeetCoach.cmd`
+  (through `scripts/setup.ps1`) creates. Nothing needs the venv activated.
 - The `claude` CLI must be installed, on your PATH, and authenticated.
 
-```sh
-py -m pytest -q          # run the tests (all mock the claude subprocess)
-python app.py            # run the app, then open the printed localhost URL
-py -m ruff check .       # lint
+On Windows, from the repo root (on Linux and macOS use `.venv/bin/python`):
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements\dev.txt -c requirements\lock.txt
+.venv\Scripts\python.exe -m pytest -q             # tests (all mock the claude subprocess)
+node tests\js\run.js                              # front-end helper tests (pytest runs them too when node exists)
+.venv\Scripts\python.exe -m ruff check .          # lint
+.\LeetCoach.cmd                                   # run the app (or .venv\Scripts\python.exe app.py)
+.venv\Scripts\python.exe scripts\dev\run_fake.py  # the app on :5057 against the fake CLI and a scratch library
 ```
 
 `scripts/smoke_claude.py` is a small developer utility that makes one real `claude -p`
-call to confirm streaming works on your machine. It is never part of the test suite.
+call to confirm that streaming works on your machine. It is never part of the test
+suite.

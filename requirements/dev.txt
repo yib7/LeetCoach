@@ -1,0 +1,8 @@
+# Development + test dependencies. Installs the runtime deps too (-r line below).
+#   pip install -r requirements/dev.txt
+-r base.txt
+pytest>=8,<10
+# Ruff is capped to one minor series: a new minor can change the DEFAULT rule
+# set (0.16 did), so moving to the next one is a deliberate triage, not a
+# side effect of a fresh install. CI installs the same series as lock.txt.
+ruff>=0.16,<0.17

@@ -24,7 +24,7 @@ import json
 
 from _helpers import parse_sse as _parse_sse
 
-import app as app_module
+from leetcoach import app as app_module
 
 # --- a fake Claude that answers both the classify and the mode prompt ----
 

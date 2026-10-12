@@ -12,14 +12,20 @@ shaped (query string), so traversal (``..``, absolute paths, backslashes),
 disallowed extensions, and anything else that is not a real file inside the
 output root must be rejected uniformly — and the response must NEVER carry the
 target file's content.
+
+Also covered: the listing cache (it sees a nested external add/delete and
+expires), app metadata hidden under any topic-index name, and
+``DELETE /library/file?scope=run`` removing a run's doc and code siblings only.
+The verdict field has its own file, ``test_library_verdict``.
 """
 from __future__ import annotations
 
 import pytest
 
-import app as app_module
+from leetcoach import app as app_module
+from leetcoach import claude_cli, library
 
-# A string that exists verbatim in app.py — used to prove a traversal response
+# A string that exists verbatim in leetcoach/app.py — used to prove a traversal response
 # never leaks the file's content, whatever the status code.
 APP_PY_MARKER = "Flask web layer for LeetCoach"
 
@@ -50,11 +56,13 @@ def _seed(tmp_path):
         "# Arrays\n", encoding="utf-8"
     )
     (tmp_path / "topic_index.json").write_text("{}", encoding="utf-8")
+    # B19: app metadata is never part of the library listing.
+    (tmp_path / ".leetcoach" / "problems").mkdir(parents=True)
+    (tmp_path / ".leetcoach" / "problems" / "1-two-sum.json").write_text("{}", encoding="utf-8")
     return {
         "answers/two_pointers/two_sum__normal.py",
         "answers/two_pointers/two_sum__normal.md",
         "learning/arrays_learning/intro.md",
-        "topic_index.json",
     }
 
 
@@ -123,13 +131,16 @@ def test_library_file_markdown_served_as_plain_text(client):
     assert resp.get_data(as_text=True) == "# Arrays\n"
 
 
-def test_library_file_topic_index_is_readable(client):
-    # topic_index.json lives inside output and is harmless; .json is allowlisted.
+def test_library_file_hides_app_metadata(client):
+    # B19: topic_index.json and anything under a dot-dir (.leetcoach/) are app
+    # metadata - not listed, not served, not deletable (uniform 404).
     c, tmp_path = client
     _seed(tmp_path)
-    resp = c.get("/library/file?path=topic_index.json")
-    assert resp.status_code == 200
-    assert resp.get_data(as_text=True) == "{}"
+    for rel in ("topic_index.json", ".leetcoach/problems/1-two-sum.json"):
+        assert c.get("/library/file?path=" + rel).status_code == 404
+        assert c.delete("/library/file?path=" + rel).status_code == 404
+    assert (tmp_path / "topic_index.json").exists()
+    assert (tmp_path / ".leetcoach" / "problems" / "1-two-sum.json").exists()
 
 
 def test_library_file_missing_is_404(client):
@@ -168,11 +179,11 @@ def test_library_file_rejects_traversal(client, path):
 
 
 def test_library_file_rejects_absolute_path(client):
-    import app as real_app
+    from leetcoach import app as real_app
 
     c, tmp_path = client
     _seed(tmp_path)
-    abs_target = str(real_app.HERE / "app.py")  # C:\...\app.py — a real file
+    abs_target = real_app.__file__  # C:\...\leetcoach\app.py — a real file
     resp = c.get("/library/file", query_string={"path": abs_target})
     assert resp.status_code in (403, 404)
     assert APP_PY_MARKER not in resp.get_data(as_text=True)
@@ -210,3 +221,130 @@ def test_library_file_rejects_foreign_host(client):
     )
     assert resp.status_code == 403
     assert "{}" not in resp.get_data(as_text=True)
+
+
+# --- the listing cache, hidden metadata and whole-run delete -----------------
+#
+# These drive a full app (with an auth probe) over an ``env`` output root.
+
+
+def _authed():
+    return claude_cli.AuthStatus(installed=True, logged_in=True)
+
+
+class Recorder:
+    """A run_fn these tests never reach: nothing here posts a run."""
+
+    def __call__(self, prompt, **kwargs):  # pragma: no cover - must never be called
+        raise AssertionError("no Claude call expected")
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(out))
+    monkeypatch.setenv("LEETCOACH_TOPIC_INDEX", str(out / "topic_index.json"))
+    monkeypatch.delenv("LEETCOACH_MODEL", raising=False)
+    return out
+
+
+def _client(run_fn):
+    application = app_module.create_app(run_fn=run_fn, auth_probe=_authed)
+    application.config.update(TESTING=True)
+    return application.test_client()
+
+
+# --- B10: library cache sees nested external changes --------------------------
+
+def _bump_mtime(path):
+    import os
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+
+
+def test_library_cache_sees_a_nested_external_add_and_delete(env):
+    c = _client(Recorder())
+    nested = env / "answers" / "hash_map"
+    nested.mkdir(parents=True)
+    (nested / "a__normal.md").write_text("a", encoding="utf-8")
+    assert [f["path"] for f in c.get("/library").get_json()["files"]] == [
+        "answers/hash_map/a__normal.md"]
+
+    added = nested / "b__normal.md"
+    added.write_text("b", encoding="utf-8")
+    _bump_mtime(nested)  # coarse-clock safety; the ROOT mtime is unchanged
+    paths = [f["path"] for f in c.get("/library").get_json()["files"]]
+    assert "answers/hash_map/b__normal.md" in paths
+
+    added.unlink()
+    _bump_mtime(nested)
+    paths = [f["path"] for f in c.get("/library").get_json()["files"]]
+    assert "answers/hash_map/b__normal.md" not in paths
+
+
+def test_library_cache_expires_after_ttl(env, monkeypatch):
+    calls = []
+    real = library.list_files
+    monkeypatch.setattr(library, "list_files", lambda root: calls.append(1) or real(root))
+    c = _client(Recorder())
+    c.get("/library")
+    c.get("/library")
+    assert len(calls) == 1
+    monkeypatch.setattr(app_module, "LIBRARY_CACHE_TTL", 0.0)
+    c.get("/library")
+    assert len(calls) == 2
+
+
+# --- B19: hidden metadata + whole-run delete ----------------------------------
+
+def test_library_hides_metadata_even_for_a_custom_topic_index_name(env, monkeypatch):
+    env.mkdir(parents=True, exist_ok=True)
+    custom = env / "my_topics.json"
+    custom.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("LEETCOACH_TOPIC_INDEX", str(custom))
+    (env / ".hidden.md").write_text("x", encoding="utf-8")
+    (env / "notes.md").write_text("x", encoding="utf-8")
+    c = _client(Recorder())
+    assert [f["path"] for f in c.get("/library").get_json()["files"]] == ["notes.md"]
+    assert c.get("/library/file?path=my_topics.json").status_code == 404
+    assert c.get("/library/file?path=.hidden.md").status_code == 404
+
+
+def _seed_run(root):
+    folder = root / "answers" / "hash_map"
+    folder.mkdir(parents=True)
+    names = ["two_sum__normal.md", "two_sum__normal.py", "two_sum__normal__2.md",
+             "two_sum__normal__2.py", "two_sum__basic.py", "two_sum__basic.md"]
+    for n in names:
+        (folder / n).write_text(n, encoding="utf-8")
+    return folder
+
+
+def test_delete_whole_run_removes_md_and_code_siblings_only(env):
+    folder = _seed_run(env)
+    c = _client(Recorder())
+    c.get("/library")  # warm the cache
+    resp = c.delete("/library/file?path=answers/hash_map/two_sum__normal.md&scope=run")
+    assert resp.status_code == 200
+    assert sorted(resp.get_json()["paths"]) == [
+        "answers/hash_map/two_sum__normal.md", "answers/hash_map/two_sum__normal.py"]
+    left = sorted(p.name for p in folder.iterdir())
+    assert left == ["two_sum__basic.md", "two_sum__basic.py",
+                    "two_sum__normal__2.md", "two_sum__normal__2.py"]
+    listed = [f["path"] for f in c.get("/library").get_json()["files"]]
+    assert "answers/hash_map/two_sum__normal.py" not in listed
+
+
+def test_delete_single_file_is_still_the_default(env):
+    folder = _seed_run(env)
+    resp = _client(Recorder()).delete("/library/file?path=answers/hash_map/two_sum__normal.md")
+    assert resp.status_code == 200
+    assert resp.get_json()["paths"] == ["answers/hash_map/two_sum__normal.md"]
+    assert (folder / "two_sum__normal.py").exists()
+
+
+def test_delete_with_unknown_scope_is_rejected(env):
+    _seed_run(env)
+    resp = _client(Recorder()).delete(
+        "/library/file?path=answers/hash_map/two_sum__normal.md&scope=everything")
+    assert resp.status_code == 400

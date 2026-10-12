@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
-import topic_index
+from leetcoach import topic_index
 
 
 @pytest.fixture
@@ -22,22 +23,24 @@ def idx_path(tmp_path, monkeypatch):
     return p
 
 
-# --- load / save roundtrip -----------------------------------------------
+# --- record / load roundtrip ---------------------------------------------
+# (3A S13: the test-only ``save()`` is gone - the production write path is
+# ``record()``; these keep its roundtrip / default-path behaviour covered.)
 
-def test_save_then_load_roundtrip(idx_path):
-    data = {"by_type": {"hashing": ["hash_map"]}, "all": ["hash_map"]}
-    topic_index.save(data)
+def test_record_then_load_roundtrip(idx_path):
+    topic_index.record("hashing", ["hash_map"])
     loaded = topic_index.load()
     assert loaded["by_type"] == {"hashing": ["hash_map"]}
     assert loaded["all"] == ["hash_map"]
+    assert loaded["by_language"] == {}
 
 
-def test_save_uses_config_default_path(tmp_path, monkeypatch):
+def test_record_uses_config_default_path(tmp_path, monkeypatch):
     # No explicit path + no override env -> falls back to <output_dir>/topic_index.json
     monkeypatch.delenv("LEETCOACH_TOPIC_INDEX", raising=False)
-    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
-    topic_index.save({"by_type": {}, "all": ["sliding_window"]})
-    expected = tmp_path / "topic_index.json"
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path / "fresh"))
+    topic_index.record("sliding", ["sliding_window"])
+    expected = tmp_path / "fresh" / "topic_index.json"
     assert expected.exists()
     assert "sliding_window" in expected.read_text(encoding="utf-8")
 
@@ -74,29 +77,67 @@ def test_record_persists_to_disk(idx_path):
 
 # --- robustness: missing / corrupt file ----------------------------------
 
+# B22: the index also carries a per-language section.
+EMPTY = {"by_type": {}, "all": [], "by_language": {}}
+
+
 def test_missing_file_loads_empty(idx_path):
     assert not idx_path.exists()
     data = topic_index.load()
-    assert data == {"by_type": {}, "all": []}
+    assert data == EMPTY
     assert topic_index.known_topics() == []
 
 
 def test_corrupt_file_loads_empty_without_crashing(idx_path):
     idx_path.write_text("{not valid json at all ::::", encoding="utf-8")
     data = topic_index.load()  # must not raise
-    assert data == {"by_type": {}, "all": []}
+    assert data == EMPTY
 
 
 def test_wrong_shape_file_loads_empty(idx_path):
     # A JSON array (not an object) is the wrong shape -> empty, no crash.
     idx_path.write_text("[1, 2, 3]", encoding="utf-8")
-    assert topic_index.load() == {"by_type": {}, "all": []}
+    assert topic_index.load() == EMPTY
 
 
 def test_record_on_corrupt_file_recovers(idx_path):
     idx_path.write_text("garbage", encoding="utf-8")
     topic_index.record("dp", ["memoization"])  # starts from empty, then records
     assert "memoization" in topic_index.known_topics()
+
+
+def test_record_on_transient_read_error_skips_write_without_losing_data(idx_path, monkeypatch):
+    """SP2 M6 review: a corrupt/unreadable file is backed up once and then
+    replaced - correct for genuinely bad content. But an OSError reading the
+    file (e.g. a transient lock held by another process) is NOT corruption;
+    treating it the same way overwrote the whole index with an empty one
+    (losing everything already recorded) just because of a momentary lock.
+
+    record() must instead skip the write entirely on a read OSError and
+    leave the on-disk file completely untouched.
+    """
+    existing = {"by_type": {"dp": ["memoization"]}, "all": ["memoization"],
+                "by_language": {}}
+    topic_index._write_json(idx_path, existing)
+    original_bytes = idx_path.read_bytes()
+
+    real_read_text = Path.read_text
+
+    def flaky_read_text(self, *args, **kwargs):
+        if self == idx_path:
+            raise PermissionError("simulated transient lock")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+
+    topic_index.record("graphs", ["bfs"])  # must not raise
+
+    monkeypatch.undo()  # restore real Path.read_text before reading back
+    assert idx_path.read_bytes() == original_bytes  # untouched, not overwritten
+    backup = idx_path.with_name(idx_path.name + topic_index.BACKUP_SUFFIX)
+    assert not backup.exists()  # no backup either - nothing was replaced
+    # the topic genuinely was not recorded (we could not safely merge)
+    assert "bfs" not in json.loads(idx_path.read_text(encoding="utf-8"))["all"]
 
 
 # --- concurrency: record() under many threads loses no topics ------------
@@ -150,19 +191,20 @@ LEARNING_MARKDOWN = "# Learning\n\nA hash map remembers seen values.\n"
 def test_learning_route_passes_known_topics_to_prompt(tmp_path, monkeypatch):
     """The Learning route must (a) feed already-learned topics into
     build_learning and (b) record the run's topics afterward."""
-    import app as app_module
+    from leetcoach import app as app_module
 
     # Index points at a tmp file pre-seeded with a known topic.
     idx = tmp_path / "topic_index.json"
     monkeypatch.setenv("LEETCOACH_TOPIC_INDEX", str(idx))
     monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path / "out"))
-    topic_index.save({"by_type": {"x": ["sliding_window"]}, "all": ["sliding_window"]})
+    idx.write_text(json.dumps({"by_type": {"x": ["sliding_window"]}, "all": ["sliding_window"]}),
+                   encoding="utf-8")
 
     # Spy on build_learning to capture the already_learned_topics it receives.
     captured = {}
     real_build = app_module.prompts.build_learning
 
-    def spy_build_learning(problem, *, language, already_learned_topics=None):
+    def spy_build_learning(problem, *, language, already_learned_topics=None, meta=None):
         captured["topics"] = already_learned_topics
         return real_build(
             problem, language=language, already_learned_topics=already_learned_topics
@@ -194,8 +236,110 @@ def test_learning_route_passes_known_topics_to_prompt(tmp_path, monkeypatch):
     assert captured.get("topics") is not None
     assert "sliding_window" in captured["topics"]
 
-    # (b) the classifier's topic was recorded back into the index
-    known = topic_index.known_topics()
+    # (b) the classifier's topic was recorded back into the index (B22: under
+    # the run's language; the seeded legacy entry is language-agnostic)
+    known = topic_index.known_topics(language="python")
     assert "binary_search" in known
     # the pre-existing topic is still there too
     assert "sliding_window" in known
+
+
+# --- B7: atomic writes through atomic_files, corrupt file preserved ----------------
+
+def test_record_retries_a_locked_index_instead_of_losing_the_update(idx_path, monkeypatch):
+    import os as _os
+
+    from leetcoach import atomic_files
+
+    topic_index.record("dp", ["memoization"])
+    real_replace = _os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError(13, "held by another process")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(atomic_files, "_replace", flaky)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
+    topic_index.record("graphs", ["bfs"])
+    assert "bfs" in json.loads(idx_path.read_text(encoding="utf-8"))["all"]
+    assert [p.name for p in idx_path.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_record_leaves_no_tmp_when_the_write_finally_fails(idx_path, monkeypatch):
+    from leetcoach import atomic_files
+
+    def locked(src, dst):
+        raise PermissionError(13, "locked")
+
+    monkeypatch.setattr(atomic_files, "_replace", locked)
+    monkeypatch.setattr(atomic_files, "_sleep", lambda s: None)
+    topic_index.record("graphs", ["bfs"])  # best-effort: must not raise
+    assert [p.name for p in idx_path.parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_corrupt_index_is_preserved_as_corrupt_copy_not_overwritten(idx_path):
+    idx_path.write_text("{definitely not json", encoding="utf-8")
+    topic_index.record("dp", ["memoization"])
+    corrupt = [p for p in idx_path.parent.iterdir() if ".corrupt-" in p.name]
+    assert len(corrupt) == 1
+    assert corrupt[0].name.startswith("topic_index.json.corrupt-")
+    assert corrupt[0].read_text(encoding="utf-8") == "{definitely not json"
+    # the index itself is usable again
+    assert "memoization" in topic_index.known_topics()
+    # a healthy rewrite later does not create another corrupt copy
+    topic_index.record("dp", ["tabulation"])
+    assert len([p for p in idx_path.parent.iterdir() if ".corrupt-" in p.name]) == 1
+
+
+def test_record_goes_through_the_atomic_helper(idx_path, monkeypatch):
+    from leetcoach import atomic_files
+
+    seen = []
+    real = atomic_files.atomic_write_text
+
+    def spy(path, text, **kw):
+        seen.append(str(path))
+        return real(path, text, **kw)
+
+    monkeypatch.setattr(atomic_files, "atomic_write_text", spy)
+    topic_index.record("misc", ["x"])
+    assert seen == [str(idx_path)]
+
+
+# --- SP4 review I2 / M9: undecodable index, failed corrupt copy ----------------
+
+def test_utf16_index_loads_empty_without_raising(idx_path):
+    idx_path.write_bytes(json.dumps({"all": ["bfs"]}).encode("utf-16"))
+    data = topic_index.load()
+    assert data["all"] == [] and data["by_type"] == {}
+
+
+def test_record_on_undecodable_index_preserves_it_and_starts_fresh(idx_path):
+    raw = json.dumps({"all": ["bfs"]}).encode("utf-16")
+    idx_path.write_bytes(raw)
+    topic_index.record("dp", ["memoization"])
+    corrupt = [p for p in idx_path.parent.iterdir() if ".corrupt-" in p.name]
+    assert len(corrupt) == 1
+    assert corrupt[0].read_bytes() == raw
+    assert "memoization" in topic_index.known_topics()
+    # and recording keeps working afterwards
+    topic_index.record("graphs", ["bfs_grid"])
+    assert "bfs_grid" in topic_index.known_topics()
+
+
+def test_record_skips_when_the_corrupt_copy_cannot_be_made(idx_path, monkeypatch, caplog):
+    idx_path.write_text("{definitely not json", encoding="utf-8")
+
+    def no_copy(src, dst, *a, **k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(topic_index.shutil, "copy2", no_copy)
+    with caplog.at_level("WARNING", logger="topic_index"):
+        topic_index.record("dp", ["memoization"])
+    # the corrupt original is NOT overwritten when it could not be kept
+    assert idx_path.read_text(encoding="utf-8") == "{definitely not json"
+    assert [p for p in idx_path.parent.iterdir() if ".corrupt-" in p.name] == []
+    assert "skipping" in caplog.text.lower()

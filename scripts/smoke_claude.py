@@ -1,4 +1,4 @@
-"""Manual smoke test for the `claude_cli` keystone — NOT collected by pytest.
+"""Manual smoke test for the `claude_cli` keystone. NOT collected by pytest.
 
 Runs a trivial REAL prompt through the actual `claude` CLI and prints the
 streamed text deltas, proving the wrapper works end-to-end on this machine.
@@ -18,8 +18,7 @@ import sys
 # Make the project root importable when run as `scripts/smoke_claude.py`.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import claude_cli  # noqa: E402
-import config  # noqa: E402
+from leetcoach import claude_cli, config
 
 
 def main() -> int:

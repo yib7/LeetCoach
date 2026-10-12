@@ -17,17 +17,26 @@ SSE protocol under test (SP4 reuses it):
   * ``event: done\ndata: <json-obj>\n\n``  — terminal success; payload carries
         ``problem_type`` and saved ``paths``
   * ``event: error\ndata: <json-string>\n\n`` — terminal failure
+
+Also here: the page and its favicon, request validation, Quick Ask, the model
+picker's ``/config/model``, and ``docs/ARCHITECTURE.md``'s route table kept in
+step with the live URL map.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
+from pathlib import Path
 
 import pytest
 from _helpers import CLASSIFY_JSON
 from _helpers import parse_sse as _parse_sse
 
-import app as app_module
+from leetcoach import app as app_module
+from leetcoach import claude_cli, library
+
+REPO = Path(__file__).resolve().parent.parent
 
 # --- a fake Claude that answers both the classify and the answer prompt ---
 
@@ -70,12 +79,23 @@ def fake_run(prompt, **kwargs):
         yield text[i : i + 20]
 
 
+def _authed_probe():
+    """A signed-in auth probe so the page renders with no CLI banner and never
+    spawns the real `claude auth status` during tests."""
+    return claude_cli.AuthStatus(installed=True, logged_in=True)
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+    # Register the key monkeypatch owns so a /config/model write (which mutates
+    # os.environ directly) is reverted at teardown and can't leak between tests.
+    monkeypatch.delenv("LEETCOACH_MODEL", raising=False)
     QA_CALLS.clear()
-    application = app_module.create_app(run_fn=fake_run)
+    application = app_module.create_app(run_fn=fake_run, auth_probe=_authed_probe)
     application.config.update(TESTING=True)
+    # Persist model-picker writes to a temp .env, never the real project file.
+    application.config["DOTENV_PATH"] = str(tmp_path / ".env")
     return application.test_client(), tmp_path
 
 
@@ -215,6 +235,155 @@ def test_run_rejects_non_string_fields(client, payload):
     assert "error" in resp.get_json()
     # a bad-type request must not spend Claude budget or save anything
     assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+# --- B23: a non-object JSON body -> clean 400 on every JSON route ----------
+
+@pytest.mark.parametrize("payload", [["x"], "just a string", 123, True])
+def test_run_rejects_non_object_json_body(client, payload):
+    """A JSON array/string/number/bool body (not an object) must be a clean
+    400, not a 500 from `.get()` on a list/str (B23)."""
+    c, tmp_path = client
+    resp = c.post("/run", data=json.dumps(payload), content_type="application/json")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+@pytest.mark.parametrize("payload", [["x"], "just a string", 123, True])
+def test_ask_rejects_non_object_json_body(client, payload):
+    c, _ = client
+    resp = c.post("/ask", data=json.dumps(payload), content_type="application/json")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+
+
+@pytest.mark.parametrize("payload", [["sonnet"], "sonnet", 123])
+def test_config_model_rejects_non_object_json_body(client, payload):
+    c, tmp_path = client
+    resp = c.post("/config/model", data=json.dumps(payload), content_type="application/json")
+    assert resp.status_code == 400
+    assert "error" in resp.get_json()
+    assert not (tmp_path / ".env").exists()
+
+
+# --- 3A W2: a deeply nested JSON body -> the same clean 400, not an HTML 500 --
+
+DEEP_JSON = "[" * 200_000  # ~200 KB, well under MAX_CONTENT_LENGTH
+
+
+@pytest.mark.parametrize("method,path", [
+    ("post", "/run"),
+    ("post", "/ask"),
+    ("post", "/config/model"),
+    ("post", "/attempt/test"),
+    ("post", "/followup"),
+    ("put", "/problems/two-sum/notes"),
+    ("post", "/problems/two-sum/grade"),
+    ("post", "/run/cancel"),
+])
+def test_json_routes_reject_a_deeply_nested_body(client, method, path):
+    # json.loads raises RecursionError, which get_json(silent=True) does not
+    # swallow; every JSON route must still answer with its JSON 400.
+    c, tmp_path = client
+    resp = getattr(c, method)(path, data=DEEP_JSON, content_type="application/json")
+    assert resp.status_code == 400
+    assert resp.is_json
+    assert "JSON object" in resp.get_json()["error"]
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+@pytest.mark.parametrize("body", [b"{not json", b"problem=two+sum", bytes([255, 254]) + b" junk"])
+def test_an_unparseable_body_says_so_not_that_a_field_is_missing(client, body):
+    # 3A G3: a body that is not JSON at all used to fall through as {} and
+    # come back "Problem text is required." - true but misleading.
+    c, tmp_path = client
+    resp = c.post("/run", data=body, content_type="application/json")
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "Request body must be a JSON object."
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+def test_an_empty_body_is_still_treated_as_no_fields(client):
+    c, _ = client
+    resp = c.post("/run", data=b"", content_type="application/json")
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "Problem text is required."
+
+
+# --- 3A W8: an oversized body -> a JSON 413 the page can show -----------------
+
+@pytest.mark.parametrize("path", ["/run", "/ask", "/followup", "/attempt/test"])
+def test_oversized_body_is_a_json_413(client, path):
+    c, tmp_path = client
+    body = json.dumps({"problem": "x" * (2 * 1024 * 1024 + 10), "question": "q"})
+    resp = c.post(path, data=body, content_type="application/json")
+    assert resp.status_code == 413
+    assert resp.is_json
+    error = resp.get_json()["error"]
+    assert "too large" in error and "2 MB" in error
+    assert not [p for p in tmp_path.rglob("*") if p.is_file()]
+
+
+def test_quick_ask_problem_cap_is_published_to_the_page(client):
+    # the page trims Quick Ask's problem context to what /ask actually uses
+    c, _ = client
+    html = c.get("/").get_data(as_text=True)
+    assert f'data-problem-cap="{app_module.QUICK_ASK_PROBLEM_CONTEXT_CAP}"' in html
+    assert "__QUICK_ASK_PROBLEM_CONTEXT_CAP__" not in html
+
+
+# --- B24: no extracted code -> no empty code file lands in the library -----
+
+NO_CODE_ANSWER_MARKDOWN = (
+    "I couldn't find a runnable solution to show here — this is reasoning "
+    "only, with no fenced code block at all."
+)
+
+
+def fake_run_no_code(prompt, **kwargs):
+    if "Classify the following" in prompt and "Respond with ONLY a tiny" in prompt:
+        text = json.dumps(CLASSIFY_JSON)
+    else:
+        text = NO_CODE_ANSWER_MARKDOWN
+    for i in range(0, len(text), 20):
+        yield text[i : i + 20]
+
+
+def test_run_answer_with_no_code_block_saves_no_empty_code_file(tmp_path, monkeypatch):
+    """``extract_code`` returns "" when Claude's answer has no fenced block at
+    all; B24 says the run must still save the reasoning .md but must NOT write
+    a 0-byte code file that would look like a real (if empty) answer."""
+    monkeypatch.setenv("LEETCOACH_OUTPUT_DIR", str(tmp_path))
+    application = app_module.create_app(run_fn=fake_run_no_code, auth_probe=_authed_probe)
+    application.config.update(TESTING=True)
+    application.config["DOTENV_PATH"] = str(tmp_path / ".env")
+    c = application.test_client()
+
+    resp = c.post(
+        "/run",
+        json={
+            "problem": "Two Sum: return indices of two numbers adding to target.",
+            "mode": "answer",
+            "language": "python",
+            "tier": "normal",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    _text_chunks, events = _parse_sse(body)
+    done = [p for (name, p) in events if name == "done"]
+    assert done, f"no done event in: {events}"
+    paths = done[0].get("paths") or []
+    assert paths, "reasoning file should still be saved"
+    assert None not in paths
+
+    answers_dir = tmp_path / "answers"
+    files = [p for p in answers_dir.rglob("*") if p.is_file()]
+    code_files = [p for p in files if p.suffix == ".py"]
+    assert not code_files, f"expected no .py code file, got {[p.name for p in files]}"
+    md_files = [p for p in files if p.suffix == ".md"]
+    assert md_files, "expected the reasoning .md to still be saved"
 
 
 # --- mid-stream subprocess failure -> SSE error event --------------------
@@ -484,10 +653,13 @@ def test_ask_problem_lands_inside_context_fence(client):
     )
     assert resp.status_code == 200
     prompt, _ = QA_CALLS[0]
-    open_fence = "--- BEGIN PROBLEM CONTEXT (do not solve) ---"
-    close_fence = "--- END PROBLEM CONTEXT ---"
-    assert open_fence in prompt and close_fence in prompt
-    inside = prompt.split(open_fence, 1)[1].split(close_fence, 1)[0]
+    # B21: the fence lines carry a per-prompt nonce.
+    opened = re.search(
+        r"^--- BEGIN PROBLEM CONTEXT \(do not solve\) ([0-9a-f]+) ---$", prompt, re.MULTILINE
+    )
+    assert opened
+    close_fence = f"\n--- END PROBLEM CONTEXT {opened.group(1)} ---"
+    inside = prompt[opened.end():prompt.index(close_fence, opened.end())]
     assert "Two Sum: find indices." in inside
 
 
@@ -526,7 +698,7 @@ def test_ask_rejects_non_string_fields(client, payload):
 # --- config knob: quick_ask_model (tested next to its consumer) ------------
 
 def test_quick_ask_model_knob_defaults_to_haiku(monkeypatch):
-    import config
+    from leetcoach import config
 
     monkeypatch.delenv("LEETCOACH_QUICK_ASK_MODEL", raising=False)
     assert config.quick_ask_model() == "haiku"
@@ -581,7 +753,7 @@ def test_distinct_keys_do_not_collide(client):
     c, _ = client
     r1 = c.post("/run", json=_RUN_PAYLOAD)
     assert r1.status_code == 200
-    other = dict(_RUN_PAYLOAD, tier="complex")  # distinct valid key
+    other = dict(_RUN_PAYLOAD, tier="optimal")  # distinct valid key
     r2 = c.post("/run", json=other)
     assert r2.status_code == 200, r2.status_code  # no false 409 across distinct keys
     # Drain LIFO — two stream_with_context responses held open share one request-
@@ -596,13 +768,13 @@ def test_library_listing_is_cached_and_invalidates_on_change(client, monkeypatch
     import os
     c, tmp = client
     calls = []
-    real = app_module._library_files
+    real = library.list_files
 
     def counting(root):
         calls.append(1)
         return real(root)
 
-    monkeypatch.setattr(app_module, "_library_files", counting)
+    monkeypatch.setattr(library, "list_files", counting)
 
     (tmp / "a.md").write_text("x", encoding="utf-8")
     assert c.get("/library").status_code == 200          # miss -> walks
@@ -656,7 +828,7 @@ def test_delete_missing_or_bad_suffix_is_404(client):
     c, tmp = client
     # nonexistent library file
     assert c.delete("/library/file?path=answers/none.md").status_code == 404
-    # a real file but a non-library suffix (.log ∉ LIBRARY_EXTENSIONS) must not
+    # a real file but a non-library suffix (.log ∉ library.EXTENSIONS) must not
     # be deletable through the library endpoint
     bad = tmp / "notes.log"
     bad.write_text("x", encoding="utf-8")
@@ -666,11 +838,154 @@ def test_delete_missing_or_bad_suffix_is_404(client):
 
 # --- app constructs without a live claude --------------------------------
 
-def test_create_app_does_not_require_claude(monkeypatch):
-    # is_available may be False on a CI box; constructing the app must not raise.
-    monkeypatch.setattr("claude_cli.is_available", lambda **kw: False)
-    application = app_module.create_app(run_fn=fake_run)
+def test_create_app_does_not_require_claude():
+    # claude may be absent on a CI box; constructing the app AND serving the page
+    # must not raise. A probe reporting "not installed" stands in for that box.
+    def missing_probe():
+        return claude_cli.AuthStatus(installed=False, logged_in=False)
+
+    application = app_module.create_app(run_fn=fake_run, auth_probe=missing_probe)
     assert application is not None
     # GET / still works (it surfaces the unavailable state in the page, not a crash)
     resp = application.test_client().get("/")
     assert resp.status_code == 200
+
+
+# --- auth / model flags injected into the page ---------------------------
+
+def test_index_injects_signed_in_and_model_flags(client):
+    c, _ = client  # the fixture's probe reports installed + logged_in
+    html = c.get("/").get_data(as_text=True)
+    assert 'data-claude-available="true"' in html
+    assert 'data-claude-logged-in="true"' in html
+    # default model (the `opus` alias) maps to the picker's "opus"
+    assert 'data-claude-model="opus"' in html
+    # no unreplaced placeholders leak to the page
+    assert "__CLAUDE_AVAILABLE__" not in html
+    assert "__CLAUDE_LOGGED_IN__" not in html
+    assert "__CLAUDE_MODEL__" not in html
+
+
+def test_index_picker_offers_fable_and_shows_latest_versions(client):
+    c, _ = client
+    html = c.get("/").get_data(as_text=True)
+    for alias in ("fable", "opus", "sonnet", "haiku"):
+        assert f'data-val="{alias}"' in html
+    # display-only version labels come from config.LATEST_MODEL_IDS
+    assert 'title="Fable 5.1' in html
+    assert 'title="Opus 5.5"' in html
+    assert "__MODEL_LABEL_" not in html
+
+
+def test_index_signed_out_flag_is_false():
+    def signed_out():
+        return claude_cli.AuthStatus(installed=True, logged_in=False)
+
+    application = app_module.create_app(run_fn=fake_run, auth_probe=signed_out)
+    html = application.test_client().get("/").get_data(as_text=True)
+    assert 'data-claude-available="true"' in html
+    assert 'data-claude-logged-in="false"' in html
+
+
+# --- POST /config/model: persist the picked model ------------------------
+
+def test_config_model_persists_and_takes_effect(client):
+    c, tmp_path = client
+    resp = c.post("/config/model", json={"model": "sonnet"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "model": "sonnet"}
+    # written to the (temp) .env for a future launch ...
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "LEETCOACH_MODEL=sonnet" in env_text
+    # ... and live in the process so the next run uses it with no restart
+    from leetcoach import config
+    assert config.model() == "sonnet"
+
+
+def test_config_model_accepts_fable(client):
+    c, tmp_path = client
+    resp = c.post("/config/model", json={"model": "fable"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"ok": True, "model": "fable"}
+    assert "LEETCOACH_MODEL=fable" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_config_model_rejects_unknown_alias(client):
+    c, tmp_path = client
+    resp = c.post("/config/model", json={"model": "gpt-4"})
+    assert resp.status_code == 400
+    # nothing persisted on a rejected value
+    assert not (tmp_path / ".env").exists()
+
+
+def test_config_model_rejects_missing_field(client):
+    c, _ = client
+    resp = c.post("/config/model", json={})
+    assert resp.status_code == 400
+
+
+# --- #7: create_app() must never default to the real project .env ---------
+
+def test_create_app_default_dotenv_path_is_not_the_real_project_env():
+    """A test that calls ``create_app()`` and never overrides
+    ``app.config["DOTENV_PATH"]`` by hand (unlike the ``client`` fixture
+    above) must still be unable to write the real repo ``.env`` — the
+    tests/conftest.py autouse fixture points ``LEETCOACH_DOTENV_PATH`` at a
+    private tmp file, and ``app.create_app()`` honours it as the default."""
+    from pathlib import Path
+
+    application = app_module.create_app(run_fn=fake_run, auth_probe=_authed_probe)
+    real_env = Path(__file__).resolve().parent.parent / ".env"  # the repo-root .env
+    assert application.config["DOTENV_PATH"] != str(real_env)
+
+    # Snapshot the real .env's metadata (it may genuinely exist -- this is a
+    # real dev's working checkout). Size + mtime only: the test must never
+    # READ the real .env, which can hold secrets.
+    def _snapshot():
+        if not real_env.exists():
+            return None
+        st = real_env.stat()
+        return (st.st_size, st.st_mtime_ns)
+
+    before = _snapshot()
+
+    resp = application.test_client().post(
+        "/config/model", json={"model": "opus"}
+    )
+    assert resp.status_code == 200
+
+    after = _snapshot()
+    assert after == before, "the real project .env must be untouched by create_app()"
+
+
+# --- favicon ---------------------------------------------------------------------------
+
+def test_favicon_is_served_and_linked(client):
+    c, _ = client
+    resp = c.get("/favicon.ico")
+    assert resp.status_code == 200
+    assert resp.mimetype == "image/svg+xml"
+    assert resp.get_data(as_text=True).lstrip().startswith("<svg")
+    assert "img-src 'self'" in resp.headers["Content-Security-Policy"]
+    page = c.get("/").get_data(as_text=True)
+    assert '<link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />' in page
+    assert c.get("/static/favicon.svg").status_code == 200
+
+
+# --- docs/ARCHITECTURE.md's route table matches the live URL map -----------
+
+def _shape(rule: str) -> str:
+    """``/static/<path:filename>`` and ``/static/<path>`` are the same route."""
+    return re.sub(r"<[^>]*>", "<>", rule)
+
+
+def test_architecture_route_table_matches_the_url_map():
+    application = app_module.create_app(run_fn=fake_run, auth_probe=lambda: None)
+    live = set()
+    for rule in application.url_map.iter_rules():
+        for method in rule.methods - {"HEAD", "OPTIONS"}:
+            live.add((method, _shape(rule.rule)))
+    doc = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    table = {(m, _shape(r)) for m, r in re.findall(
+        r"^\| (GET|POST|PUT|DELETE) \| `([^`]+)` \|", doc, re.MULTILINE)}
+    assert table == live
