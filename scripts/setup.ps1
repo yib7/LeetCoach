@@ -1,6 +1,8 @@
 # One-command setup for LeetCoach on Windows.  Run, from the repo root:
 #   powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
-# Creates a local .venv in the repo root and installs the runtime dependencies.
+# Creates a local .venv in the repo root and installs the runtime dependencies
+# at the exact versions pinned in requirements\lock.txt. LeetCoach.cmd runs this
+# on its first start, so most users never call it by hand.
 $ErrorActionPreference = "Stop"
 
 # Resolve every path from THIS SCRIPT's own location, not the caller's
@@ -14,6 +16,10 @@ Set-Location -Path $RepoRoot
 $VenvPath = Join-Path $RepoRoot ".venv"
 $MarkerPath = Join-Path $VenvPath ".setup-ok"
 $RequirementsPath = Join-Path $RepoRoot "requirements\base.txt"
+# 6.7: the committed lock is applied as pip constraints - base.txt says WHAT to
+# install, lock.txt fixes WHICH versions (the ones CI tests), and the dev-only
+# tools the lock also pins (pytest, ruff) are not pulled in.
+$LockPath = Join-Path $RepoRoot "requirements\lock.txt"
 
 # Test seam only: lets tests point pip installs at a fake stub instead of a
 # real interpreter, without a real `.venv` ever being created. Unset (the
@@ -32,10 +38,11 @@ function Exit-OnFailure {
 
 # Shared by both the fast path and the full setup path below, so the two
 # don't drift out of sync with each other.
+# 6.10: it names the one launcher, not .venv\Scripts\Activate.ps1, which the
+# default PowerShell execution policy refuses to run on a client PC.
 function Write-SetupCompleteMessage {
-    Write-Host "Setup complete. To run LeetCoach:" -ForegroundColor Green
-    Write-Host "  .\.venv\Scripts\Activate.ps1"
-    Write-Host "  python app.py"
+    Write-Host "Setup complete. Start LeetCoach with:" -ForegroundColor Green
+    Write-Host "  .\LeetCoach.cmd"
 }
 
 # 3A S1: every native command (python, py, pip) runs through these two
@@ -119,14 +126,14 @@ if (Test-Path $PythonExe) {
 }
 
 if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-    Exit-OnFailure "The 'py' launcher was not found. Install Python 3.12+ from https://python.org and retry."
+    Exit-OnFailure "The 'py' launcher was not found. Install Python 3.12 or newer from https://www.python.org/downloads/ (its installer includes 'py') and retry."
 }
 
 # Python >= 3.12 check (B9): LeetCoach's code relies on 3.12+ stdlib behavior.
 $versionProbe = Get-NativeOutput -FilePath "py" -Arguments @("-3", "-c", "import sys; print(str(sys.version_info[0]) + '.' + str(sys.version_info[1]))")
 $versionText = $versionProbe.Output
 if ($versionProbe.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($versionText)) {
-    Exit-OnFailure "Could not determine the Python version from 'py -3'. Install Python 3.12+ and retry."
+    Exit-OnFailure "Could not determine the Python version from 'py -3' (is a Python 3 installed?). Install Python 3.12 or newer from https://www.python.org/downloads/ and retry."
 }
 $versionParts = $versionText.Trim() -split '\.'
 $pyMajor = [int]$versionParts[0]
@@ -162,7 +169,7 @@ if ($pipExit -ne 0) {
     Write-Host "Warning: failed to upgrade pip (exit code $pipExit); continuing with the existing pip." -ForegroundColor Yellow
 }
 
-$installExit = Invoke-Native -FilePath $PythonExe -Arguments @("-m", "pip", "install", "-r", $RequirementsPath)
+$installExit = Invoke-Native -FilePath $PythonExe -Arguments @("-m", "pip", "install", "-r", $RequirementsPath, "-c", $LockPath)
 if ($installExit -ne 0) {
     Exit-OnFailure "Failed to install dependencies (exit code $installExit)."
 }

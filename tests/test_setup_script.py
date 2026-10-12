@@ -118,6 +118,7 @@ _STDERR_VENV_PYTHON_CMD = (
 # substring "upgrade" in that path too, and a bare-substring match would
 # misroute the (unrelated) `-r <path>` install call to the :upgrade branch.
 _STUB_PYTHON_CMD = r"""@echo off
+if not "%PIP_LOG%"=="" echo pip %* >> "%PIP_LOG%"
 echo %* | findstr /I /C:"--upgrade" >nul
 if not errorlevel 1 goto :upgrade
 echo %* | findstr /I "install" >nul
@@ -154,9 +155,9 @@ _EXISTING_VENV_PYTHON_CMD = (
 
 
 def _stage(tmp_path):
-    """Copy scripts/setup.ps1 + a throwaway requirements/base.txt into an
-    isolated directory that stands in for the repo root, so nothing ever
-    touches the real project .venv."""
+    """Copy scripts/setup.ps1 + a throwaway requirements/base.txt and
+    lock.txt into an isolated directory that stands in for the repo root, so
+    nothing ever touches the real project .venv."""
     stage = tmp_path / "stage"
     (stage / "requirements").mkdir(parents=True, exist_ok=True)
     (stage / "scripts").mkdir(parents=True, exist_ok=True)
@@ -164,6 +165,7 @@ def _stage(tmp_path):
         SETUP_PS1.read_text(encoding="utf-8"), encoding="utf-8"
     )
     (stage / "requirements" / "base.txt").write_text("flask>=3.0\n", encoding="utf-8")
+    (stage / "requirements" / "lock.txt").write_text("Flask==3.1.3\n", encoding="utf-8")
     return stage
 
 
@@ -473,3 +475,31 @@ def test_py_without_python3_on_stderr_shows_the_friendly_message(tmp_path):
     assert "Could not determine the Python version" in result.stdout, (
         result.stdout + result.stderr)
     assert not (stage / ".venv").exists()
+
+
+# --- 6.7 / 6.10: install from the committed lock; point at the one launcher ---
+
+def test_dependency_install_is_constrained_by_the_committed_lock(tmp_path):
+    """6.7: setup installs requirements/base.txt with requirements/lock.txt as
+    pip constraints, so a fresh machine gets the exact versions CI tested
+    (and none of the dev-only tools the lock also pins)."""
+    log = tmp_path / "pip.log"
+    _, result = _run_setup(tmp_path, extra_env={"PIP_LOG": str(log)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    installs = [
+        line for line in log.read_text(encoding="ascii", errors="replace").splitlines()
+        if " -r " in line
+    ]
+    assert len(installs) == 1, installs
+    line = installs[0]
+    assert r"requirements\base.txt" in line
+    assert " -c " in line and r"requirements\lock.txt" in line
+
+
+def test_setup_complete_message_names_the_launcher_not_activate(tmp_path):
+    """6.10: the follow-up command setup prints must work under the default
+    PowerShell execution policy, which refuses .venv/Scripts/Activate.ps1."""
+    _, result = _run_setup(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "LeetCoach.cmd" in result.stdout
+    assert "Activate.ps1" not in result.stdout
