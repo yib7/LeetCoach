@@ -77,10 +77,22 @@ follow-up questions on a saved doc.
     marked's token API, and new tests pin its behaviour.
   - highlight.js moves from 11.9.0 to 11.12.0. CREDITS.md lists both versions, and a test
     keeps it in step with the vendored files.
-  - `requirements.lock` is regenerated from a clean resolve and passes `pip check`. Python
+  - The lock file (now `requirements/lock.txt`) is regenerated from a clean resolve and
+    passes `pip check`. Python
     3.14 is the pinned development version; 3.12 is still the minimum.
 - **Lint.** Ruff moves to 0.16 with its larger default rule set, and every finding is
   fixed in code. The only `noqa` comments left each give a reason.
+- **Repository layout.** `python app.py`, `LeetCoach.cmd` and `setup.ps1` work as before,
+  and `.env` and `output/` stay at the repo root, so an existing library is kept.
+  - The code moves into a `leetcoach/` package, with `static/` and `templates/` inside it.
+    The root `app.py` is now a short entry point.
+  - The old `app.py` is split by job into `app.py` (routes), `request_guard.py`,
+    `streaming.py`, `library.py` and `launcher.py`. Helpers are named for what they hold:
+    `fsutil` becomes `atomic_files`, `proc_util` becomes `process_tree` and `parsing`
+    becomes `code_blocks`.
+  - `CHANGELOG.md`, `CREDITS.md` and `SECURITY.md` move into `docs/`. The requirement
+    files move into `requirements/` as `base.txt`, `dev.txt` and `lock.txt`.
+  - Entries below 1.5.0 keep the file names of their time.
 
 ### Fixed
 - **Deep memoized recursion on Python 3.12/3.13 is explained.** Those versions cap
@@ -134,7 +146,7 @@ follow-up questions on a saved doc.
   - A sandbox that cannot create its run folder reports `not_verified` with the reason.
 - **Ship audit: front end.** The library viewer ignores out-of-order responses, so
   opening A then B always shows B. Quick Ask sends only the 6,000 characters of the
-  problem the server reads. Unused helpers are gone from `static/lib/core.js`.
+  problem the server reads. Unused helpers are gone from `leetcoach/static/lib/core.js`.
 - **Classifier failures are logged.** When the save-time classifier call fails, a warning
   with the error is logged before the fallback pattern is used, so a persistent failure
   can be diagnosed.
