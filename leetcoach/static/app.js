@@ -37,10 +37,10 @@
   var $ = function (id) { return document.getElementById(id); };
 
   // ---- static SVG snippets (trusted literals, no user data) ---------------
-  var COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>';
-  var CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M5 13l4 4L19 7"/></svg>';
-  var FOLDER_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2h9A1.5 1.5 0 0 1 21 8.5V18a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18Z"/></svg>';
-  var ERR_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 4 3 19h18Z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>';
+  var COPY_SVG = '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>';
+  var CHECK_SVG = '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M5 13l4 4L19 7"/></svg>';
+  var FOLDER_SVG = '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4l2 2h9A1.5 1.5 0 0 1 21 8.5V18a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18Z"/></svg>';
+  var ERR_SVG = '<svg aria-hidden="true" focusable="false" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 4 3 19h18Z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>';
 
   var SAMPLE =
     "Two Sum\n\nGiven an array of integers nums and an integer target, return " +
@@ -227,16 +227,15 @@
   (function claudeStatus() {
     var installed = document.body.dataset.claudeAvailable === "true";
     var loggedIn = document.body.dataset.claudeLoggedIn === "true";
-    var ready = installed && loggedIn;
+    var status = core.cliStatus(installed, loggedIn);
+    var ready = status.ready;
     var pill = $("claude-status");
     var dot = pill ? pill.querySelector(".dot") : null;
-    var label = pill ? pill.querySelector(".tb-status-label") : null;
-    if (dot) dot.classList.toggle("red", !ready);
-    if (label) {
-      label.textContent = ready
-        ? "claude CLI ready"
-        : installed ? "claude CLI signed out" : "claude CLI not found";
-    }
+    var state = pill ? pill.querySelector(".tb-status-state") : null;
+    if (dot) dot.classList.toggle("red", status.dot === "red");
+    // Phase 7: the state is always in words; narrow screens drop only the "claude CLI" prefix.
+    if (state) state.textContent = status.state;
+    if (pill) pill.title = "claude CLI " + status.state;
     if (claudeWarning) {
       var missing = claudeWarning.querySelector('[data-banner="missing"]');
       var signedOut = claudeWarning.querySelector('[data-banner="signedout"]');
@@ -280,6 +279,7 @@
     if (tg) {
       tg.classList.toggle("disabled", untiered);
       tg.setAttribute("aria-disabled", untiered ? "true" : "false");
+      tg.title = core.tierNote(mode); // Phase 7: say why it is greyed out
     }
     segButtons("tier").forEach(function (b) { b.disabled = untiered; });
     // SP7 / D5: Code Review takes the learner's attempt next to the problem.
@@ -1351,7 +1351,8 @@
       rec.type = "button";
       rec.setAttribute("aria-label", runAriaLabel(run));
       var info = core.verdictInfo(run.verdict);
-      var dd = el("span", "dd v-" + info.cls);
+      // Phase 7: the verdict glyph (shape + colour), not a colour-only dot.
+      var dd = el("span", "dd v-" + info.cls, info.glyph);
       dd.setAttribute("aria-hidden", "true");
       rec.appendChild(dd);
       var rt = el("span", "rt");
@@ -2921,6 +2922,7 @@
     core.LEITNER_DAYS.forEach(function (days, i) {
       var n = byBox[String(i + 1)] || 0;
       var r = el("div", "bd-row");
+      r.setAttribute("role", "group");
       r.setAttribute("aria-label", "Box " + (i + 1) + " (every " + core.plural(days, "day") + "): " +
         core.plural(n, "problem"));
       r.appendChild(el("span", "bd-key", "Box " + (i + 1) + " · " + days + "d"));
@@ -3033,6 +3035,7 @@
     }
     var n = prCases.children.length + 1;
     var row = el("div", "pr-case");
+    row.setAttribute("role", "group");
     function field(lbl, cls, value, ph) {
       var wrap = el("label", "pr-case-f");
       wrap.appendChild(el("span", "pr-case-l", lbl));

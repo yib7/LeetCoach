@@ -683,6 +683,20 @@
     var m = String(mode || "").toLowerCase();
     return m === "learning" || m === "review";
   }
+  // Phase 7: why the Code Quality group is disabled (its title), "" when it applies.
+  function tierNote(mode) {
+    if (!untiered(mode)) return "";
+    var name = String(mode).toLowerCase() === "review" ? "Code Review" : "Learning";
+    return name + " runs have no code-quality tier; it applies to Answer and Guided runs.";
+  }
+
+  // Phase 7: the top-bar CLI pill. The state is always said in words (the dot's colour
+  // only repeats it), so "not ready" never rests on colour alone.
+  function cliStatus(installed, loggedIn) {
+    if (!installed) return { ready: false, state: "not found", dot: "red" };
+    if (!loggedIn) return { ready: false, state: "signed out", dot: "red" };
+    return { ready: true, state: "ready", dot: "" };
+  }
 
   // D4 Leitner rule, mirrored from problem_store.next_review for the grade
   // buttons' preview: solo -> next box (capped), hints -> same, peeked -> 1.
@@ -1093,6 +1107,8 @@
     hardenedRenderer: hardenedRenderer,
     modeName: modeName,
     untiered: untiered,
+    tierNote: tierNote,
+    cliStatus: cliStatus,
     LEITNER_DAYS: LEITNER_DAYS,
     leitnerPreview: leitnerPreview,
     daysBetween: daysBetween,
