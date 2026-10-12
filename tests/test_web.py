@@ -828,7 +828,7 @@ def test_delete_missing_or_bad_suffix_is_404(client):
     c, tmp = client
     # nonexistent library file
     assert c.delete("/library/file?path=answers/none.md").status_code == 404
-    # a real file but a non-library suffix (.log ∉ LIBRARY_EXTENSIONS) must not
+    # a real file but a non-library suffix (.log ∉ library.EXTENSIONS) must not
     # be deletable through the library endpoint
     bad = tmp / "notes.log"
     bad.write_text("x", encoding="utf-8")

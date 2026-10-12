@@ -1,7 +1,7 @@
 """Test-suite-wide environment isolation (B8/#7).
 
-Three problems, all from the audit: (1) ``app.py`` loads the developer's real
-``.env`` at import time, so importing ``app`` during collection can leak a real
+Three problems, all from the audit: (1) ``leetcoach/app.py`` loads the developer's
+real ``.env`` at import time, so importing it during collection can leak a real
 ``LEETCOACH_*`` setting into the test process; (2) any test that forgets to
 override ``LEETCOACH_OUTPUT_DIR`` / ``LEETCOACH_TOPIC_INDEX`` falls through to
 the real ``output/`` tree and writes fake study material / topics into it;
@@ -12,9 +12,10 @@ would WRITE to that real file.
 
 The ``LEETCOACH_NO_DOTENV`` line below runs as module-level code, not inside a
 fixture, so it executes when pytest imports this file during collection —
-BEFORE any ``test_*.py`` module's ``import app`` triggers app.py's module-level
-``load_dotenv(...)`` call. That ordering is what makes the real .env
-unreachable for the whole session (see ``app.py``, which honours this var).
+BEFORE any ``test_*.py`` module's ``from leetcoach import app`` triggers its
+module-level ``load_dotenv(...)`` call. That ordering is what makes the real
+.env unreachable for the whole session (see ``leetcoach/app.py``, which honours
+this var).
 
 The autouse fixture below re-asserts isolation per test (belt and suspenders:
 a test could otherwise delete the env var mid-suite) and gives every test a

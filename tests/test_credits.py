@@ -1,4 +1,4 @@
-"""CREDITS.md must name the versions actually vendored under static/vendor/.
+"""CREDITS.md must name the versions actually vendored under leetcoach/static/vendor/.
 
 Each vendored build carries its own version in its header comment; the credits
 table has to match it, so a library bump cannot leave stale attribution behind.

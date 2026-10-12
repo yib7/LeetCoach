@@ -1,5 +1,5 @@
 "use strict";
-// C9: text tokens in static/style.css meet WCAG AA (4.5:1) on the surfaces
+// C9: text tokens in leetcoach/static/style.css meet WCAG AA (4.5:1) on the surfaces
 // they are drawn on. Parses the :root custom properties straight from the CSS.
 var assert = require("assert");
 var fs = require("fs");

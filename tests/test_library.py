@@ -25,7 +25,7 @@ import pytest
 from leetcoach import app as app_module
 from leetcoach import claude_cli, library
 
-# A string that exists verbatim in app.py — used to prove a traversal response
+# A string that exists verbatim in leetcoach/app.py — used to prove a traversal response
 # never leaks the file's content, whatever the status code.
 APP_PY_MARKER = "Flask web layer for LeetCoach"
 

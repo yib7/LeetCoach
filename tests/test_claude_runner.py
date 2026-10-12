@@ -175,7 +175,7 @@ def test_posix_group_cleanup_kills_the_cli_group_once_it_exited(monkeypatch, pee
         assert kills == [(pid, True)], "exactly one kill, right after the reap"
 
 
-def test_proc_util_group_helpers_never_raise(monkeypatch):
+def test_process_tree_group_helpers_never_raise(monkeypatch):
     from leetcoach import process_tree
 
     def gone(*args):

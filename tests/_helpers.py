@@ -1,6 +1,6 @@
 """Shared test helpers (audit P2-7 de-duplication).
 
-`tests/` is not a package; pytest's default (prepend) import mode puts this
+`tests/` is not a package; ``pythonpath`` in pyproject.toml puts this
 directory on ``sys.path``, so test modules can ``from _helpers import ...``.
 
 Holds the pieces that were copy-pasted across several test files:

@@ -1,9 +1,10 @@
 """Tests for the ``choose_port`` launch helper (Cycle 10 SP-A).
 
 ``choose_port(preferred, host, *, span=20)`` is a pure, module-level helper used
-only by ``app.py``'s ``__main__`` block to pick a bindable port so a double-click
-launch never crashes on an occupied port. These tests run offline with no browser
-and no ``claude`` call — they only exercise real socket binds on loopback.
+only by ``leetcoach.launcher.main`` (what ``python app.py`` runs) to pick a
+bindable port so a double-click launch never crashes on an occupied port. These
+tests run offline with no browser and no ``claude`` call — they only exercise
+real socket binds on loopback.
 """
 from __future__ import annotations
 
