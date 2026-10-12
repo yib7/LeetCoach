@@ -183,7 +183,7 @@ paths.
 
 ## Demo
 
-![Walkthrough: load the Two Sum sample, run it as an Answer in Python, watch it stream and pass its samples, open it in the Library, reveal two hints on its Guided doc and ask a follow-up, re-attempt it with Test my code, grade it, and see Due today and Stats update](docs/media/demo.gif)
+![Walkthrough: load the Two Sum sample, run it as an Answer in Python, watch it stream and pass its samples, open it in the Library, reveal two hints on its Guided Learning doc and ask a follow-up, re-attempt it with Test my code, grade it, and see Due today and Stats update](docs/media/demo.gif)
 
 ## The `claude` CLI
 

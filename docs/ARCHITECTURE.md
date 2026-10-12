@@ -125,7 +125,7 @@ sequenceDiagram
         CC-->>F: system/init (model, session_id) + text deltas
         F-->>U: event: meta {model} then data: delta (rendered live)
     end
-    Note over F,SB: Answer and Guided, Python only
+    Note over F,SB: Answer and Guided Learning, Python only
     F-->>U: event: phase verifying i/n
     F->>SB: verify_answer(code, sample I/O)
     SB-->>F: pass / fail / error / not_verified
