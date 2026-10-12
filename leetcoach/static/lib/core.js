@@ -1,4 +1,4 @@
-/* LeetCoach core helpers (SP5): pure functions shared by static/app.js and
+/* LeetCoach core helpers: pure functions shared by static/app.js and
  * the zero-dependency node tests in tests/js/.
  *
  * No DOM, no network, no globals beyond the export below. Loaded in the page
@@ -25,8 +25,8 @@
       .replace(/>/g, "&gt;");
   }
   // marked hands an angle-bracket autolink's href over already entity-escaped
-  // (`<https://x/?a&b>` -> "https://x/?a&amp;b"); escaping it again produced a
-  // broken "&amp;amp;" URL (C10). Decode the basic entities first.
+  // (`<https://x/?a&b>` -> "https://x/?a&amp;b"); escaping it again would give
+  // a broken "&amp;amp;" URL (C10). Decode the basic entities first.
   function unescapeEntities(s) {
     return String(s)
       .replace(/&lt;/g, "<")
@@ -123,7 +123,7 @@
     return new Date(+p[0], (+p[1]) - 1, +p[2]);
   }
 
-  // ---- model ids (SP5 model chip) -------------------------------------------
+  // ---- model ids (the model chip) -------------------------------------------
   // "claude-opus-5-5" -> "Opus 5.5"; "claude-sonnet-4-5-20250929" -> "Sonnet
   // 4.5"; "claude-3-5-haiku-20241022" -> "Haiku 3.5"; "opus" -> "Opus";
   // anything else is shown as-is (the raw id is the honest fallback).
@@ -148,25 +148,25 @@
     return attempt >= 0 && attempt < RETRY_DELAYS.length ? RETRY_DELAYS[attempt] : -1;
   }
 
-  // SP5 fix R8: the /run response decision - ms to wait before re-POSTing,
-  // or -1 to hand `status` to the caller. Only a 409 is retried, and only
+  // The /run response decision: ms to wait before re-POSTing, or -1 to hand
+  // `status` to the caller. Only a 409 is retried, and only
   // while the run still owns the UI.
   function runRetryDelay(status, attempt, isCurrent) {
     if (status !== 409 || !isCurrent) return -1;
     return retryDelay(attempt);
   }
 
-  // SP5 fix R8: what a POST /run/cancel answer means for Stop. A 200
-  // {"cancelled": false} is the server saying the run already committed to
-  // saving (SP4 M1) - keep reading for its `done`. Anything else (cancelled,
+  // What a POST /run/cancel answer means for Stop. A 200 {"cancelled": false}
+  // is the server saying the run already committed to saving: keep reading
+  // for its `done`. Anything else (cancelled,
   // unknown run, network failure) means the run is over: show it as stopped.
   function cancelOutcome(status, body) {
     return status === 200 && !!body && body.cancelled === false ? "committed" : "cancelled";
   }
 
-  // SP5 fix R8/B2: the finish kind for a terminal SSE event name, or null for
-  // a non-terminal / unknown one. A `cancelled` event is a user Stop the
-  // server honoured - the neutral "stopped" state, never "Run failed".
+  // B2: the finish kind for a terminal SSE event name, or null for a
+  // non-terminal / unknown one. A `cancelled` event is a user Stop the server
+  // honoured: the neutral "stopped" state, never "Run failed".
   function runEventKind(name) {
     if (name === "done") return "done";
     if (name === "error") return "error";
@@ -174,7 +174,7 @@
     return null;
   }
 
-  // SP5 fix R4: would replacing the editor's text with a run's captured
+  // Would replacing the editor's text with a run's captured
   // problem lose a DIFFERENT, non-empty draft? (Whitespace-only differences
   // and an empty editor never need asking.)
   function needsReplaceConfirm(current, incoming) {
@@ -200,10 +200,10 @@
   // B16: is the markdown currently inside an unclosed ``` / ~~~ fence? (The
   // last code block is then partial: not highlighted, marked `.partial`.)
   //
-  // SP5 fix R3: a fence may be indented (a code block inside a list item,
+  // A fence may be indented (a code block inside a list item,
   // "1. step\n\n    ```python"), like code_blocks.py's indentation-aware match.
   // A closing fence counts when it is indented at most 3 columns past its
-  // opener (or less - a dedent ends the list item, and the block with it);
+  // opener (or less: a dedent ends the list item, and the block with it);
   // a ``` indented further is code INSIDE the block (e.g. a docstring example).
   function hasOpenFence(md) {
     var lines = String(md || "").replace(/\r\n?/g, "\n").split("\n");
@@ -272,7 +272,7 @@
     }
   }
 
-  // ---- library-derived runs (Cycle 10; moved here for tests) ------------------
+  // ---- library-derived runs ---------------------------------------------------
   var CODE_EXT = { py: 1, cpp: 1, cc: 1, cxx: 1, c: 1, java: 1, cs: 1, js: 1, ts: 1, go: 1, rs: 1, rb: 1, kt: 1, swift: 1 };
 
   // "<stem>[__<tier>][__<n>]" -> parts. A trailing "__<digits>" is the
@@ -291,9 +291,9 @@
     };
   }
 
-  // Group files into runs by (mode-folder, topic, base name). SP6/A8: one
-  // run per saved run - each tier and each "__N" slot is its own run; only an
-  // Answer's .md + code file (same base name) share one.
+  // Group files into runs by (mode-folder, topic, base name). A8: one run per
+  // saved run. Each tier and each "__N" slot is its own run; only an Answer's
+  // .md + code file (same base name) share one.
   function deriveRuns(files) {
     var map = {};
     var order = [];
@@ -309,7 +309,7 @@
       var nm = splitRunName(base);
       var stem = nm.stem;
       var tier = nm.tier;
-      // learning writes into "<type>_learning" — drop the mode artifact.
+      // learning writes into "<type>_learning": drop the mode suffix.
       var topicRaw = topicSeg.replace(/_learning$/, "");
       var key = modeFolder + "|" + parts.slice(1, -1).join("/") + "|" + base;
       var run = map[key];
@@ -386,7 +386,7 @@
     return out;
   }
 
-  // ---- stats (Cycle 10; moved here for tests) ---------------------------------
+  // ---- stats ------------------------------------------------------------------
   function computeStats(runs, now) {
     now = now || new Date();
     runs = runs || [];
@@ -463,7 +463,7 @@
     return 4;
   }
 
-  // ---- difficulty (SP6 / D1: the Diff column) ------------------------------------
+  // ---- difficulty (D1: the Diff column) ------------------------------------------
   var DIFF = { easy: { cls: "easy", label: "Easy" }, medium: { cls: "med", label: "Medium" },
                hard: { cls: "hard", label: "Hard" } };
   function diffInfo(d) {
@@ -471,22 +471,22 @@
     return hit ? { cls: hit.cls, label: hit.label } : null;
   }
 
-  // ---- click-to-reveal (SP6 / D2) ---------------------------------------------------
+  // ---- click-to-reveal (D2) ---------------------------------------------------------
   // The doc contract puts a "### Hint 1..4" ladder under ## Approach (Guided and
   // Learning) and the one solution block under ## Solution. After a render, each
-  // hint section - and, in Guided docs, the Solution section; in Guided and
-  // Learning docs, the Key insight section (it gives Hint 1 away) - is wrapped
-  // in a closed <details> so the learner reveals it on purpose. The wrap only
+  // hint section is wrapped in a closed <details> so the learner reveals it on
+  // purpose. So is the Solution section in Guided docs, and the Key insight
+  // section (it gives Hint 1 away) in Guided and Learning docs. The wrap only
   // MOVES nodes the hardened markdown renderer already built; model text never
   // goes through innerHTML here.
   //
-  // Extents (SP6 fix I1): a hint owns the nodes up to the next heading of ANY
+  // Extents: a hint owns the nodes up to the next heading of ANY
   // level or <hr>. When nothing but an H1/H2/<hr>/the end follows it (the model
   // skipped the fixed "### Walkthrough"/"### Techniques" heading), it owns only
   // its first block, so Hint 4 never swallows the rest of ## Approach. An H2
   // section (Solution, Key insight) runs to the next H1/H2 or <hr>.
   //
-  // A11y (SP6 fix M6): the heading is not nested in <summary>; it stays in the
+  // A11y: the heading is not nested in <summary>; it stays in the
   // document right before its <details>, visually hidden, so heading
   // navigation still finds every hint, and the summary shows its text in a
   // span.
@@ -579,9 +579,9 @@
       h.className = ((h.className ? h.className + " " : "") + HIDDEN_HEADING + " sr-only");
       if (open[t.info.key]) details.open = true;
       if (typeof opts.onToggle === "function") {
-        // SP6 fix M7: record the new state on the click itself (the native
-        // toggle event fires a frame later - a re-render in between would
-        // rebuild the reveal closed and flash it).
+        // Record the new state on the click itself (the native toggle event
+        // fires a frame later, and a re-render in between would rebuild the
+        // reveal closed and flash it).
         summary.addEventListener("click", function () {
           opts.onToggle(t.info.key, !details.open);
         });
@@ -590,7 +590,7 @@
     return targets.length;
   }
 
-  // ---- tier + display titles (SP6 fix O2 / O3) ------------------------------------
+  // ---- tier + display titles --------------------------------------------------------
   // The code-quality tier is an Answer concept: Guided and Learning docs never
   // show (or log) one.
   function tierApplies(mode) {
@@ -643,8 +643,8 @@
   function isComposingEnter(e) {
     return !!e && (e.isComposing === true || e.keyCode === 229);
   }
-  // B15: localStorage wrapper. `getStore` returns the Storage (or throws -
-  // private mode, blocked site data); every access is guarded so the page
+  // B15: localStorage wrapper. `getStore` returns the Storage (or throws in
+  // private mode or with blocked site data); every access is guarded so the page
   // works without it.
   function makePrefs(getStore, prefix) {
     prefix = prefix || "leetcoach.";
@@ -671,7 +671,7 @@
     };
   }
 
-  // ---- SP7: practice loop (re-attempt, review queue, flashcards) -----------------
+  // ---- practice loop (re-attempt, review queue, flashcards) ----------------------
   // Display names of the run modes (the wire value "review" is Code Review).
   var MODE_NAMES = { answer: "Answer", learning: "Learning", guided: "Guided", review: "Code Review" };
   function modeName(mode) {
@@ -683,14 +683,14 @@
     var m = String(mode || "").toLowerCase();
     return m === "learning" || m === "review";
   }
-  // Phase 7: why the Code Quality group is disabled (its title), "" when it applies.
+  // Why the Code Quality group is disabled (its title), "" when it applies.
   function tierNote(mode) {
     if (!untiered(mode)) return "";
     var name = String(mode).toLowerCase() === "review" ? "Code Review" : "Learning";
     return name + " runs have no code-quality tier; it applies to Answer and Guided runs.";
   }
 
-  // Phase 7: the top-bar CLI pill. The state is always said in words (the dot's colour
+  // The top-bar CLI pill. The state is always said in words (the dot's colour
   // only repeats it), so "not ready" never rests on colour alone.
   function cliStatus(installed, loggedIn) {
     if (!installed) return { ready: false, state: "not found", dot: "red" };
@@ -735,9 +735,9 @@
   // The doc "Give up / show solution" reveals: the newest logged Answer or
   // Guided doc (they carry a solution), else the newest doc of any mode,
   // else the record's last listed .md.
-  // SP8 fix M7: every candidate in that order (newest first within each
-  // group, no duplicates), so a caller can fall back to the next one when a
-  // doc was deleted. ``existing`` (optional: a path -> file map such as the
+  // Returns every candidate in that order (newest first within each group, no
+  // duplicates), so a caller can fall back to the next one when a doc was
+  // deleted. ``existing`` (optional: a path -> file map such as the
   // library listing, or an array of paths) drops docs that are no longer in
   // the library; the run log is append-only and still names deleted runs.
   var SOLUTION_MODES = { answer: 1, guided: 1 };
@@ -866,7 +866,7 @@
     return "";
   }
 
-  // 3A W6: "only the newest request may update the page". start(tag) issues a
+  // "Only the newest request may update the page". start(tag) issues a
   // token; done(token) / isCurrent(token) say whether that response is still
   // the newest (a stale one is dropped, so clicking A then B never shows A
   // when A answers last). pending() is the tag of the newest request while it
@@ -898,7 +898,7 @@
     };
   }
 
-  // 3A W8: the first `n` characters of `text`, counted in code points like
+  // The first `n` characters of `text`, counted in code points like
   // the server's Python slice (an astral character is never split in half).
   function clipChars(text, n) {
     text = text == null ? "" : String(text);
@@ -913,9 +913,9 @@
     return text.slice(0, out);
   }
 
-  // SP7 fix: one save queue per problem's notes, shared by every notes editor
+  // One save queue per problem's notes, shared by every notes editor
   // of that problem. One request at a time; text pushed while a save is in
-  // flight waits (only the newest is kept) and is sent when it lands - even if
+  // flight waits (only the newest is kept) and is sent when it lands, even if
   // the editor that pushed it is gone. `send(text, keepalive, done)` must call
   // done(err) once; `cb(err, savedText)` gets the text actually sent (newer
   // pushes coalesce). flushNow() (pagehide) sends the waiting text right away
@@ -977,7 +977,7 @@
     return review && review.today && fetchedDay === local ? review.today : local;
   }
 
-  // ---- hardened marked renderer (KEEP the policy; moved here for tests) ---------
+  // ---- hardened marked renderer (KEEP the policy) -------------------------------
   // Claude's output is untrusted markdown rendered via innerHTML. marked has no
   // `sanitize` option, so raw HTML is escaped (visible as text), links must be
   // http(s), and images must be inline data:image/ URIs (no network fetch).
@@ -1024,7 +1024,7 @@
     };
   }
 
-  // ---- SP8 / D6: follow-up questions on a saved doc -------------------------
+  // ---- D6: follow-up questions on a saved doc --------------------------------
   // The question as the server will see it (trimmed), or why it can't be sent.
   function followupCheck(text, max) {
     var q = String(text == null ? "" : text).trim();

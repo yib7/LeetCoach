@@ -102,7 +102,7 @@
           <!-- topic chips (JS fills from the real library; each opens search prefilled) -->
           <div class="topics" id="topics" role="group" aria-label="Topics in your library"></div>
 
-          <!-- SP7 / D4: the review queue (JS fills from GET /review; hidden until a problem is scheduled) -->
+          <!-- D4: the review queue (JS fills from GET /review; hidden until a problem is scheduled) -->
           <section class="panel due-panel" id="due-panel" aria-labelledby="due-title" hidden>
             <div class="p-head">
               <h2 class="p-title" id="due-title">Due today <span class="tag" id="due-count">0</span></h2>
@@ -129,7 +129,7 @@
                 placeholder="Paste the full LeetCode problem here — title, description, examples, and constraints…"></textarea>
               <span class="sr-only" id="problem-help">Your draft is kept in this browser until you clear it.</span>
             </div>
-            <!-- SP7 / D5: Code Review mode's attempt box (JS shows it for mode=review) -->
+            <!-- D5: Code Review mode's attempt box (JS shows it for mode=review) -->
             <div class="review-code" id="review-code-wrap" hidden>
               <label class="rc-label" for="review-code">Your code <span class="tag">critiqued, not run</span></label>
               <textarea id="review-code" class="problem code-input" spellcheck="false" maxlength="65536"
@@ -279,7 +279,7 @@
                 <button id="library-viewer-close" class="mini" type="button">Close</button>
               </div>
               <div id="library-viewer-body" class="md pad"></div>
-              <!-- SP8 / D6: a follow-up question on this doc (Markdown docs only) -->
+              <!-- D6: a follow-up question on this doc (Markdown docs only) -->
               <section id="library-viewer-followup" class="vw-followup" aria-labelledby="followup-title" hidden>
                 <div class="fu-head">
                   <h3 id="followup-title" class="fu-label">Ask a follow-up</h3>
@@ -296,7 +296,7 @@
                 <div id="followup-status" class="fu-status" role="status" aria-live="polite"></div>
                 <div id="followup-answer" class="md fu-answer" hidden></div>
               </section>
-              <!-- SP7 / D9: per-problem notes (problem-linked docs only) -->
+              <!-- D9: per-problem notes (problem-linked docs only) -->
               <div id="library-viewer-notes" class="vw-notes" hidden></div>
             </div>
             <div class="lib-empty" aria-hidden="true">
@@ -306,7 +306,7 @@
           </div>
         </section>
 
-        <!-- ===== PRACTICE (RE-ATTEMPT) VIEW — SP7 / D3 ===== -->
+        <!-- ===== PRACTICE (RE-ATTEMPT) VIEW (D3) ===== -->
         <section id="view-practice" hidden>
           <div class="ctx">
             <div>
@@ -458,7 +458,7 @@
               </div>
             </section>
 
-            <!-- SP7 / D4 + D10: the review queue and the flashcard export -->
+            <!-- D4 + D10: the review queue and the flashcard export -->
             <section class="panel stats-panel" id="stats-review" aria-labelledby="stats-review-h">
               <div class="p-head">
                 <h2 class="p-title" id="stats-review-h">Review queue <span class="tag">spaced repetition</span></h2>
@@ -504,7 +504,7 @@
   <div class="sr-only" id="run-status" role="status" aria-live="polite"></div>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
-  <!-- ===== keyboard shortcuts help modal (C1) ===== -->
+  <!-- ===== keyboard shortcuts help modal ===== -->
   <div class="overlay" id="shortcuts-modal" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
       <div class="modal-head">
@@ -564,7 +564,7 @@
     </div>
   </div>
 
-  <!-- ===== flashcards review (SP7 / D10) ===== -->
+  <!-- ===== flashcards review (D10) ===== -->
   <div class="overlay" id="flashcards-modal" hidden>
     <div class="modal fc-modal" role="dialog" aria-modal="true" aria-labelledby="fc-title">
       <div class="modal-head">
@@ -598,7 +598,7 @@
     </div>
   </div>
 
-  <!-- ===== search palette (C2) ===== -->
+  <!-- ===== search palette ===== -->
   <div class="overlay overlay-top" id="search-palette" hidden>
     <div class="palette" role="dialog" aria-modal="true" aria-label="Search your library">
       <div class="pal-head">

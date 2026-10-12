@@ -1,7 +1,7 @@
 /* LeetCoach frontend (application-shell UI).
  *
  * POSTs the run form to /run and consumes the SSE response with fetch +
- * ReadableStream (POST body is cleanest this way — no EventSource GET dance).
+ * ReadableStream (fetch can send a POST body; EventSource only does GET).
  * Text deltas accumulate and the markdown is re-rendered (throttled) with the
  * vendored `marked`; closed code blocks are syntax-highlighted with the
  * vendored `highlight.js` and wrapped in chrome. A terminal `done` event shows
@@ -15,9 +15,9 @@
  *    RENDER_INTERVAL_MS (B16) and deferred while the reader has text selected.
  *  - Streaming chrome (state pill / chips / live timer / Stop / caret / phase
  *    note) lives on SIBLING nodes around #output and is written with direct
- *    textContent/class writes — render() never touches it.
+ *    textContent/class writes. render() never touches it.
  *  - Code-block chrome + hljs are post-render passes over #output, then the
- *    SP6 click-to-reveal pass (core.applyReveals: hint sections and a Guided
+ *    click-to-reveal pass (core.applyReveals: hint sections and a Guided
  *    run's Solution move into <details>; nodes are moved, never re-parsed).
  *    Copy is handled by ONE delegated click listener per container, added once.
  *  - /run request body is { problem, mode, language, tier, model?, run_id };
@@ -52,7 +52,7 @@
   var HLJS_LANG = { py: "python", cpp: "cpp", java: "java", json: "json" };
   var RENDER_INTERVAL_MS = 150;   // B16 stream render throttle
   var QA_TIMEOUT_MS = 60000;      // B20 Quick Ask client timeout
-  var CANCEL_TIMEOUT_MS = 3000;   // SP4: an unresponsive server can't hang Stop
+  var CANCEL_TIMEOUT_MS = 3000;   // an unresponsive server can't hang Stop
 
   // ---- core element handles ----------------------------------------------
   var appEl = $("app");
@@ -110,7 +110,7 @@
   // ---- marked XSS hardening (policy lives in core.hardenedRenderer) -------
   // Defense-in-depth: Claude's output is untrusted markdown rendered via
   // innerHTML. Raw HTML is escaped, links must be http(s), images must be
-  // inline data:image/ URIs (no network fetch — offline promise).
+  // inline data:image/ URIs (no network fetch, so the page works offline).
   if (window.marked && typeof marked.use === "function") {
     marked.use({ renderer: core.hardenedRenderer() });
   }
@@ -233,7 +233,7 @@
     var dot = pill ? pill.querySelector(".dot") : null;
     var state = pill ? pill.querySelector(".tb-status-state") : null;
     if (dot) dot.classList.toggle("red", status.dot === "red");
-    // Phase 7: the state is always in words; narrow screens drop only the "claude CLI" prefix.
+    // The state is always in words; narrow screens drop only the "claude CLI" prefix.
     if (state) state.textContent = status.state;
     if (pill) pill.title = "claude CLI " + status.state;
     if (claudeWarning) {
@@ -279,10 +279,10 @@
     if (tg) {
       tg.classList.toggle("disabled", untiered);
       tg.setAttribute("aria-disabled", untiered ? "true" : "false");
-      tg.title = core.tierNote(mode); // Phase 7: say why it is greyed out
+      tg.title = core.tierNote(mode); // say why it is greyed out
     }
     segButtons("tier").forEach(function (b) { b.disabled = untiered; });
-    // SP7 / D5: Code Review takes the learner's attempt next to the problem.
+    // D5: Code Review takes the learner's attempt next to the problem.
     var rc = $("review-code-wrap");
     if (rc) rc.hidden = mode !== "review";
   }
@@ -346,10 +346,10 @@
     });
     if (changed && contentEl) contentEl.scrollTop = viewScroll[view] || 0;
     closeDrawer(false);
-    if (changed && view !== "practice") retirePracticeNotes(); // SP7 fix: one live notes editor
+    if (changed && view !== "practice") retirePracticeNotes(); // one live notes editor
     if (view === "library") { loadLibrary(); restoreViewerNotes(); } // re-fetch on open: fresh after runs
     if (view === "stats") { refreshStats(); loadReview(); } // recompute + the review queue
-    else if (changed) refreshReviewIfNewDay(); // SP7 fix: a stale "today" after midnight
+    else if (changed) refreshReviewIfNewDay(); // catch a stale "today" after midnight
   }
   document.querySelectorAll("[data-view]").forEach(function (a) {
     a.addEventListener("click", function () { switchView(a.getAttribute("data-view")); });
@@ -428,7 +428,7 @@
   });
 
   // =========================================================================
-  // Render pipeline — #output is the single re-rendered node.
+  // Render pipeline: #output is the single re-rendered node.
   // =========================================================================
   // B16: highlight output is cached by (language, code) so a closed block is
   // highlighted once, not on every throttled render. hljs escapes its input;
@@ -458,7 +458,7 @@
     });
   }
 
-  // SP6 / D2: click-to-reveal for the doc in #output - every "### Hint N"
+  // D2: click-to-reveal for the doc in #output: every "### Hint N"
   // section, plus the ## Solution section of a Guided run and the ## Key
   // insight of a Guided / Learning one (core.revealsFor). Which ones the
   // learner opened survives the throttled re-renders of the same run.
@@ -731,7 +731,7 @@
     announce("Run finished. Saved " + n + (n === 1 ? " file" : " files") + "." +
       (v ? " " + core.verdictInfo(v).label + "." : ""));
     loadLibrary(); // refresh recents / table / topics / tree with the new files
-    loadReview();  // SP7: a first run of a problem schedules its review
+    loadReview();  // a first run of a problem schedules its review
   }
 
   function enterError(msg) {
@@ -754,7 +754,7 @@
     announce("Run stopped.");
   }
 
-  // B13: the single exit for a run. A run that no longer owns the UI (it was
+  // B13: the single exit for a run. A run that has lost the UI (it was
   // stopped and a new one started) changes nothing.
   function finish(run, kind, data) {
     if (currentRun !== run) return;
@@ -791,8 +791,8 @@
   }
 
   // D7: re-run the same problem (captured at run start) with a patch.
-  // SP5 fix R4: the editor may hold a DIFFERENT draft by now (the user
-  // started the next problem); replacing it asks first instead of clobbering.
+  // The editor may hold a DIFFERENT draft by now (the user started the
+  // next problem); replacing it asks first instead of clobbering.
   function rerun(meta, patch, trigger) {
     if (isStreaming) return;
     if (meta.problem && core.needsReplaceConfirm(problemEl.value, meta.problem)) {
@@ -847,7 +847,7 @@
     if (meta.title) subParts.push(meta.title); // C10: captured at run start
     subParts.push(core.modeName(meta.mode));
     subParts.push(langLabel(meta.language));
-    if (meta.tier && core.tierApplies(meta.mode)) subParts.push(cap(meta.tier)); // O2
+    if (meta.tier && core.tierApplies(meta.mode)) subParts.push(cap(meta.tier));
     var sub = subParts.join(" · ");
     if (lastDuration) sub += " — completed in " + lastDuration;
     mid.appendChild(el("div", "s", sub));
@@ -968,7 +968,7 @@
   }
   // Best-effort server-side cancel (B14). keepalive lets it outlive a page
   // unload. Resolves true only when the server answers 200 {"cancelled": false}:
-  // the run already committed to saving (SP4 review M1), so the caller should
+  // the run already committed to saving, so the caller should
   // let it finish rather than abort and show "Stopped" for a run that was saved.
   // An unresponsive server must not leave Stop hanging: the request is aborted
   // after CANCEL_TIMEOUT_MS and resolves false.
@@ -997,8 +997,8 @@
   }
 
   // Stop: ask the server to cancel first; if it already committed to saving,
-  // keep reading so its `done` lands (M1). Otherwise abort the stream and hand
-  // the UI back at once (B13) — a re-run no longer waits on the old request.
+  // keep reading so its `done` lands. Otherwise abort the stream and hand
+  // the UI back at once (B13), so a re-run doesn't wait on the old request.
   function stopRun(run) {
     if (!run || currentRun !== run || run.stopping) return;
     run.stopping = true;
@@ -1060,7 +1060,7 @@
     var model = activeVal("model");
     var attemptCode = "";
     if (mode === "review") {
-      // SP7 / D5: Code Review needs the learner's code next to the problem.
+      // D5: Code Review needs the learner's code next to the problem.
       attemptCode = reviewCodeEl ? reviewCodeEl.value : "";
       if (!attemptCode.trim()) {
         notify("Paste your code to review first.", "");
@@ -1116,8 +1116,8 @@
         } else if (ev.name === "meta") {
           if (ev.data && ev.data.model) setRunModel(run.meta, ev.data.model);
         } else {
-          // done / error / cancelled (SP5 fix B2: a server-confirmed Stop is
-          // the neutral "Stopped" state, never "Run failed"); others ignored.
+          // done / error / cancelled (a server-confirmed Stop is the neutral
+          // "Stopped" state, never "Run failed"); others ignored.
           var kind = core.runEventKind(ev.name);
           if (kind === "done") finish(run, "done", ev.data || {});
           else if (kind === "stopped") { run.stopped = true; finish(run, "stopped"); }
@@ -1133,8 +1133,9 @@
         if (currentRun !== run) { try { reader.cancel(); } catch (e) { /* noop */ } break; }
         feed(decoder.decode(r.value, { stream: true }));
       }
-      // B17: the stream closed without a terminal event — never report that as
-      // a save. (A Stop that ended the stream gracefully was already handled.)
+      // B17: the stream closed without a terminal event, which is never
+      // reported as a save. (A Stop that ended the stream gracefully was
+      // already handled.)
       if (run.stopped) finish(run, "stopped");
       else {
         finish(run, "error",
@@ -1168,24 +1169,24 @@
     if (qaInflight) cancelQuickAsk("unload");
   });
 
-  // ⌘/Ctrl + Enter anywhere runs — switching to the Console first (C10).
+  // ⌘/Ctrl + Enter anywhere runs, switching to the Console first (C10).
   // Suppressed while a dialog is open and for an IME-composition Enter (C9).
   document.addEventListener("keydown", function (e) {
     if ((e.metaKey || e.ctrlKey) && (e.key === "Enter" || e.keyCode === 13)) {
       if (core.isComposingEnter(e)) return;
       if (document.querySelector(".overlay:not([hidden])")) return;
       e.preventDefault();
-      if (currentView === "practice") { practiceTest(); return; } // SP7 / D3
+      if (currentView === "practice") { practiceTest(); return; } // D3
       if (!isStreaming) runNow();
     }
   });
 
   // =========================================================================
-  // Quick Ask — one-shot Q&A, independent of the run stream. Cancellable,
+  // Quick Ask: one-shot Q&A, independent of the run stream. Cancellable,
   // with a 60 s client timeout (B20). Errors render as PLAIN TEXT.
   // =========================================================================
   var qaInput = $("qa-input");
-  // 3A W8: the server's QUICK_ASK_PROBLEM_CONTEXT_CAP, injected into the page.
+  // The server's QUICK_ASK_PROBLEM_CONTEXT_CAP, injected into the page.
   var QA_PROBLEM_CAP = (qaInput && parseInt(qaInput.getAttribute("data-problem-cap"), 10)) || 6000;
   var qaAskBtn = $("qa-ask");
   var qaAnswer = $("qa-answer");
@@ -1245,13 +1246,13 @@
       var resp = await postJson("/ask", {
         question: question,
         language: activeVal("lang"),
-        // 3A W8: /ask only reads the first QA_PROBLEM_CAP chars; sending a
+        // /ask only reads the first QA_PROBLEM_CAP chars; sending a
         // huge paste whole just risks the 2 MB request limit.
         problem: core.clipChars(problemEl.value.trim(), QA_PROBLEM_CAP),
         ask_id: q.id,
       }, { signal: q.controller.signal });
-      // SP5 fix R7: the answer has arrived - the 60 s timeout must not
-      // throw it away now (only an explicit Cancel/unload still can).
+      // The answer has arrived, so the 60 s timeout must not throw it
+      // away (only an explicit Cancel/unload still can).
       clearTimeout(timer);
       var data = await resp.json().catch(function () { return {}; });
       if (q.reason) throw Object.assign(new Error("aborted"), { name: "AbortError" });
@@ -1262,7 +1263,7 @@
         if (q.reason === "timeout") {
           showQaError("Quick Ask timed out after 60 s and was cancelled. Try again or shorten the question.");
         }
-        // reason "cancel": reported in #qa-status below (SP5 fix B4).
+        // reason "cancel": reported in #qa-status below.
       } else {
         showQaError("Network error: " + ((e && e.message) || "the request failed") + ".");
       }
@@ -1271,7 +1272,7 @@
       if (qaInflight === q) qaInflight = null;
       setQaBusy(false);
       if (q.reason === "cancel") {
-        // SP5 fix B4: say so where the "Asking…" line was; the next ask's
+        // Say so where the "Asking…" line was; the next ask's
         // setQaBusy(true) replaces it. The stale answer box goes away.
         qaAnswer.hidden = true;
         if (qaStatus) {
@@ -1316,13 +1317,13 @@
   }
 
   // =========================================================================
-  // Derived real data from /library ( recents · table · topics · tree ).
+  // Data derived from /library: recents, table, topics, tree.
   // =========================================================================
   var libFiles = [];
   var libByPath = {};
   var currentRuns = [];
   var libLoaded = false; // C10: no Stats empty-state flash before the first load
-  var libListed = false; // R5: a /library listing has succeeded at least once
+  var libListed = false; // a /library listing has succeeded at least once
 
   function openRun(run) {
     var path = run.mdPath || (run.files[0] && run.files[0].path);
@@ -1351,13 +1352,13 @@
       rec.type = "button";
       rec.setAttribute("aria-label", runAriaLabel(run));
       var info = core.verdictInfo(run.verdict);
-      // Phase 7: the verdict glyph (shape + colour), not a colour-only dot.
+      // The verdict glyph (shape + colour), not a colour-only dot.
       var dd = el("span", "dd v-" + info.cls, info.glyph);
       dd.setAttribute("aria-hidden", "true");
       rec.appendChild(dd);
       var rt = el("span", "rt");
       var rn = el("span", "rn");
-      // SP6 fix O3: the number is its own badge, never part of the title.
+      // The number is its own badge, never part of the title.
       if (run.number !== null) rn.appendChild(el("span", "pnum", "#" + run.number));
       var mt = midTrunc(run.problem, 6);
       rn.appendChild(el("span", "a", mt.a));
@@ -1375,7 +1376,7 @@
     if (recentCount) recentCount.textContent = n + " saved · output/";
   }
 
-  // SP6 / D1: the difficulty parsed from the paste (or the doc header).
+  // D1: the difficulty parsed from the paste (or the doc header).
   function diffCell(difficulty) {
     var info = core.diffInfo(difficulty);
     if (!info) return el("span", "diff", "—");
@@ -1422,10 +1423,10 @@
       row.setAttribute("data-difficulty", (core.diffInfo(run.difficulty) || { cls: "none" }).cls);
       row.appendChild(diffCell(run.difficulty));
       var pc = el("div", "pcell");
-      // SP5 fix B5: long names/slugs ellipsize in their column (style.css);
+      // Long names/slugs ellipsize in their column (style.css);
       // the full text stays one hover away.
       var pn = el("div", "pn");
-      if (run.number !== null) pn.appendChild(el("span", "pnum", "#" + run.number)); // O3
+      if (run.number !== null) pn.appendChild(el("span", "pnum", "#" + run.number));
       pn.appendChild(document.createTextNode(run.problem));
       pn.title = run.problemLabel;
       pc.appendChild(pn);
@@ -1496,7 +1497,7 @@
   }
 
   // =========================================================================
-  // Stats — Stats view + Console streak badge, from currentRuns.
+  // Stats: the Stats view + Console streak badge, from currentRuns.
   // =========================================================================
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -1632,7 +1633,7 @@
     });
   }
 
-  // SP6 / A8: Stats come from the server (GET /stats: the run log, plus
+  // A8: Stats come from the server (GET /stats: the run log, plus
   // legacy files with no log entry counted per saved run). If that request
   // fails, the page falls back to computing them from the /library listing.
   var serverStats = null;
@@ -1700,7 +1701,7 @@
     var modeFolder = parts.length >= 3 ? parts[0] : "";
     var topicRaw = parts.length >= 3 ? parts[1].replace(/_learning$/, "") : "";
     var f = libByPath[path];
-    // SP6 fix O3: the problem record's title (number shown apart); a legacy
+    // The problem record's title (number shown apart); a legacy
     // "1_two_sum" name loses its leading number.
     var pt = core.problemTitle({ title: f && f.title, number: f && f.number, stem: stem });
     return {
@@ -1716,7 +1717,7 @@
   }
 
   function showFile(relPath, text) {
-    if (viewerNotes) viewerNotes.flush(); // SP7 / D9: never drop a pending note
+    if (viewerNotes) viewerNotes.flush(); // D9: never drop a pending note
     var meta = fileMeta(relPath);
     if (vwTitle) vwTitle.textContent = meta.title;
     if (vwSub) {
@@ -1754,12 +1755,12 @@
     highlightCode(libViewerBody, false);
     decorateCode(libViewerBody, false);
     if (meta.ext === "md") {
-      // SP6 / D2: hints (and a Guided doc's solution) start hidden here too.
+      // D2: hints (and a Guided doc's solution) start hidden here too.
       core.applyReveals(libViewerBody, document, revealOpts({ mode: meta.mode, open: {} }));
     }
     libViewer.hidden = false;
     libViewer.scrollTop = 0; // C10: a newly opened file starts at its top
-    decorateViewer(relPath, meta); // SP7: Re-attempt / Flashcards / notes
+    decorateViewer(relPath, meta); // Re-attempt / Flashcards / notes
   }
 
   function markTreeActive(relPath) {
@@ -1770,7 +1771,7 @@
     });
   }
 
-  // 3A W6: click A then B - if A answers last it must not replace B (and the
+  // Click A then B: if A answers last it must not replace B (and the
   // notes / flashcards / follow-up box must not attach to A). Only the newest
   // open may show; closing the viewer drops whatever is in flight.
   var fileSeq = core.makeRequestSeq();
@@ -1866,8 +1867,8 @@
     });
   }
 
-  // 3A W6: overlapping refreshes (a run finishing while the Library view
-  // opens, a delete, ...) - an older listing that answers last must not
+  // Overlapping refreshes (a run finishing while the Library view opens,
+  // a delete, ...): an older listing that answers last must not
   // overwrite a newer one. A stale call resolves with the newest load, so a
   // caller chaining on it (openSavedDoc) sees the fresh listing.
   var libSeq = core.makeRequestSeq();
@@ -1899,7 +1900,7 @@
         libSeq.done(token);
         libLoaded = true;
         var why = (e && e.message) || "network error";
-        // SP5 fix R5: a refresh that fails keeps the library the page already
+        // A refresh that fails keeps the library the page already
         // shows (a blip must not blank recents / table / tree) and says so.
         if (libListed) {
           notify("Could not refresh the library (" + why + "). Showing the last loaded list.", "error");
@@ -1923,9 +1924,9 @@
   }
 
   function closeViewer() {
-    fileSeq.invalidate(); // 3A W6: an open still in flight must not reopen it
+    fileSeq.invalidate(); // an open still in flight must not reopen it
     resetViewerExtras();
-    closeFollowupBox(); // SP8 / D6: stops a follow-up in flight
+    closeFollowupBox(); // D6: stops a follow-up in flight
     libViewer.hidden = true;
     libViewerBody.textContent = "";
     currentViewPath = null;
@@ -1968,7 +1969,7 @@
   }
 
   // =========================================================================
-  // Overlays: shortcuts modal, ⌘K search palette, confirm dialog — all trap
+  // Overlays: shortcuts modal, ⌘K search palette, confirm dialog. All trap
   // focus (C9) and render user-derived text via el()/textContent only.
   // =========================================================================
   var shortcutsModal = $("shortcuts-modal");
@@ -2040,7 +2041,7 @@
   var confirmResolve = null;
   function confirmDialog(opts) {
     if (!confirmModal) return Promise.resolve(window.confirm(opts.title));
-    // SP5 fix R7: a second dialog while one is open answers the first
+    // A second dialog while one is open answers the first
     // "cancelled" (the safe choice) instead of leaving its promise hanging.
     if (confirmResolve) {
       var pending = confirmResolve;
@@ -2059,7 +2060,7 @@
     }
     if (opts.note) body.appendChild(el("p", "confirm-note", opts.note));
     $("confirm-ok").textContent = opts.ok || "OK";
-    // SP7: a non-destructive confirm (Show the solution) is not styled red.
+    // A non-destructive confirm (Show the solution) is not styled red.
     $("confirm-ok").className = "btn " + (opts.tone === "primary" ? "green" : "danger");
     // Replacing an open dialog keeps the focus target of the first one (the
     // active element is now the dialog's own Cancel button).
@@ -2298,7 +2299,7 @@
   }
 
   // =========================================================================
-  // SP7 — the practice loop: code boxes (Tab indent), Code Review's attempt
+  // The practice loop: code boxes (Tab indent), Code Review's attempt
   // box, the review queue (Due today + Stats), the re-attempt view, per-problem
   // notes and flashcards. Everything user- or model-derived is set via
   // el()/textContent; only saved Markdown docs go through the hardened marked.
@@ -2309,8 +2310,8 @@
   var lastReview = null; // the last GET /review answer
   var lastReviewDay = ""; // the local day that answer was fetched on
 
-  // SP7 fix: the server's "today" only while it is still that day here - a
-  // tab left open past midnight counts from the local date (and re-fetches).
+  // The server's "today" holds only while it is still that day here: a tab
+  // left open past midnight counts from the local date (and re-fetches).
   function todayKey() {
     return core.reviewToday(lastReview, lastReviewDay, new Date());
   }
@@ -2361,13 +2362,13 @@
   // ---- D9: the notes editor (library viewer + re-attempt view) -------------
   // Debounced PUT /problems/<id>/notes with a visible Saving / Saved / Not
   // saved state; a failed save keeps the text and offers Retry.
-  // SP7 fix: every save of a problem's notes goes through that problem's one
+  // Every save of a problem's notes goes through that problem's one
   // queue (core.makeSaveQueue), so saves never race, and text typed while a
   // save is in flight is still sent after the editor closes. Only one editor
   // is live at a time: opening the re-attempt view retires the library
   // viewer's editor, and leaving it retires its own; the viewer's editor is
   // rebuilt from the server (or the queue's newer text) when the Library
-  // shows again - so two editors never overwrite each other's text.
+  // shows again, so two editors never overwrite each other's text.
   var notesQueues = {}; // pid -> core.makeSaveQueue
   function notesQueue(pid) {
     if (!notesQueues[pid]) {
@@ -2516,7 +2517,7 @@
         .catch(function () { /* the button just stays hidden */ });
     }
     if (pid) loadViewerNotes(pid, token);
-    syncFollowupBox(relPath, meta); // SP8 / D6
+    syncFollowupBox(relPath, meta); // D6
   }
   function loadViewerNotes(pid, token) {
     if (!lvNotes) return;
@@ -2534,7 +2535,7 @@
       })
       .catch(function () { /* no record: no notes editor */ });
   }
-  // SP7 fix: the re-attempt view takes over this problem's notes - retire
+  // The re-attempt view takes over this problem's notes: retire
   // the viewer's editor (its unsent text goes to the save queue) ...
   function retireViewerNotes() {
     if (!viewerNotes) return;
@@ -2575,7 +2576,7 @@
     if (document.visibilityState === "hidden") flushNotes();
   });
 
-  // ---- SP8 / D6: follow-up questions on the open doc ------------------------
+  // ---- D6: follow-up questions on the open doc ------------------------------
   // POST /followup streams an answer (the study run's session resumed, or a
   // fresh call with the doc as context); the server appends it to the doc,
   // then the doc is re-rendered here. One follow-up at a time; it runs in its
@@ -2671,8 +2672,8 @@
       fuInput.value = "";
       fuClearAnswer();
       fuSetStatus(msg, "ok");
-      // 3A W6: the learner already clicked another file that is still
-      // loading - reloading this doc now would win over their click.
+      // The learner already clicked another file that is still loading;
+      // reloading this doc would win over their click.
       var opening = fileSeq.pending();
       if (opening !== null && opening !== fu.path) return;
       // Re-render the doc so the appended section shows, and bring it into view.
@@ -2981,8 +2982,8 @@
     prefs.set(draftKey(practice.id), prCode.value);
     prefs.set(draftKey(practice.id) + ".lang", prLang ? prLang.value : "");
   }
-  // SP7 fix: a test result belongs to the code + language it ran - once
-  // either changes, the shown results and the summary a grade would carry
+  // A test result belongs to the code + language it ran. Once either
+  // changes, the shown results and the summary a grade would carry
   // are stale, so both go (a run still in flight shows its result but is
   // not kept for the grade; see practiceTest).
   function invalidatePracticeTest() {
@@ -3015,8 +3016,8 @@
       b.classList.toggle("suggest", g === "peeked" && !!(practice && practice.peeked));
     });
   }
-  // Grade buttons: enabled once per re-attempt session (SP7 fix: grading
-  // twice would move the Leitner box twice); a new session re-enables them.
+  // Grade buttons: enabled once per re-attempt session (grading twice
+  // would move the Leitner box twice); a new session re-enables them.
   function setGradeButtons(on) {
     if (!prGrade) return;
     prGrade.querySelectorAll("[data-grade]").forEach(function (x) { x.disabled = !on; });
@@ -3126,7 +3127,7 @@
 
   function openPractice(pid, opts) {
     opts = opts || {};
-    // SP7 fix: retire the viewer's notes editor BEFORE the fetch, so its
+    // Retire the viewer's notes editor BEFORE the fetch, so its
     // unsent text is queued and the snapshot below knows a save is landing.
     retireViewerNotes();
     var notesWereBusy = notesBusy(pid);
@@ -3306,8 +3307,8 @@
         returnFocus: prGiveup,
       }).then(function (yes) {
         if (!yes || practice !== p) return;
-        // SP8 fix M7: skip docs no longer in the library listing, and fall
-        // back to the next candidate when one 404s (deleted since the listing).
+        // Skip docs missing from the library listing, and fall back to the
+        // next candidate when one 404s (deleted since the listing).
         var candidates = core.docCandidatesFor(p.rec, libListed ? libByPath : null);
         var NO_SOLUTION = "No saved solution for this problem: its study docs were deleted, " +
           "or it has none yet.";
@@ -3367,7 +3368,7 @@
         })
         .then(function (res) {
           if (practice !== p) return;
-          p.graded = true; // SP7 fix: a second click would move the box again
+          p.graded = true; // a second click would move the box again
           p.rec.review = res.review;
           var when = core.dueLabel(res.review.due, todayKey());
           var msg = "Graded “" + GRADE_LABELS[grade] + "” — box " + res.review.box + ", next review " +
@@ -3537,5 +3538,5 @@
   // ---- boot ---------------------------------------------------------------
   enterIdle();
   loadLibrary(); // stats / streak render once it answers (no empty flash)
-  loadReview();  // SP7 / D4: the Console "Due today" panel
+  loadReview();  // D4: the Console "Due today" panel
 })();
