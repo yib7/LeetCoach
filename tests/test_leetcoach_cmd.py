@@ -81,8 +81,8 @@ def _run(stage, extra_env=None, *, cwd=None):
 
 # --- 3A S7: a repo folder whose path contains "!" ---------------------------
 # With EnableDelayedExpansion on, cmd.exe strips "!" out of an expanded
-# %~dp0, so `cd /d "%~dp0"` and "%~dp0setup.ps1" pointed at a path that does
-# not exist ("The system cannot find the path specified"). Run from an
+# %~dp0, so `cd /d "%~dp0"` and the script paths built on %~dp0 pointed at a
+# path that does not exist ("The system cannot find the path specified"). Run from an
 # unrelated cwd (like a desktop shortcut) so a failed `cd` can't be masked.
 
 _LOUD_AUTH_PS1 = 'Write-Host "FAKE AUTH RAN"\nexit 0\n'
