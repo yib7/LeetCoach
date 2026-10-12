@@ -192,7 +192,6 @@ class RunState:
             self._committed = True
 
 
-
 def sse_text(delta: str) -> str:
     """A streamed text delta. JSON-encoded so newlines/markdown survive transport
     (a raw newline is an SSE event boundary)."""

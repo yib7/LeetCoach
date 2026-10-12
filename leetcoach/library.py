@@ -289,4 +289,3 @@ def resolve_file(rel: str) -> Path | None:
     if _is_hidden(root, resolved):  # B19: app metadata is not a library file
         return None
     return resolved
-

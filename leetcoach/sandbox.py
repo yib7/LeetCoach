@@ -218,7 +218,6 @@ _BLOCKED_RE = re.compile(
 )
 
 
-
 def _secret_paths() -> list:
     """Paths the C6 audit hook refuses to open or list (defence in depth).
 
