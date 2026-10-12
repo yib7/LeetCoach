@@ -208,6 +208,8 @@ Do not expose LeetCoach to a network or run it as a shared/multi-user service.
 ## Reporting a vulnerability
 
 If you find a security issue, please report it privately rather than opening a public
-issue: use this repository's **Security Advisories** tab on GitHub
-("Report a vulnerability"). Please include steps to reproduce. Since this is a personal
-project there is no formal SLA, but reports are appreciated and will be looked at.
+issue: use GitHub's private vulnerability reporting, under this repository's
+**Security** tab ("Report a vulnerability"), or go straight to
+<https://github.com/yib7/LeetCoach/security/advisories/new>. Please include steps to
+reproduce. Since this is a personal project there is no formal SLA, but reports are
+appreciated and will be looked at.
