@@ -25,8 +25,8 @@ import time
 import pytest
 from _helpers import pid_alive, wait_dead
 
-import app as app_module
-import claude_cli
+from leetcoach import app as app_module
+from leetcoach import claude_cli
 
 REAL_AUTH_RUNNER = claude_cli._default_auth_runner
 

@@ -13,9 +13,8 @@ from pathlib import Path
 import pytest
 from _helpers import CLASSIFY_JSON, parse_sse
 
-import app as app_module
-import claude_cli
-import sandbox
+from leetcoach import app as app_module
+from leetcoach import claude_cli, sandbox
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = {"problem": "Two Sum\nExample: Input: 1\nOutput: 1", "mode": "learning",
@@ -65,7 +64,7 @@ def _in_thread(fn):
 
 
 def _app_js() -> str:
-    return (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    return (ROOT / "leetcoach" / "static" / "app.js").read_text(encoding="utf-8")
 
 
 # --- I1: a pinned model id is not overridden by its own picker alias -----------
@@ -114,7 +113,7 @@ def test_stop_cancel_request_has_a_short_timeout():
 # --- M1: a cancel that arrives after the run committed to saving ---------------
 
 def test_cancel_after_commit_is_refused_and_the_run_saves(env, monkeypatch):
-    import storage
+    from leetcoach import storage
 
     saving = threading.Event()
     release = threading.Event()
@@ -176,7 +175,7 @@ def test_client_does_not_show_stopped_when_the_run_already_committed():
     # tests/js/core.test.js); Stop must still route through it.
     js = _app_js()
     assert 'core.cancelOutcome(r.status, d) === "committed"' in js
-    core_js = (ROOT / "static" / "lib" / "core.js").read_text(encoding="utf-8")
+    core_js = (ROOT / "leetcoach" / "static" / "lib" / "core.js").read_text(encoding="utf-8")
     assert "body.cancelled === false" in core_js
 
 

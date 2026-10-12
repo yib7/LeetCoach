@@ -13,3 +13,10 @@ line-length = 100
 # set is the formatting gate: E501 holds `line-length`, W catches trailing
 # whitespace and a missing final newline.
 extend-select = ["I", "E", "W"]
+
+[tool.pytest.ini_options]
+# The suite imports the `leetcoach` package from the repo root and shares
+# helpers between test modules (`from _helpers import ...`), so both
+# directories go on sys.path however pytest is invoked.
+testpaths = ["tests"]
+pythonpath = [".", "tests"]

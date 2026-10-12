@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-VENDOR = ROOT / "static" / "vendor"
+VENDOR = ROOT / "leetcoach" / "static" / "vendor"
 
 
 def _head(name: str) -> str:

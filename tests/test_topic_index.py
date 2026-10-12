@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-import topic_index
+from leetcoach import topic_index
 
 
 @pytest.fixture
@@ -191,7 +191,7 @@ LEARNING_MARKDOWN = "# Learning\n\nA hash map remembers seen values.\n"
 def test_learning_route_passes_known_topics_to_prompt(tmp_path, monkeypatch):
     """The Learning route must (a) feed already-learned topics into
     build_learning and (b) record the run's topics afterward."""
-    import app as app_module
+    from leetcoach import app as app_module
 
     # Index points at a tmp file pre-seeded with a known topic.
     idx = tmp_path / "topic_index.json"
@@ -249,7 +249,7 @@ def test_learning_route_passes_known_topics_to_prompt(tmp_path, monkeypatch):
 def test_record_retries_a_locked_index_instead_of_losing_the_update(idx_path, monkeypatch):
     import os as _os
 
-    import fsutil
+    from leetcoach import fsutil
 
     topic_index.record("dp", ["memoization"])
     real_replace = _os.replace
@@ -269,7 +269,7 @@ def test_record_retries_a_locked_index_instead_of_losing_the_update(idx_path, mo
 
 
 def test_record_leaves_no_tmp_when_the_write_finally_fails(idx_path, monkeypatch):
-    import fsutil
+    from leetcoach import fsutil
 
     def locked(src, dst):
         raise PermissionError(13, "locked")
@@ -295,7 +295,7 @@ def test_corrupt_index_is_preserved_as_corrupt_copy_not_overwritten(idx_path):
 
 
 def test_record_goes_through_the_atomic_helper(idx_path, monkeypatch):
-    import fsutil
+    from leetcoach import fsutil
 
     seen = []
     real = fsutil.atomic_write_text

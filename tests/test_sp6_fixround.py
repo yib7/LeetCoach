@@ -10,9 +10,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-import fsutil
-import problem_store as ps
-import prompts
+from leetcoach import fsutil, prompts
+from leetcoach import problem_store as ps
 
 NOW = datetime(2026, 10, 8, 14, 30).astimezone()
 

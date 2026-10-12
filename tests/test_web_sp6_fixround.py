@@ -7,7 +7,7 @@ import json
 
 from test_web_sp6 import _client, _run, _run_fn, out  # noqa: F401 - fixture
 
-import problem_store
+from leetcoach import problem_store
 
 
 def test_problems_list_has_run_count_file_count_and_paths(out):  # noqa: F811
@@ -63,7 +63,7 @@ def test_listing_carries_the_record_title_and_number(out):  # noqa: F811
 
 
 def test_a_run_that_saved_nothing_is_not_logged(out, monkeypatch):  # noqa: F811
-    import storage
+    from leetcoach import storage
 
     monkeypatch.setattr(storage, "save_answer", lambda *a, **k: (None, None))
     events = _run(_client(_run_fn()))

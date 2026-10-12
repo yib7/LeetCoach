@@ -17,8 +17,8 @@ import time
 
 from _helpers import parse_sse
 
-import app as app_module
-import claude_cli
+from leetcoach import app as app_module
+from leetcoach import claude_cli
 
 RUN_PAYLOAD = {
     "problem": "Two Sum: return indices of two numbers adding to target.",

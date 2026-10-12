@@ -9,10 +9,9 @@ import os
 
 import pytest
 
-import app as app_module
-import claude_cli
-import flashcards as fc
-import problem_store
+from leetcoach import app as app_module
+from leetcoach import claude_cli, problem_store
+from leetcoach import flashcards as fc
 
 
 def _doc(section: str, tail: str = "") -> str:

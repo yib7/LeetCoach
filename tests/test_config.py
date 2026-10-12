@@ -10,7 +10,7 @@ Covered:
 """
 from __future__ import annotations
 
-import config
+from leetcoach import config
 
 # --- model_alias ----------------------------------------------------------
 
@@ -174,7 +174,7 @@ def test_upsert_aborts_on_undecodable_file(tmp_path):
 
 
 def test_upsert_writes_atomically(tmp_path, monkeypatch):
-    import fsutil
+    from leetcoach import fsutil
 
     seen = []
     real = fsutil.atomic_write_text

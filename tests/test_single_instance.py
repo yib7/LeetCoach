@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 from werkzeug.serving import make_server
 
-import app as app_module
-import claude_cli
+from leetcoach import app as app_module
+from leetcoach import claude_cli
 
 
 def _authed():
@@ -43,7 +43,8 @@ def test_healthz_identifies_leetcoach():
 def test_version_matches_the_latest_changelog_release():
     # The Cycle 11 release; the CHANGELOG's newest entry must name the same version.
     assert app_module.VERSION == "1.5.0"
-    changelog = (Path(app_module.__file__).parent / "CHANGELOG.md").read_text(encoding="utf-8")
+    repo_root = Path(__file__).resolve().parent.parent
+    changelog = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
     first = next(line for line in changelog.splitlines() if line.startswith("## ["))
     assert first.startswith(f"## [{app_module.VERSION}]")
 

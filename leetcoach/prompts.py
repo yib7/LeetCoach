@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import secrets
 
-import patterns
+from leetcoach import patterns
 
 # --- personas (A7) -------------------------------------------------------
 #

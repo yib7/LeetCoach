@@ -4,7 +4,7 @@
  * tier only for Answer (O2) and display titles (O3). */
 var assert = require("assert");
 var path = require("path");
-var core = require(path.join(__dirname, "..", "..", "static", "lib", "core.js"));
+var core = require(path.join(require("./paths.js").STATIC, "lib", "core.js"));
 var dom = require(path.join(__dirname, "fakedom.js"));
 
 function tags(node) {

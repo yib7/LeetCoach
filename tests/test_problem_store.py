@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-import problem_store as ps
+from leetcoach import problem_store as ps
 
 LC_PASTE = (
     "1. Two Sum\n"

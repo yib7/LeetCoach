@@ -70,18 +70,20 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, stream_with_context
 
-import classifier
-import claude_cli
-import config
-import flashcards
-import parsing
-import practice
-import problem_store
-import prompts
-import sandbox
-import stats
-import storage
-import topic_index
+from leetcoach import (
+    classifier,
+    claude_cli,
+    config,
+    flashcards,
+    parsing,
+    practice,
+    problem_store,
+    prompts,
+    sandbox,
+    stats,
+    storage,
+    topic_index,
+)
 
 
 def _maybe_load_dotenv(path: Path) -> None:
@@ -106,16 +108,16 @@ def _maybe_load_dotenv(path: Path) -> None:
         load_dotenv(stream=io.StringIO(text))
 
 
-# Load .env from the project root (next to this file) if present, so LEETCOACH_*
+# Load .env from the repo root (config.DOTENV_FILE) if present, so LEETCOACH_*
 # settings written to a .env take effect for `python app.py` and WSGI imports.
 # The test suite sets LEETCOACH_NO_DOTENV=1 (tests/conftest.py) so importing
-# `app` never reads the developer's real .env or leaks its settings into the
-# test process.
-_maybe_load_dotenv(Path(__file__).resolve().parent / ".env")
+# this module never reads the developer's real .env or leaks its settings into
+# the test process.
+_maybe_load_dotenv(config.DOTENV_FILE)
 
-HERE = Path(__file__).resolve().parent
-TEMPLATES = HERE / "templates"
-STATIC = HERE / "static"
+# The page and its assets ship inside the package.
+TEMPLATES = config.PACKAGE_DIR / "templates"
+STATIC = config.PACKAGE_DIR / "static"
 
 # Bind address for `python app.py` (single source of truth — the Host-header
 # allowlist below keys off loopback hostnames, so no port is duplicated here).
@@ -1005,7 +1007,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     # across the whole suite is redirected away from the real `.env` by
     # default, not just the couple of tests that override app.config by hand.
     app.config["DOTENV_PATH"] = os.environ.get(
-        "LEETCOACH_DOTENV_PATH", str(HERE / ".env")
+        "LEETCOACH_DOTENV_PATH", str(config.DOTENV_FILE)
     )
 
     # In-flight /run de-duplication (P2-12): a single-user local tool should not

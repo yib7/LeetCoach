@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 
-import classifier
+from leetcoach import classifier
 
 
 def make_run_fn(deltas):
@@ -101,27 +101,27 @@ def test_falls_back_and_logs_when_the_claude_call_raises(caplog):
         raise RuntimeError("claude exited 1")
         yield  # pragma: no cover - makes this a generator like claude_cli.run
 
-    with caplog.at_level(logging.WARNING, logger="classifier"):
+    with caplog.at_level(logging.WARNING, logger="leetcoach.classifier"):
         result = classifier.classify("text", run_fn=run_fn)
     assert result.problem_type == "uncategorized"
     assert result.topics == []
-    rec = next(r for r in caplog.records if r.name == "classifier")
+    rec = next(r for r in caplog.records if r.name == "leetcoach.classifier")
     assert "claude exited 1" in rec.getMessage() and rec.exc_info is not None
 
 
 def test_an_expected_cli_failure_is_one_warning_line_without_a_traceback(caplog):
     # 3A G2 (found by the 3.12 signed-out probe): the run's own failure is one
     # line, so the classifier must not add a traceback for the same cause.
-    import claude_cli
+    from leetcoach import claude_cli
 
     def run_fn(prompt, **kwargs):
         raise claude_cli.ClaudeUnavailableError("Failed to authenticate: OAuth session expired")
         yield  # pragma: no cover - makes this a generator like claude_cli.run
 
-    with caplog.at_level(logging.WARNING, logger="classifier"):
+    with caplog.at_level(logging.WARNING, logger="leetcoach.classifier"):
         result = classifier.classify("text", run_fn=run_fn)
     assert result == classifier.Classification("uncategorized", [])
-    rec = next(r for r in caplog.records if r.name == "classifier")
+    rec = next(r for r in caplog.records if r.name == "leetcoach.classifier")
     assert rec.levelno == logging.WARNING and "OAuth session expired" in rec.getMessage()
     assert not rec.exc_info
 
@@ -129,16 +129,16 @@ def test_an_expected_cli_failure_is_one_warning_line_without_a_traceback(caplog)
 def test_a_cancelled_call_falls_back_quietly(caplog):
     # 3A C12: a cancel (client disconnect, expired join) is normal, not a
     # WARNING with a traceback.
-    import claude_cli
+    from leetcoach import claude_cli
 
     def run_fn(prompt, **kwargs):
         raise claude_cli.ClaudeCancelledError("The `claude` run was cancelled.")
         yield  # pragma: no cover - makes this a generator like claude_cli.run
 
-    with caplog.at_level(logging.DEBUG, logger="classifier"):
+    with caplog.at_level(logging.DEBUG, logger="leetcoach.classifier"):
         result = classifier.classify("text", run_fn=run_fn)
     assert result == classifier.Classification("uncategorized", [])
-    records = [r for r in caplog.records if r.name == "classifier"]
+    records = [r for r in caplog.records if r.name == "leetcoach.classifier"]
     assert records and all(r.levelno == logging.DEBUG for r in records)
     assert all(r.exc_info is None for r in records)
 
@@ -180,6 +180,6 @@ def test_default_run_fn_is_claude_cli_run():
     # code needs no wiring, while tests can override it.
     import inspect
 
-    import claude_cli
+    from leetcoach import claude_cli
     sig = inspect.signature(classifier.classify)
     assert sig.parameters["run_fn"].default is claude_cli.run

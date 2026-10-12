@@ -28,7 +28,7 @@ def test_js_unit_tests_pass():
     assert "OK - " in proc.stdout
 
 
-@pytest.mark.parametrize("script", ["static/app.js", "static/lib/core.js"])
+@pytest.mark.parametrize("script", ["leetcoach/static/app.js", "leetcoach/static/lib/core.js"])
 def test_first_party_scripts_parse(script):
     proc = _node("--check", script)
     assert proc.returncode == 0, proc.stderr

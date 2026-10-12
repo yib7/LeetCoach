@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-import app as app_module
+from leetcoach import app as app_module
 
 # A string that exists verbatim in app.py — used to prove a traversal response
 # never leaks the file's content, whatever the status code.
@@ -173,11 +173,11 @@ def test_library_file_rejects_traversal(client, path):
 
 
 def test_library_file_rejects_absolute_path(client):
-    import app as real_app
+    from leetcoach import app as real_app
 
     c, tmp_path = client
     _seed(tmp_path)
-    abs_target = str(real_app.HERE / "app.py")  # C:\...\app.py — a real file
+    abs_target = real_app.__file__  # C:\...\leetcoach\app.py — a real file
     resp = c.get("/library/file", query_string={"path": abs_target})
     assert resp.status_code in (403, 404)
     assert APP_PY_MARKER not in resp.get_data(as_text=True)

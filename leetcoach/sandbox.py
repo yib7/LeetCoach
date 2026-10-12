@@ -72,15 +72,15 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-import config
-from proc_util import (
+from leetcoach import config
+from leetcoach.proc_util import (
     assign_to_job,
     close_job,
     create_job_with_caps,
     kill_process_tree,
     terminate_job,
 )
-from sandbox_bootstrap import (
+from leetcoach.sandbox_bootstrap import (
     CAPS_MARKER,
     CONFIG_LEN_BYTES,
     DENY_PREFIX,
@@ -218,7 +218,6 @@ _BLOCKED_RE = re.compile(
     re.escape(DENY_PREFIX) + r" (?P<event>.+?) is blocked(?: \((?P<why>[^()\n]*)\))?"
 )
 
-_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _secret_paths() -> list:
@@ -246,7 +245,7 @@ def _secret_paths() -> list:
         os.path.join(home, ".docker", "config.json"),
         os.path.join(home, ".kube"),
         os.path.join(home, ".gnupg"),
-        os.path.join(_REPO_DIR, ".env"),
+        str(config.DOTENV_FILE),
     ]
     for var in ("CLAUDE_CONFIG_DIR", "LEETCOACH_DOTENV_PATH"):
         if os.environ.get(var):

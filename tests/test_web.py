@@ -28,8 +28,8 @@ import pytest
 from _helpers import CLASSIFY_JSON
 from _helpers import parse_sse as _parse_sse
 
-import app as app_module
-import claude_cli
+from leetcoach import app as app_module
+from leetcoach import claude_cli
 
 # --- a fake Claude that answers both the classify and the answer prompt ---
 
@@ -691,7 +691,7 @@ def test_ask_rejects_non_string_fields(client, payload):
 # --- config knob: quick_ask_model (tested next to its consumer) ------------
 
 def test_quick_ask_model_knob_defaults_to_haiku(monkeypatch):
-    import config
+    from leetcoach import config
 
     monkeypatch.delenv("LEETCOACH_QUICK_ASK_MODEL", raising=False)
     assert config.quick_ask_model() == "haiku"
@@ -891,7 +891,7 @@ def test_config_model_persists_and_takes_effect(client):
     env_text = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "LEETCOACH_MODEL=sonnet" in env_text
     # ... and live in the process so the next run uses it with no restart
-    import config
+    from leetcoach import config
     assert config.model() == "sonnet"
 
 
@@ -928,7 +928,7 @@ def test_create_app_default_dotenv_path_is_not_the_real_project_env():
     from pathlib import Path
 
     application = app_module.create_app(run_fn=fake_run, auth_probe=_authed_probe)
-    real_env = Path(app_module.__file__).resolve().parent / ".env"
+    real_env = Path(__file__).resolve().parent.parent / ".env"  # the repo-root .env
     assert application.config["DOTENV_PATH"] != str(real_env)
 
     # Snapshot the real .env's metadata (it may genuinely exist -- this is a

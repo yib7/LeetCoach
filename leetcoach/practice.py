@@ -20,8 +20,7 @@ import re
 import threading
 from dataclasses import dataclass
 
-import config
-import sandbox
+from leetcoach import config, sandbox
 
 CODE_CAP = 64 * 1024          # characters of attempt code
 CASE_FIELD_CAP = 10_000       # characters per custom input / expected

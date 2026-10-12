@@ -12,9 +12,8 @@ import time
 import pytest
 from _helpers import CLASSIFY_JSON, parse_sse
 
-import app as app_module
-import claude_cli
-import sandbox
+from leetcoach import app as app_module
+from leetcoach import claude_cli, sandbox
 
 RUN = {"problem": "Two Sum\nExample: Input: 1\nOutput: 1", "mode": "learning",
        "language": "python"}

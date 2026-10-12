@@ -11,8 +11,8 @@ import time
 import pytest
 from _helpers import CLASSIFY_JSON, parse_sse
 
-import app as app_module
-import claude_cli
+from leetcoach import app as app_module
+from leetcoach import claude_cli
 
 RUN = {"problem": "Two Sum\nExample: Input: 1\nOutput: 1", "mode": "learning",
        "language": "python"}
@@ -174,7 +174,7 @@ def test_sse_pings_while_waiting_on_the_classifier(env, monkeypatch):
 
 
 def test_sse_pings_while_verifying(env, monkeypatch):
-    import sandbox
+    from leetcoach import sandbox
 
     monkeypatch.setattr(app_module, "SSE_PING_INTERVAL", 0.05)
 
@@ -309,7 +309,7 @@ def test_cancel_with_a_runner_that_ignores_it_still_saves_nothing(env):
 
 
 def test_cancel_during_verification_saves_nothing(env, monkeypatch):
-    import sandbox
+    from leetcoach import sandbox
 
     verifying = threading.Event()
     release = threading.Event()

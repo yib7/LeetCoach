@@ -18,9 +18,8 @@ import json
 import pytest
 from _helpers import parse_sse
 
-import app as app_module
-import prompts
-import topic_index
+from leetcoach import app as app_module
+from leetcoach import prompts, topic_index
 
 
 @pytest.fixture

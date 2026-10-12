@@ -11,8 +11,8 @@ import time
 import pytest
 from _helpers import CLASSIFY_JSON
 
-import app as app_module
-import claude_cli
+from leetcoach import app as app_module
+from leetcoach import claude_cli
 
 
 def _authed():
@@ -161,6 +161,6 @@ def test_an_oversized_problem_is_refused_before_any_claude_call(env):
 
 
 def test_problem_cap_matches_the_stored_statement_cap():
-    import problem_store
+    from leetcoach import problem_store
 
     assert app_module.PROBLEM_MAX_CHARS == problem_store.STATEMENT_CAP

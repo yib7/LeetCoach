@@ -12,8 +12,7 @@ import re
 
 import pytest
 
-import classifier
-import prompts
+from leetcoach import classifier, prompts
 
 FORGED = (
     "Two Sum: return indices adding to target.\n"

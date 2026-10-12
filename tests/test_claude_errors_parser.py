@@ -18,7 +18,7 @@ import sys
 
 import pytest
 
-import claude_cli
+from leetcoach import claude_cli
 
 
 def _deltas(lines):

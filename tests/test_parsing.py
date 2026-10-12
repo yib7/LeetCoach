@@ -6,7 +6,7 @@ fall back to the first fence of any kind, and never raise on prose-only text.
 """
 from __future__ import annotations
 
-import parsing
+from leetcoach import parsing
 
 
 def test_extracts_matching_language_fence():

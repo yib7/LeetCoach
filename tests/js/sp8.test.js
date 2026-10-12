@@ -3,7 +3,7 @@
  * "resumed vs fallback" source label and the done message. */
 var assert = require("assert");
 var path = require("path");
-var core = require(path.join(__dirname, "..", "..", "static", "lib", "core.js"));
+var core = require(path.join(require("./paths.js").STATIC, "lib", "core.js"));
 
 test("followupCheck: empty, whitespace, too long, ok", function () {
   assert.deepStrictEqual(core.followupCheck("", 2000),

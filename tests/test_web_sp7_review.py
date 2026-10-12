@@ -8,9 +8,8 @@ from datetime import date, timedelta
 
 import pytest
 
-import app as app_module
-import claude_cli
-import problem_store
+from leetcoach import app as app_module
+from leetcoach import claude_cli, problem_store
 
 PASTE = ("1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\n"
          "Input: nums = [2,7], target = 9\nOutput: [0,1]")

@@ -10,10 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import app as app_module
-import claude_cli
-import practice
-import problem_store
+from leetcoach import app as app_module
+from leetcoach import claude_cli, practice, problem_store
 
 PASTE = (
     "1. Two Sum\nEasy\n\nGiven an array of integers nums and an integer target, return the "
@@ -284,7 +282,7 @@ def test_a_sandbox_failure_is_a_json_error_and_frees_the_slot(
 
 def test_an_unwritable_temp_dir_is_a_json_error(client, root, monkeypatch):
     # the real path: sandbox.verify_python's mkdtemp fails (full / read-only temp)
-    import sandbox
+    from leetcoach import sandbox
 
     pid = _seed(root)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-import stats
+from leetcoach import stats
 
 NOW = datetime(2026, 10, 8, 18, 0).astimezone()  # local zone, aware
 

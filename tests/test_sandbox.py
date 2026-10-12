@@ -22,8 +22,7 @@ import time
 
 import pytest
 
-import parsing
-import sandbox
+from leetcoach import parsing, sandbox
 
 # --- verify_python: pass / fail / error ----------------------------------
 
@@ -396,7 +395,7 @@ def test_memory_cap_applies_on_first_call_in_fresh_interpreter():
     exactly why this probe runs in a brand-new python subprocess: its first
     verification IS the cold path, same as the Flask app's first run."""
     probe = (
-        "import sandbox\n"
+        "from leetcoach import sandbox\n"
         "hog = 'data = bytearray(1024 * 1024 * 1024)\\nprint(\"survived\")\\n'\n"
         "r = sandbox.verify_python(hog, '', 'whatever', timeout=10)\n"
         "print('PROBE', r.status, r.note)\n"
@@ -405,7 +404,7 @@ def test_memory_cap_applies_on_first_call_in_fresh_interpreter():
     out = subprocess.run(
         [sys.executable, "-c", probe],
         capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=45,
-        cwd=repo_root,   # `-c` puts the cwd on sys.path -> `import sandbox` works
+        cwd=repo_root,   # `-c` puts the cwd on sys.path -> `from leetcoach import sandbox` works
     )
     assert out.returncode == 0, (out.stdout, out.stderr)
     marker = [ln for ln in out.stdout.splitlines() if ln.startswith("PROBE ")]
@@ -790,7 +789,7 @@ def test_aggregation_keeps_the_note_for_a_passing_sample_too():
 # --- P2-4: LEETCOACH_VERIFY_TIMEOUT knob -----------------------------------
 
 def test_verify_timeout_env_knob_defaults_and_invalid_values_fall_back(monkeypatch):
-    import config
+    from leetcoach import config
     monkeypatch.delenv("LEETCOACH_VERIFY_TIMEOUT", raising=False)
     assert config.verify_timeout() == 10.0
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "not-a-number")
@@ -810,7 +809,7 @@ def test_verify_timeout_env_knob_defaults_and_invalid_values_fall_back(monkeypat
 # --- B5: timeouts are floats end-to-end; config clamps to (0, 86400] -------
 
 def test_verify_timeout_rejects_inf_and_clamps_out_of_range(monkeypatch):
-    import config
+    from leetcoach import config
     # +inf/-inf must not disable the containment timeout (B5).
     monkeypatch.setenv("LEETCOACH_VERIFY_TIMEOUT", "inf")
     assert config.verify_timeout() == 10.0
@@ -837,7 +836,7 @@ def test_verify_timeout_rejects_inf_and_clamps_out_of_range(monkeypatch):
 
 
 def test_run_timeout_rejects_inf_and_clamps_out_of_range(monkeypatch):
-    import config
+    from leetcoach import config
     monkeypatch.setenv("LEETCOACH_RUN_TIMEOUT", "inf")
     assert config.run_timeout() == 600.0
     # #6: clamped to the ceiling, not discarded to the default.

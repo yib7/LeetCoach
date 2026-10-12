@@ -16,12 +16,8 @@ import time
 import pytest
 from _helpers import parse_sse
 
-import app as app_module
-import claude_cli
-import fsutil
-import problem_store
-import prompts
-import storage
+from leetcoach import app as app_module
+from leetcoach import claude_cli, fsutil, problem_store, prompts, storage
 
 PASTE = "1. Two Sum\nEasy\nGiven nums, return indices.\nExample: Input: 1\nOutput: 1"
 ANSWER_DOC = (

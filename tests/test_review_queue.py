@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-import problem_store as ps
+from leetcoach import problem_store as ps
 
 PASTE = ("1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\n"
          "Input: nums = [2,7], target = 9\nOutput: [0,1]")

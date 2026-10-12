@@ -20,9 +20,7 @@ import os
 import sys
 import threading
 
-import claude_cli
-import config
-import proc_util
+from leetcoach import claude_cli, config, proc_util
 
 # --- fakes ---------------------------------------------------------------
 

@@ -39,8 +39,7 @@ import threading
 import unicodedata
 from pathlib import Path
 
-import config
-import fsutil
+from leetcoach import config, fsutil
 
 # Extension chosen per answer language. Anything unknown falls back to ``.txt``
 # so an unexpected language never produces a separator-bearing extension.

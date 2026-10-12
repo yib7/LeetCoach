@@ -4,7 +4,7 @@
  * caller can fall back to the next one on a 404. */
 var assert = require("assert");
 var path = require("path");
-var core = require(path.join(__dirname, "..", "..", "static", "lib", "core.js"));
+var core = require(path.join(require("./paths.js").STATIC, "lib", "core.js"));
 
 var REC = {
   log: [

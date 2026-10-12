@@ -19,8 +19,7 @@ from pathlib import Path
 
 import pytest
 
-import config
-import storage
+from leetcoach import config, storage
 
 
 @pytest.fixture
@@ -33,12 +32,13 @@ def out_root(tmp_path, monkeypatch):
 
 # --- config: default output dir is anchored, not CWD-relative (P2-10) ----
 
-def test_default_output_dir_is_anchored_next_to_config(monkeypatch):
+def test_default_output_dir_is_anchored_at_the_repo_root(monkeypatch):
     # Without the env override, output_dir() must be an ABSOLUTE path anchored
-    # to the directory containing config.py — launching from another CWD
-    # (e.g. `flask run` elsewhere) must not fork the study library.
+    # to the repo root (where output/ has always lived, also after the code
+    # moved into leetcoach/) — launching from another CWD (e.g. `flask run`
+    # elsewhere) must not fork the study library.
     monkeypatch.delenv("LEETCOACH_OUTPUT_DIR", raising=False)
-    expected = Path(config.__file__).resolve().parent / "output"
+    expected = Path(__file__).resolve().parent.parent / "output"
     assert config.output_dir() == expected
     assert config.output_dir().is_absolute()
 
@@ -592,7 +592,7 @@ def test_save_unsorted_writes_hash_named_fallback(out_root):
 
 
 def test_answer_pair_is_written_all_or_nothing(out_root, monkeypatch):
-    import fsutil
+    from leetcoach import fsutil
 
     real_replace = os.replace
 

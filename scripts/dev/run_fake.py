@@ -148,7 +148,7 @@ def _review_prompt(problem: str, attempt: str) -> str:
     """A Code Review prompt as prompts.build_review writes one (its review
     sections included, so the fake doc follows the review contract)."""
     sys.path.insert(0, str(ROOT))
-    import prompts  # imports nothing that reads .env
+    from leetcoach import prompts  # imports nothing that reads .env
 
     return prompts.build_review(problem, attempt, language="python")
 
@@ -390,7 +390,7 @@ def main(argv: list[str], *, probe=running_instance) -> int:
     output = configure(scratch, keep="--keep" in argv)
     sys.path.insert(0, str(ROOT))
     os.chdir(ROOT)
-    import app  # env must be set first
+    from leetcoach import app  # env must be set first
 
     app.PORT = PORT
     print("LeetCoach FAKE mode - the claude CLI is scripts/dev/fake_claude (never real Claude).")

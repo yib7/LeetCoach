@@ -1,7 +1,7 @@
 "use strict";
 var assert = require("assert");
 var path = require("path");
-var core = require(path.join(__dirname, "..", "..", "static", "lib", "core.js"));
+var core = require(path.join(require("./paths.js").STATIC, "lib", "core.js"));
 
 // ---- model chip --------------------------------------------------------------
 test("modelLabel maps known ids and falls back to the raw id", function () {
@@ -304,7 +304,7 @@ test("time helpers", function () {
 // ---- hardened marked renderer (with the vendored marked) -----------------------------------
 test("hardened renderer: raw HTML escaped, unsafe links/images neutralised, & not double-escaped", function () {
   global.window = global.window || global;
-  var m = require(path.join(__dirname, "..", "..", "static", "vendor", "marked.min.js"));
+  var m = require(path.join(require("./paths.js").STATIC, "vendor", "marked.min.js"));
   var Marked = m.Marked;
   var md = new Marked();
   md.use({ renderer: core.hardenedRenderer() });
@@ -325,7 +325,7 @@ test("hardened renderer: raw HTML escaped, unsafe links/images neutralised, & no
 
 function hardenedMarked() {
   global.window = global.window || global;
-  var m = require(path.join(__dirname, "..", "..", "static", "vendor", "marked.min.js"));
+  var m = require(path.join(require("./paths.js").STATIC, "vendor", "marked.min.js"));
   var md = new m.Marked();
   md.use({ renderer: core.hardenedRenderer() });
   return md;

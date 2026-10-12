@@ -63,10 +63,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import config
-import fsutil
-import patterns
-import storage
+from leetcoach import config, fsutil, patterns, storage
 
 META_DIR = ".leetcoach"
 PROBLEMS_DIR = "problems"

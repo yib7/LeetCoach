@@ -23,9 +23,8 @@ import pytest
 from _helpers import CLASSIFY_JSON
 from _helpers import parse_sse as _parse_sse
 
-import app as app_module
-import parsing
-import topic_index
+from leetcoach import app as app_module
+from leetcoach import parsing, topic_index
 
 # A problem with one parseable sample (mirrors test_sandbox.py's fixture).
 PROBLEM_WITH_SAMPLE = (
@@ -193,7 +192,7 @@ CRASHING_ANSWER = (
 def test_saved_traceback_does_not_leak_the_temp_run_dir(tmp_path, monkeypatch):
     # The library is the user's to share; a saved doc must not carry the
     # absolute temp path (and with it the OS user name) of the sandbox run.
-    import sandbox
+    from leetcoach import sandbox
 
     c = _make_client(tmp_path, monkeypatch, CRASHING_ANSWER)
     resp = _post_run(c, "answer")

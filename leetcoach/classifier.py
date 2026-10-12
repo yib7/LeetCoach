@@ -15,9 +15,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 
-import claude_cli
-import patterns
-import prompts
+from leetcoach import claude_cli, patterns, prompts
 
 logger = logging.getLogger(__name__)
 

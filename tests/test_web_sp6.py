@@ -12,10 +12,8 @@ from types import SimpleNamespace
 import pytest
 from _helpers import freeze_stats_now, local_noon, parse_sse
 
-import app as app_module
-import claude_cli
-import problem_store
-import sandbox
+from leetcoach import app as app_module
+from leetcoach import claude_cli, problem_store, sandbox
 
 PASTE = ("1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\n"
          "Input: nums = [2,7], target = 9\nOutput: [0,1]")

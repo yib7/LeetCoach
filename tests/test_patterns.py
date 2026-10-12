@@ -14,8 +14,7 @@ import json
 
 import pytest
 
-import classifier
-import patterns
+from leetcoach import classifier, patterns
 
 
 def _classify(reply: str, problem: str = "text"):

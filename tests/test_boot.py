@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from flask import Flask
 
-import app as app_module
+from leetcoach import app as app_module
 
 
 def test_app_module_imports_and_has_module_level_app():
@@ -39,14 +39,16 @@ def test_create_app_constructs_without_live_claude():
 def test_all_core_modules_import():
     """Every first-party module imports cleanly (no import-time side effects that
     need a live claude / network)."""
-    import classifier  # noqa: F401
-    import claude_cli  # noqa: F401
-    import config  # noqa: F401
-    import parsing  # noqa: F401
-    import prompts  # noqa: F401
-    import sandbox  # noqa: F401
-    import storage  # noqa: F401
-    import topic_index  # noqa: F401
+    from leetcoach import (
+        classifier,  # noqa: F401
+        claude_cli,  # noqa: F401
+        config,  # noqa: F401
+        parsing,  # noqa: F401
+        prompts,  # noqa: F401
+        sandbox,  # noqa: F401
+        storage,  # noqa: F401
+        topic_index,  # noqa: F401
+    )
 
 
 # --- B8: LEETCOACH_NO_DOTENV must actually gate the dotenv load ------------

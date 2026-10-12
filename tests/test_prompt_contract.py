@@ -5,8 +5,7 @@ import re
 
 import pytest
 
-import patterns
-import prompts
+from leetcoach import patterns, prompts
 
 PROBLEM = ("1. Two Sum\nEasy\nGiven an array nums and a target...\n"
            "Input: nums = [2,7], target = 9\nOutput: [0,1]")

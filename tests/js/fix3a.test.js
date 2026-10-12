@@ -3,7 +3,7 @@
  * the page) and W8 (Quick Ask sends only the problem context the server uses). */
 var assert = require("assert");
 var path = require("path");
-var core = require(path.join(__dirname, "..", "..", "static", "lib", "core.js"));
+var core = require(path.join(require("./paths.js").STATIC, "lib", "core.js"));
 
 // ---- W6: makeRequestSeq -------------------------------------------------------
 
@@ -62,7 +62,7 @@ test("makeRequestSeq: separate sequences are independent", function () {
 // app.js is one DOM-bound IIFE the zero-dependency harness cannot boot, so the
 // wiring of the guard into it is checked at the source level.
 var fs = require("fs");
-var APP = fs.readFileSync(path.join(__dirname, "..", "..", "static", "app.js"), "utf8");
+var APP = fs.readFileSync(path.join(require("./paths.js").STATIC, "app.js"), "utf8");
 
 function fnBody(name) {
   var start = APP.indexOf("function " + name + "(");

@@ -3,7 +3,7 @@
  * Diff column (D1) and per-run grouping for the recents + Stats fallback (A8). */
 var assert = require("assert");
 var path = require("path");
-var core = require(path.join(__dirname, "..", "..", "static", "lib", "core.js"));
+var core = require(path.join(require("./paths.js").STATIC, "lib", "core.js"));
 var dom = require(path.join(__dirname, "fakedom.js"));
 
 function guidedDoc() {

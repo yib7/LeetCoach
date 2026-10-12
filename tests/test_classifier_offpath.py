@@ -25,8 +25,8 @@ import threading
 from _helpers import CLASSIFY_JSON
 from _helpers import parse_sse as _parse_sse
 
-import app as app_module
-import config
+from leetcoach import app as app_module
+from leetcoach import config
 
 ANSWER_MARKDOWN = (
     "Reasoning first.\n\n"

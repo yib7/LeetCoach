@@ -19,8 +19,7 @@ import time
 
 import pytest
 
-import claude_cli
-import proc_util
+from leetcoach import claude_cli, proc_util
 
 
 class _JobRecorder:

@@ -4,7 +4,7 @@
  * flashcard deck wrap (D10), notes status (D9) and the Code Review mode name (D5). */
 var assert = require("assert");
 var path = require("path");
-var core = require(path.join(__dirname, "..", "..", "static", "lib", "core.js"));
+var core = require(path.join(require("./paths.js").STATIC, "lib", "core.js"));
 
 test("modeName / modeLabel / untiered know Code Review", function () {
   assert.strictEqual(core.modeName("review"), "Code Review");

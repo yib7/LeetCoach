@@ -28,7 +28,7 @@ import time
 import pytest
 from _helpers import pid_alive, wait_dead
 
-import claude_cli
+from leetcoach import claude_cli
 
 
 def _kill_pid(pid):
@@ -172,7 +172,7 @@ def test_posix_group_cleanup_kills_the_cli_group_once_it_exited(monkeypatch, pee
 
 
 def test_proc_util_group_helpers_never_raise(monkeypatch):
-    import proc_util
+    from leetcoach import proc_util
 
     def gone(*args):
         raise ProcessLookupError

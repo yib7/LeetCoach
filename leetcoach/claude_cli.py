@@ -75,12 +75,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
-import config
-
 # Re-exported under the historical private name: this module's tests (and any
 # older callers) reach the tree-kill via ``claude_cli._kill_process_tree``.
-import proc_util
-from proc_util import kill_process_tree as _kill_process_tree
+from leetcoach import config, proc_util
+from leetcoach.proc_util import kill_process_tree as _kill_process_tree
 
 logger = logging.getLogger(__name__)
 

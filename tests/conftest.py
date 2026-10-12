@@ -39,7 +39,7 @@ from types import SimpleNamespace
 import pytest
 from _helpers import FAKE_CLAUDE_HELP
 
-import claude_cli
+from leetcoach import claude_cli
 
 # See module docstring: must run at import time, not inside a fixture.
 os.environ.setdefault("LEETCOACH_NO_DOTENV", "1")

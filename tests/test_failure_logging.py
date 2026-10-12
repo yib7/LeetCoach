@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import logging
 
-import app as app_module
-import claude_cli
+from leetcoach import app as app_module
+from leetcoach import claude_cli
 
 PROBLEM = ("1. Two Sum\nGiven nums and target, return indices.\n"
            "Input: nums = [2,7], target = 9\nOutput: [0,1]\n")

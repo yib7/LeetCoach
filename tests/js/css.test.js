@@ -5,7 +5,7 @@ var assert = require("assert");
 var fs = require("fs");
 var path = require("path");
 
-var css = fs.readFileSync(path.join(__dirname, "..", "..", "static", "style.css"), "utf8");
+var css = fs.readFileSync(path.join(require("./paths.js").STATIC, "style.css"), "utf8");
 var rootBlock = /:root\s*\{([\s\S]*?)\}/.exec(css)[1];
 var vars = {};
 rootBlock.replace(/--([\w-]+)\s*:\s*(#[0-9a-fA-F]{6})/g, function (_, name, hex) {

@@ -22,10 +22,7 @@ from pathlib import Path
 import pytest
 from _helpers import FAKE_CLAUDE_HELP
 
-import classifier
-import claude_cli
-import config
-import prompts
+from leetcoach import classifier, claude_cli, config, prompts
 
 ALL_FLAGS = claude_cli.parse_help_flags(FAKE_CLAUDE_HELP)
 # Captured at import, before the suite-wide autouse fixture swaps in canned help.
@@ -231,7 +228,7 @@ def test_failed_probe_is_retried_after_short_ttl(monkeypatch):
 
 def _probe_warnings(caplog):
     return [r for r in caplog.records
-            if r.name == "claude_cli" and r.levelno == logging.WARNING
+            if r.name == "leetcoach.claude_cli" and r.levelno == logging.WARNING
             and "--help" in r.getMessage()]
 
 
@@ -242,7 +239,7 @@ def test_failed_help_probe_logs_a_warning_naming_the_exception(monkeypatch, capl
 
     monkeypatch.setattr(claude_cli, "_probe_help_text", boom)
     claude_cli.clear_flag_cache()
-    with caplog.at_level(logging.WARNING, logger="claude_cli"):
+    with caplog.at_level(logging.WARNING, logger="leetcoach.claude_cli"):
         assert claude_cli.cli_supported_flags() == frozenset()
     warning, = _probe_warnings(caplog)
     assert "OSError" in warning.getMessage()
@@ -253,7 +250,7 @@ def test_nonzero_help_probe_logs_the_exit_code(monkeypatch, caplog):
     monkeypatch.setattr(claude_cli, "_probe_help_text", REAL_PROBE_HELP_TEXT)
     monkeypatch.setattr(claude_cli, "_run_bounded", lambda argv, *, timeout, cwd=None: (3, ""))
     claude_cli.clear_flag_cache()
-    with caplog.at_level(logging.WARNING, logger="claude_cli"):
+    with caplog.at_level(logging.WARNING, logger="leetcoach.claude_cli"):
         assert claude_cli.cli_supported_flags() == frozenset()
     warning, = _probe_warnings(caplog)
     assert "exit code 3" in warning.getMessage()
@@ -270,7 +267,7 @@ def test_help_probe_timeout_is_retried_once_before_degrading(monkeypatch, caplog
 
     monkeypatch.setattr(claude_cli, "_probe_help_text", slow_then_ok)
     claude_cli.clear_flag_cache()
-    with caplog.at_level(logging.WARNING, logger="claude_cli"):
+    with caplog.at_level(logging.WARNING, logger="leetcoach.claude_cli"):
         assert "--safe-mode" in claude_cli.cli_supported_flags()
     assert len(calls) == 2
     assert not _probe_warnings(caplog)
@@ -285,7 +282,7 @@ def test_help_probe_timing_out_twice_degrades_with_a_warning(monkeypatch, caplog
 
     monkeypatch.setattr(claude_cli, "_probe_help_text", always_slow)
     claude_cli.clear_flag_cache()
-    with caplog.at_level(logging.WARNING, logger="claude_cli"):
+    with caplog.at_level(logging.WARNING, logger="leetcoach.claude_cli"):
         assert claude_cli.cli_supported_flags() == frozenset()
     assert len(calls) == 2, "a timeout is retried exactly once"
     warning, = _probe_warnings(caplog)
@@ -294,7 +291,7 @@ def test_help_probe_timing_out_twice_degrades_with_a_warning(monkeypatch, caplog
 
 def test_successful_help_probe_logs_nothing(caplog):
     claude_cli.clear_flag_cache()
-    with caplog.at_level(logging.WARNING, logger="claude_cli"):
+    with caplog.at_level(logging.WARNING, logger="leetcoach.claude_cli"):
         assert "--safe-mode" in claude_cli.cli_supported_flags()
     assert not _probe_warnings(caplog)
 
@@ -357,10 +354,10 @@ def test_bounded_probe_runner_withholds_api_billing_env_vars(monkeypatch):
 
 def test_withheld_env_vars_are_logged_once_by_name_only(monkeypatch, caplog):
     _set_billing_env(monkeypatch)
-    with caplog.at_level(logging.INFO, logger="claude_cli"):
+    with caplog.at_level(logging.INFO, logger="leetcoach.claude_cli"):
         claude_cli.child_env()
         claude_cli.child_env()
-    records = [r for r in caplog.records if r.name == "claude_cli"]
+    records = [r for r in caplog.records if r.name == "leetcoach.claude_cli"]
     assert len(records) == 1, "the withheld-vars notice must be logged once per process"
     message = records[0].getMessage()
     for name in _BILLING_VARS:
@@ -372,10 +369,10 @@ def test_child_env_is_silent_when_nothing_is_withheld(monkeypatch, caplog):
     for name in _BILLING_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(claude_cli, "_withheld_logged", False)
-    with caplog.at_level(logging.INFO, logger="claude_cli"):
+    with caplog.at_level(logging.INFO, logger="leetcoach.claude_cli"):
         env = claude_cli.child_env()
     assert env.get("PATH")
-    assert not [r for r in caplog.records if r.name == "claude_cli"]
+    assert not [r for r in caplog.records if r.name == "leetcoach.claude_cli"]
 
 
 # --- neutral cwd ------------------------------------------------------------
@@ -621,7 +618,7 @@ def test_session_id_ignores_non_string_values():
 def test_app_passes_personas_and_persistence_per_call_kind(tmp_path, monkeypatch):
     from _helpers import CLASSIFY_JSON
 
-    import app as app_module
+    from leetcoach import app as app_module
 
     calls = []
 

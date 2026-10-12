@@ -15,12 +15,7 @@ from pathlib import Path
 
 import pytest
 
-import app
-import classifier
-import claude_cli
-import parsing
-import prompts
-import sandbox
+from leetcoach import app, classifier, claude_cli, parsing, prompts, sandbox
 
 ROOT = Path(__file__).resolve().parent.parent
 DEV = ROOT / "scripts" / "dev"
@@ -266,8 +261,7 @@ def test_seed_dates_runs_by_local_calendar_days(tmp_path, monkeypatch):
     # N * 86400 s put the 4-day-old run on the wrong date (a gap in the streak).
     from datetime import date, datetime, timedelta
 
-    import problem_store
-    import stats
+    from leetcoach import problem_store, stats
 
     run_fake = _load_run_fake()
     frozen = datetime(2026, 3, 12, 0, 30).astimezone()
@@ -374,8 +368,7 @@ def test_fake_contract_survives_crlf_prompts(flags):
 
 
 def test_seed_has_a_run_log_problem_records_and_legacy_files(tmp_path):
-    import problem_store
-    import stats
+    from leetcoach import problem_store, stats
 
     run_fake = _load_run_fake()
     out = tmp_path / "output"
@@ -428,7 +421,7 @@ def test_fake_learning_doc_has_no_solution_shaped_code(flags, language):
 
 
 def test_seed_has_a_no_walkthrough_guided_doc_and_no_guided_tier(tmp_path):
-    import problem_store
+    from leetcoach import problem_store
 
     run_fake = _load_run_fake()
     out = tmp_path / "output"
@@ -455,7 +448,7 @@ REVIEW_ATTEMPT = (
 
 @pytest.mark.parametrize("crlf", [False, True])
 def test_fake_code_review_follows_the_review_contract(flags, crlf):
-    import flashcards
+    from leetcoach import flashcards
 
     prompt = prompts.build_review(TWO_SUM, REVIEW_ATTEMPT, language="python")
     if crlf:
@@ -468,8 +461,7 @@ def test_fake_code_review_follows_the_review_contract(flags, crlf):
 
 
 def test_seed_has_a_review_doc_and_a_review_queue(tmp_path):
-    import flashcards
-    import problem_store
+    from leetcoach import flashcards, problem_store
 
     run_fake = _load_run_fake()
     out = tmp_path / "output"
@@ -542,7 +534,7 @@ def test_fake_followup_slow_marker_still_answers(flags):
 
 
 def test_seed_gives_followups_a_session_a_logged_doc_without_one_and_legacy_docs(tmp_path):
-    import problem_store
+    from leetcoach import problem_store
 
     run_fake = _load_run_fake()
     out = tmp_path / "output"

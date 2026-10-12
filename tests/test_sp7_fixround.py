@@ -13,11 +13,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import app as app_module
-import claude_cli
-import flashcards as fc
-import practice
-import problem_store as ps
+from leetcoach import app as app_module
+from leetcoach import claude_cli, practice
+from leetcoach import flashcards as fc
+from leetcoach import problem_store as ps
 
 # --- 3: formula injection in the TSV export -------------------------------------------
 

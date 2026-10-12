@@ -17,7 +17,7 @@ These knobs are the only machine-specific settings the app needs:
 - ``LEETCOACH_CLAUDE_BIN``  — name/path of the ``claude`` executable (default
                               ``claude``; set an absolute path if it is not on PATH).
 - ``LEETCOACH_OUTPUT_DIR``  — where the study library is written (default: the
-                              ``output`` directory next to this file, so the
+                              ``output`` directory at the repo root, so the
                               library never forks when the app is launched from
                               a different working directory; a relative override
                               stays relative — that is the user's explicit choice).
@@ -43,7 +43,7 @@ import math
 import os
 from pathlib import Path
 
-import fsutil
+from leetcoach import fsutil
 
 # Defaults live here so they are documented in one place and referenced by name.
 # An alias (not a pinned id): the CLI resolves it to the newest Opus, so the
@@ -52,10 +52,21 @@ DEFAULT_MODEL = "opus"
 DEFAULT_CLASSIFIER_MODEL = "haiku"  # classification is trivial; cheapest model wins
 DEFAULT_QUICK_ASK_MODEL = "haiku"  # a syntax lookup is trivial; cheapest model wins
 DEFAULT_CLAUDE_BIN = "claude"
-# Anchored next to this file (audit6 P2-10): a CWD-relative default would let
+
+# The two filesystem anchors every default path is built from. PACKAGE_DIR is
+# this package (its static/ and templates/ ship inside it); REPO_ROOT is the
+# checkout that holds it, where the user's own files live: the `.env` and the
+# default `output/` study library. They stayed at the repo root when the code
+# moved into leetcoach/, so an existing library and .env keep working with no
+# migration; resolve them from here, never from a `../..` chain.
+PACKAGE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = PACKAGE_DIR.parent
+# The project `.env` (the model picker writes it; the app loads it at import).
+DOTENV_FILE = REPO_ROOT / ".env"
+# Anchored to the repo root (audit6 P2-10): a CWD-relative default would let
 # `flask run` (or any launch from another directory) silently fork the study
 # library and its topic index.
-DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
 DEFAULT_RUN_TIMEOUT = 600.0  # seconds; generous — Opus study material can be slow
 DEFAULT_VERIFY_TIMEOUT = 10.0  # seconds; per sample-verification subprocess
 

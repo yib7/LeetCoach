@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-import sandbox
+from leetcoach import sandbox
 
 # --- A5: bootstrap handshake ------------------------------------------------
 
@@ -434,7 +434,7 @@ def test_a_traceback_still_shows_the_failing_source_line():
 
 
 def test_python_read_roots_cover_the_interpreter():
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     roots = {os.path.normcase(os.path.realpath(p))
              for p in sandbox_bootstrap.python_read_roots()}
@@ -483,7 +483,7 @@ def test_default_secret_paths_cover_claude_credentials_and_the_repo_env():
     """The real list, checked as strings only (nothing is opened)."""
     paths = {os.path.normcase(os.path.abspath(p)) for p in sandbox._secret_paths()}
     home = os.path.expanduser("~")
-    repo = os.path.dirname(os.path.abspath(sandbox.__file__))
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # the repo root
     for must in (
         os.path.join(home, ".claude"),
         os.path.join(home, ".claude.json"),
@@ -742,7 +742,7 @@ def test_sweep_defaults_to_the_system_temp_dir_and_never_raises(tmp_path, monkey
 
 
 def test_app_startup_sweeps_stale_run_dirs(monkeypatch):
-    import app as app_module
+    from leetcoach import app as app_module
 
     calls = []
     monkeypatch.setattr(sandbox, "sweep_stale_run_dirs", lambda **k: calls.append(k) or 4)
@@ -1110,7 +1110,7 @@ def test_a_caps_unavailable_sample_makes_the_whole_run_not_verified(monkeypatch)
 def test_go_constant_is_an_explicit_escape_shared_with_the_bootstrap():
     """Minor 1: one constant (the bootstrap's), and no raw control bytes in
     the source of either file."""
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     assert sandbox._GO is sandbox_bootstrap.GO
     assert sandbox_bootstrap.GO == b"\x01"
@@ -1229,7 +1229,7 @@ def test_sqlite_is_reported_as_blocked_by_the_sandbox():
 
 def test_sqlite_uri_helper_is_gone():
     """I-2: the URI path parser only existed for the per-path check."""
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     assert not hasattr(sandbox_bootstrap, "_sqlite_uri_path")
     for event in ("sqlite3.connect", "sqlite3.enable_load_extension", "sqlite3.load_extension"):
@@ -1364,7 +1364,7 @@ def test_a_socket_subclass_cannot_fake_its_way_to_a_foreign_listener():
 def test_the_socketpair_allowance_is_gone():
     """SP3: no listener tracking, no loopback special case; bind and connect
     are refused outright like the other network events."""
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     assert not hasattr(sandbox_bootstrap, "_LOOPBACK")
     assert not hasattr(sandbox_bootstrap, "_socket_mod")
@@ -1385,7 +1385,7 @@ def test_a_udp_bind_is_refused():
 def test_a_solution_cannot_fake_a_bootstrap_failure(code_exit):
     """M-1 / M-3: after the go byte, exit 98 + the caps marker (or 97) is just
     the solution's own exit code: an ``error``, never ``not_verified``."""
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     code = (
         "import sys\n"
@@ -1412,7 +1412,7 @@ def test_a_bootstrap_failure_before_the_go_byte_is_not_verified(monkeypatch, cap
 def test_pre_go_exit_classification():
     """M-1 / M-3: the caps note needs POSIX + exit 98 + the marker; any other
     pre-go exit is an internal error. Both are ``not_verified``."""
-    import sandbox_bootstrap as sb
+    from leetcoach import sandbox_bootstrap as sb
 
     marker = sb.CAPS_MARKER + " (ValueError: nope)\n"
     caps = "sandbox caps unavailable (resource limits could not be applied)"
@@ -1541,7 +1541,7 @@ def test_exit_note_skips_shutdown_noise_after_the_uncaught_traceback():
 def test_macos_dev_fd_resolution_is_checked_by_fd_kind(raw, resolved, is_stream, ok):
     """M-4: a ``/dev/fd/N`` resolve-result is exempt only when fd N is a
     pipe / socket / tty (decided by the injected probe)."""
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     asked: list = []
 
@@ -1555,7 +1555,7 @@ def test_macos_dev_fd_resolution_is_checked_by_fd_kind(raw, resolved, is_stream,
 
 
 def test_fd_is_stream_recognises_a_pipe_and_rejects_a_file(tmp_path):
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     r_fd, w_fd = os.pipe()
     try:
@@ -1571,7 +1571,7 @@ def test_fd_is_stream_recognises_a_pipe_and_rejects_a_file(tmp_path):
 def test_rlimit_as_is_best_effort_on_macos_only(monkeypatch, capsys):
     """M-4: macOS often refuses RLIMIT_AS; there it is logged and skipped,
     while CPU / FSIZE stay required, and AS stays required elsewhere."""
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     limits = _limits_with_nproc(monkeypatch)
     monkeypatch.setattr(sys, "platform", "darwin")
@@ -1610,7 +1610,7 @@ def test_rlimit_as_is_best_effort_on_macos_only(monkeypatch, capsys):
 def test_posix_std_stream_aliases_are_exempt_only_when_they_are_streams(raw, resolved, ok):
     """Minor 4: ``/dev/stdout`` & co. are not falsely blocked, but only while
     they resolve to a pipe / socket / terminal, never to a real file."""
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     assert sandbox_bootstrap.is_stream_alias(raw, resolved) is ok
 
@@ -1632,7 +1632,7 @@ def test_bootstrap_config_is_not_on_the_command_line(monkeypatch):
 
 
 def test_config_framing_round_trips_through_a_pipe():
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     cfg = {"script": "C:\\r\\solution.py", "run_dir": "C:\\r", "secret_paths": ["\u00e9"]}
     r_fd, w_fd = os.pipe()
@@ -1645,7 +1645,7 @@ def test_config_framing_round_trips_through_a_pipe():
 
 
 def test_truncated_config_is_refused():
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     r_fd, w_fd = os.pipe()
     os.write(w_fd, sandbox._frame_config({"a": 1})[:-2])
@@ -1779,7 +1779,7 @@ class _FakeResource:
 def test_bootstrap_applies_the_configured_rlimits_before_the_go_byte(monkeypatch):
     """Minor 8: POSIX rlimits are set by the bootstrap (no ``preexec_fn`` in a
     threaded parent), soft == hard so the solution can't raise them."""
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     res = _FakeResource()
     limits = _limits_with_nproc(monkeypatch, current=300)
@@ -1795,7 +1795,7 @@ def test_bootstrap_applies_the_configured_rlimits_before_the_go_byte(monkeypatch
 
 
 def test_bootstrap_rlimits_fail_closed_except_the_optional_nproc(monkeypatch):
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     monkeypatch.setattr(sys, "platform", "linux")  # AS is best-effort on macOS only
     limits = _limits_with_nproc(monkeypatch)
@@ -1805,7 +1805,7 @@ def test_bootstrap_rlimits_fail_closed_except_the_optional_nproc(monkeypatch):
 
 
 def test_no_preexec_fn_and_a_caps_failure_is_not_verified(monkeypatch):
-    import sandbox_bootstrap
+    from leetcoach import sandbox_bootstrap
 
     calls: list = []
     real_popen = subprocess.Popen

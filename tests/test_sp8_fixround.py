@@ -28,10 +28,8 @@ from test_followup import (  # noqa: F401 - fixture
     root,
 )
 
-import app as app_module
-import claude_cli
-import problem_store
-import storage
+from leetcoach import app as app_module
+from leetcoach import claude_cli, problem_store, storage
 
 REPO = Path(__file__).resolve().parent.parent
 

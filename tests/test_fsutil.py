@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-import fsutil
+from leetcoach import fsutil
 
 
 def _tmp_leftovers(folder):

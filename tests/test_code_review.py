@@ -10,13 +10,8 @@ import re
 import pytest
 from _helpers import parse_sse
 
-import app as app_module
-import claude_cli
-import practice
-import problem_store
-import prompts
-import stats
-import storage
+from leetcoach import app as app_module
+from leetcoach import claude_cli, practice, problem_store, prompts, stats, storage
 
 PASTE = ("1. Two Sum\nEasy\n\nGiven nums...\nExample 1:\n"
          "Input: nums = [2,7], target = 9\nOutput: [0,1]")
@@ -134,7 +129,7 @@ def _client(prompts_seen):
 
 
 def test_review_run_is_saved_and_logged_with_mode_review(out, monkeypatch):
-    import sandbox
+    from leetcoach import sandbox
 
     def no_verify(*a, **k):  # pragma: no cover - a review never verifies
         raise AssertionError("a review must not run the sandbox")
@@ -205,7 +200,7 @@ def test_review_ignores_tier(out):
 def test_other_modes_ignore_a_code_field(out, monkeypatch):
     from types import SimpleNamespace
 
-    import sandbox
+    from leetcoach import sandbox
 
     monkeypatch.setattr(sandbox, "verify_answer", lambda *a, **k: SimpleNamespace(
         status="pass", note="1/1", detail=[]))

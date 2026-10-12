@@ -8,8 +8,8 @@ import json
 import pytest
 from _helpers import CLASSIFY_JSON, parse_sse
 
-import app as app_module
-import claude_cli
+from leetcoach import app as app_module
+from leetcoach import claude_cli
 
 ANSWER_MD = (
     "Use a hash map.\n\n"
@@ -106,7 +106,7 @@ def _boom(*args, **kwargs):
     ("answer", "save_answer"),
 ])
 def test_save_oserror_falls_back_to_unsorted_with_a_clear_message(env, monkeypatch, mode, saver):
-    import storage
+    from leetcoach import storage
 
     monkeypatch.setattr(storage, saver, _boom)
     payload = {**RUN, "mode": mode, "tier": "normal"}
@@ -126,7 +126,7 @@ def test_save_oserror_falls_back_to_unsorted_with_a_clear_message(env, monkeypat
 
 
 def test_save_and_fallback_both_failing_is_a_terminal_error(env, monkeypatch):
-    import storage
+    from leetcoach import storage
 
     monkeypatch.setattr(storage, "save_learning", _boom)
     monkeypatch.setattr(storage, "save_unsorted", _boom)

@@ -138,7 +138,7 @@ def local_noon(day) -> float:
 def freeze_stats_now(monkeypatch, now) -> None:
     """Make ``GET /stats`` compute "today" / the streak / the heatmap at the
     aware datetime ``now`` instead of reading the real clock."""
-    import stats
+    from leetcoach import stats
 
     real = stats.compute_stats
 

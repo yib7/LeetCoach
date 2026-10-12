@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import socket
 
-from app import _choose_port
+from leetcoach.app import _choose_port
 
 HOST = "127.0.0.1"
 

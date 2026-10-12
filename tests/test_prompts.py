@@ -25,7 +25,7 @@ import re
 
 import pytest
 
-import prompts
+from leetcoach import prompts
 
 PROBLEM = "Given an array nums, return indices of the two numbers adding to target."
 

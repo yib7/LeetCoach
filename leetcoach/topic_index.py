@@ -42,9 +42,7 @@ import threading
 import time
 from pathlib import Path
 
-import config
-import fsutil
-import patterns
+from leetcoach import config, fsutil, patterns
 
 logger = logging.getLogger(__name__)
 
