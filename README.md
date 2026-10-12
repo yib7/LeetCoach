@@ -26,15 +26,15 @@ study material, then brings it back for spaced-repetition practice.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/media/screenshot-console.png" alt="The Console after an Answer run in Python: the streamed solution with its Big-O line, the model that answered, and a green Samples PASS verdict"></td>
-    <td width="50%"><img src="docs/media/screenshot-library.png" alt="The Library viewer on a saved Guided Learning doc: two of four hints revealed, a follow-up answer appended to the doc, and the notes panel"></td>
+    <td width="50%"><img src="docs/media/screenshot-console.png" alt="The Console after an Answer run in Python: the end of the streamed answer with its Big-O trade-offs per tier, then the saved-run card with the model that answered, the pattern and topics, a green Samples PASS verdict, the saved files and next-step buttons"></td>
+    <td width="50%"><img src="docs/media/screenshot-library.png" alt="The Library viewer on a saved Guided Learning doc for Two Sum: Hint 1 and Hint 2 revealed, Hint 3 and Hint 4 still closed, and the file tree of saved runs grouped by mode and pattern"></td>
   </tr>
   <tr>
     <td align="center">Console: a run streams in and is verified</td>
-    <td align="center">Library: hints, follow-ups and notes</td>
+    <td align="center">Library: click-to-reveal hints on a saved doc</td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/media/screenshot-practice.png" alt="Re-attempt view with the answer hidden: the learner's own Python, Test my code results passing the sample cases and one custom case, and the solo / with hints / peeked grade buttons"></td>
+    <td width="50%"><img src="docs/media/screenshot-practice.png" alt="Re-attempt view with the answer hidden: the learner's own Python, Test my code passing the statement's example and one custom case, and the Solved it solo / Needed hints / Peeked at the solution grade buttons"></td>
     <td width="50%"><img src="docs/media/screenshot-stats.png" alt="Stats tab: current and longest streak, solved today and in total, the activity heatmap, the review queue counts, and breakdowns by mode, language and top topics"></td>
   </tr>
   <tr>
@@ -181,7 +181,7 @@ paths.
 
 ## Demo
 
-![Walkthrough: paste a problem, run it as an Answer in Python, watch it stream and pass its samples, open it in the Library, reveal a hint and ask a follow-up, re-attempt it with Test my code, grade it, and see it in Due today and Stats](docs/media/demo.gif)
+![Walkthrough: load the Two Sum sample, run it as an Answer in Python, watch it stream and pass its samples, open it in the Library, reveal two hints on its Guided doc and ask a follow-up, re-attempt it with Test my code, grade it, and see Due today and Stats update](docs/media/demo.gif)
 
 ## The `claude` CLI
 
