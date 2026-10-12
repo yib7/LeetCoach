@@ -107,6 +107,12 @@ follow-up questions on a saved doc.
     writes to stderr. A `.venv` missing packages is installed into, and one whose Python
     is missing or cannot start is recreated with `venv --clear`.
   - `LeetCoach.cmd` works from a folder whose path contains `!`.
+  - Setup installs the runtime dependencies at the versions pinned in
+    `requirements/lock.txt`, and no step asks you to run `.venv\Scripts\Activate.ps1`,
+    which the default PowerShell execution policy refuses. On Windows the README setup is
+    now `git clone` and `.\LeetCoach.cmd`; Linux and macOS get their own short recipe,
+    which CI runs on Ubuntu and macOS.
+  - Starting LeetCoach on Python older than 3.12 stops with one line naming both versions.
   - `ensure-claude-auth.ps1` bounds both waits on the CLI: a hung `auth status` is killed
     after 15 s, and the app starts after 5 minutes even if the sign-in window is still
     open (`LEETCOACH_AUTH_STATUS_TIMEOUT_MS` / `LEETCOACH_AUTH_LOGIN_TIMEOUT_MS`).

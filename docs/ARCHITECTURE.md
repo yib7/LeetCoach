@@ -31,7 +31,7 @@ app.py           entry point: `python app.py` (a few lines that call leetcoach.l
 LeetCoach.cmd    Windows double-click launcher (first run calls scripts/setup.ps1, then app.py)
 leetcoach/       the app: Python modules (table below) + static/ and templates/
 tests/           pytest suite (tests/js/: node tests for leetcoach/static/lib/core.js)
-scripts/         setup.ps1 (Windows one-command setup: .venv + requirements/base.txt),
+scripts/         setup.ps1 (Windows setup: .venv + base.txt at the lock.txt versions),
                  desktop shortcut, claude sign-in check, dev/ fake CLI harness
 docs/            this file, CHANGELOG, SECURITY, CREDITS, README media
 requirements/    base.txt (runtime), dev.txt (+ pytest, ruff), lock.txt (exact pins)
