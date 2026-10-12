@@ -4,91 +4,92 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB.svg)](https://www.python.org/)
 
-Paste a LeetCode problem, pick a language and a mode, and LeetCoach streams back study
-material from the **`claude` CLI** and saves it to a growing local library. It runs the
-generated Python against the problem's own sample I/O to tell you whether the solution
-actually passes. No API key: it drives your existing Claude Code subscription through the
-CLI.
+A local Flask app that turns a pasted LeetCode problem into streamed, sandbox-verified
+study material, then brings it back for spaced-repetition practice.
 
-![The LeetCoach Console: asking "how do I make a min-heap in Python with heapq?" in the Quick Ask box and getting a short answer with a highlighted code block, then opening the study library to a saved solution with its walkthrough and Big-O line](docs/media/demo.gif)
+- **Drives the `claude` CLI headlessly.** `claude -p` gets the prompt on stdin; its
+  `stream-json` output is parsed and relayed to the browser over server-sent events.
+  No API key: it uses your Claude Code subscription.
+- **Isolates every Claude call.** `--safe-mode`, no tools, no MCP servers, its own system
+  prompt, a neutral working folder. API-key variables never reach the CLI.
+- **Verifies the code it generates.** Python solutions run against the problem's sample
+  I/O in a throwaway, resource-capped sandbox: a Job Object on Windows, rlimits on
+  POSIX, an audit hook that refuses network, subprocesses and reads outside the run.
+  It fails closed.
+- **Builds a study loop on an append-only log.** Each run saves a doc, a problem record
+  and a line in `runs.jsonl`. That log drives the library, Stats and a Leitner review
+  queue.
+- **Tested without the model.** 1,574 pytest tests and 101 node tests, all mocking the
+  CLI. CI runs them on Windows, Ubuntu and macOS, Python 3.12 to 3.14.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/media/screenshot-console.png" alt="The Console after an Answer run in Python: the streamed solution with its Big-O line, the model that answered, and a green Samples PASS verdict"></td>
+    <td width="50%"><img src="docs/media/screenshot-library.png" alt="The Library viewer on a saved Guided Learning doc: two of four hints revealed, a follow-up answer appended to the doc, and the notes panel"></td>
+  </tr>
+  <tr>
+    <td align="center">Console: a run streams in and is verified</td>
+    <td align="center">Library: hints, follow-ups and notes</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/media/screenshot-practice.png" alt="Re-attempt view with the answer hidden: the learner's own Python, Test my code results passing the sample cases and one custom case, and the solo / with hints / peeked grade buttons"></td>
+    <td width="50%"><img src="docs/media/screenshot-stats.png" alt="Stats tab: current and longest streak, solved today and in total, the activity heatmap, the review queue counts, and breakdowns by mode, language and top topics"></td>
+  </tr>
+  <tr>
+    <td align="center">Re-attempt: Test my code, then grade yourself</td>
+    <td align="center">Stats and the review queue</td>
+  </tr>
+</table>
+
+## How it works
+
+```mermaid
+flowchart LR
+    B["Browser<br/>paste a problem,<br/>pick mode + language"]
+    F["Flask app<br/>validate, stream,<br/>verify, save"]
+    C(["claude -p<br/>stream-json"])
+    S["Sandbox<br/>sample I/O check"]
+    O[("output/<br/>doc + code,<br/>problem record,<br/>runs.jsonl")]
+    L["Library, Stats,<br/>review queue"]
+
+    B -->|"POST /run"| F
+    F -->|"prompt on stdin"| C
+    C -->|"text deltas"| F
+    F -->|"SSE stream"| B
+    F -->|"Python solution"| S
+    S -->|"PASS / FAIL"| F
+    F -->|"save"| O
+    O --> L
+    L -->|"due today: re-attempt"| B
+```
+
+1. `POST /run` checks the request, then streams the answer from `claude -p`.
+   A second, cheap call classifies the problem into one of 18 patterns.
+2. For Answer and Guided runs in Python, the solution runs in the sandbox against the
+   problem's `Input:` / `Output:` examples.
+3. The doc, the code, the problem record and one `runs.jsonl` line are saved under
+   `output/`.
+4. The library, Stats and the review queue all read from there.
+
+The full tour is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## What it does
 
-- **Four modes.** *Learning* teaches the stack a problem needs. *Guided Learning* walks
-  from problem to solution in one document, with a ladder of hints you reveal one at a
-  time. *Answer* gives a working solution with reasoning and Big-O. *Code Review*
-  critiques your own attempt without rewriting it.
-- **One study-doc structure.** Every doc follows the same outline: the problem in brief,
-  the target complexity, how to recognise the pattern, the key insight, the approach, the
-  solution, edge cases, common mistakes, related problems and flashcards. Problems are
-  filed under a fixed list of about 18 patterns.
-- **Live streaming.** The response renders token by token over server-sent events, with
-  markdown and syntax highlighting and no runtime CDN. The view follows the stream, shows
-  the current phase (streaming, verifying, saving) and the model that answered. A Stop
-  button cancels a run mid-stream.
-- **Self-checking.** Generated Python solutions run against the problem's `Input:` /
-  `Output:` examples in a throwaway sandbox and are reported as PASS / FAIL.
-- **Builds a library.** Every run is saved under `output/` and organised by pattern. Each
-  problem gets a record (number, title, difficulty, statement) and every run is logged.
-  The Library tab browses and deletes saved runs. The Console sidebar lists your recent
-  runs, and your draft problem and settings survive a reload.
-- **A practice loop.**
-  - **Re-attempt** a saved problem with the answer hidden, and use **Test my code** to
-    run your own Python against the samples and your own cases.
-  - Grade yourself (solo / with hints / peeked) and a **spaced-repetition review queue**
-    (1, 3, 7, 14, 30 days) brings the problem back when it is due.
-  - Keep **notes** per problem.
-  - Flip through **flashcards** from your docs, or export them to Anki.
-- **Follow-up questions.** Ask a question about any saved doc in the library viewer. The
-  answer streams in and is appended to the doc. When possible it resumes the original
-  Claude session; otherwise it sends the doc as context.
-- **Tracks your practice.** A Stats tab, computed from the run log, shows:
-  - a daily streak, with a badge in the Console header;
-  - an activity heatmap;
-  - totals by topic, mode and language;
-  - review counts.
-
-  A `Ctrl`/`Cmd`+`K` search palette jumps to any saved problem, and `?` shows the
-  keyboard shortcuts.
-- **Quick Ask.** A side box answers a small syntax or stdlib question with a cheap model
-  (Haiku by default, `LEETCOACH_QUICK_ASK_MODEL`), without streaming or saving anything. It
-  refuses to hand over the current problem's solution but still answers abstract
-  questions such as "what does `defaultdict` do?".
-
-<p align="center">
-  <img src="docs/media/screenshot.png" alt="The Library viewer showing a saved Answer for Squares of a Sorted Array: its two-pointer walkthrough, an explicit Big-O complexity line, and the syntax-highlighted Python solution" width="760">
-</p>
-
-## How it works (the `claude` CLI dependency)
-
-LeetCoach does not use an API key. It shells out to the `claude` command-line tool
-(`claude -p`), which uses your **Claude Code subscription**. So before anything works you
-need:
-
-- The `claude` CLI installed and **on your PATH** (or point `LEETCOACH_CLAUDE_BIN` at its
-  full path).
-- That CLI **authenticated** (`claude` runs and answers from your normal shell).
-
-If `claude` isn't found, the page still loads but shows a banner, and runs fail until it's
-installed and authenticated.
-
-If it's installed but signed out, the banner says so and gives you the exact command to
-sign in: `claude auth login`. The desktop shortcut (`LeetCoach.cmd`) checks
-`claude auth status` before starting the app. If you are signed out, it opens
-`claude auth login` in its own window and waits for you. It never blocks the app from
-starting.
-
-If a run fails, the error shows the CLI's own reason, such as an expired login, a usage
-limit or an unknown model. It says "signed out" only when the CLI reports that.
-
-There are no secrets to configure.
-
-LeetCoach runs every `claude` call in isolation:
-- `--safe-mode`, no tools, no MCP servers, and its own system prompt;
-- a neutral working folder (`LEETCOACH_CLAUDE_CWD`), so your plugins, hooks,
-  `CLAUDE.md` and output style never shape a study doc.
-
-See [SECURITY.md](docs/SECURITY.md).
+- **Four modes.** Learning, Guided Learning, Answer and Code Review (see [Modes](#modes)).
+- **One doc structure.** Every doc has the same outline: pattern, key insight, approach,
+  solution, complexity, edge cases, common mistakes, related problems, flashcards.
+- **Live streaming.** Markdown and syntax highlighting render as the answer arrives.
+  Stop cancels a run, and nothing is saved.
+- **Practice.** Re-attempt a problem with the answer hidden, run **Test my code**, then
+  grade yourself. The review queue brings it back after 1, 3, 7, 14 or 30 days.
+- **Follow-ups.** Ask a question on a saved doc. The answer streams in and is appended.
+- **Notes and flashcards** per problem, with an Anki export.
+- **Stats.** Streak, activity heatmap, review counts, totals by mode, language and topic.
+- **Quick Ask.** A side box for small syntax questions, answered by a cheap model and
+  never saved.
+- **Search.** `Ctrl`/`Cmd`+`K` jumps to any saved problem; `?` lists the shortcuts.
 
 ## Setup
 
@@ -178,60 +179,59 @@ out, the page still loads and a banner tells you what to run.
 Every setting is optional; see [Configuration](#configuration) to change the model or
 paths.
 
+## Demo
+
+![Walkthrough: paste a problem, run it as an Answer in Python, watch it stream and pass its samples, open it in the Library, reveal a hint and ask a follow-up, re-attempt it with Test my code, grade it, and see it in Due today and Stats](docs/media/demo.gif)
+
+## The `claude` CLI
+
+LeetCoach shells out to `claude -p`, so it needs the CLI installed, on your PATH (or set
+`LEETCOACH_CLAUDE_BIN`) and signed in. There is no API key and no secret to configure.
+
+- **Missing or signed out:** the page still loads and a banner says what to run, for
+  example `claude auth login`.
+- **Desktop launcher:** `LeetCoach.cmd` checks `claude auth status` first and, if you are
+  signed out, opens `claude auth login` in its own window. It never blocks the app.
+- **Failed run:** the error shows the CLI's own reason (expired login, usage limit,
+  unknown model).
+
+Every call is isolated: `--safe-mode`, `--tools ""`, `--strict-mcp-config`, its own
+system prompt, and a neutral working folder (`LEETCOACH_CLAUDE_CWD`), so your plugins,
+hooks, `CLAUDE.md` and output style never shape a study doc. See
+[SECURITY.md](docs/SECURITY.md).
+
 ## Modes
 
-Two modes take a **Code Quality** level: *Basic* (the simplest approach, possibly
-sub-optimal), *Normal* (a balanced interview answer), or *Optimal* (the best time/space
-solution).
+| Mode | What you get | Code Quality level |
+| --- | --- | --- |
+| **Learning** | Teaches the data structures, algorithms and stdlib the problem needs, with a hint ladder. Never a full solution. Skips topics you have already covered. | none |
+| **Guided Learning** | One document: restate, teach, reason step by step, then the answer. Hint ladder included. | Basic / Normal / Optimal |
+| **Answer** | A working solution, the reasoning, an explicit Big-O line and the trade-offs. | Basic / Normal / Optimal |
+| **Code Review** | Paste your own attempt; it critiques bugs, complexity and edge cases without rewriting it. | none |
 
-- **Learning** (no Code Quality level) teaches the full stack a problem needs (data
-  structures, algorithms, language stdlib). It uses the topic index to skip and cross-link
-  topics you have already studied.
-- **Guided Learning** is one flowing document: restate the problem, teach the stack,
-  reason step by step, then produce the answer at the chosen level.
-- **Answer** is a working solution plus reasoning, an explicit Big-O line, and the
-  trade-off versus the other levels.
-- **Code Review** (no Code Quality level) takes a second box, *Your code*, and critiques
-  your attempt (bugs, complexity, edge cases) without rewriting it.
+Code Quality: *Basic* is the simplest approach, *Normal* a balanced interview answer,
+*Optimal* the best time and space. Hints (`### Hint 1..4`) are click-to-reveal.
 
-Guided and Learning docs end their teaching with `### Hint 1..4`, shown click-to-reveal,
-and Learning never contains an end-to-end solution.
+### Verification
 
-## Add-ons
-
-- **Sample-I/O verification.** Answer/Guided Python solutions are auto-checked against the
-  problem's own examples (see the caveat below).
-- **Topic index.** Learning and Guided record what you have covered (per language) in `topic_index.json` and feed
-  it back so later runs skip already-learned material.
-- **Always-on Big-O.** Every Answer/Guided solution states explicit time and space
-  complexity.
-
-### Verification caveat
-
-Verification is best-effort and **Python-first**:
-
-- **Python** is first-class: the generated script reads the sample input on stdin and
-  prints the result; LeetCoach runs it in a throwaway, secret-free sandbox and diffs stdout
-  against the expected output to report PASS / FAIL. A failing run saves each failed
-  sample's input, expected, and actual output into the reasoning file.
-- **C++ / Java** are **not auto-verified**. LeetCoach only probes for a compiler (`g++` /
-  `javac`); the result is shown as "not auto-verified". Verify those manually.
-- When a problem has no parseable sample I/O, the result is likewise "not auto-verified". A
-  not-verified result is never a failure.
-
-The sandbox is a convenience check, not a security boundary; see [SECURITY.md](docs/SECURITY.md).
+- **Python:** the solution reads each sample's input on stdin; its output is compared
+  structurally with the expected output (`[0, 1]` equals `[0,1]`). The result is PASS or
+  FAIL, and a FAIL saves each failing sample's input, expected and actual output.
+- **C++ / Java:** generated, not run. LeetCoach only checks for `g++` / `javac` and
+  reports "not auto-verified".
+- **No parseable samples:** also "not auto-verified", never a failure.
 
 ## Tech stack
 
 | Area | Choice |
 | --- | --- |
-| Language | Python 3.12+ |
-| Web | Flask, server-sent events for streaming |
-| Model | `claude` CLI (`claude -p`, stream-json), no API key |
-| Front end | Vendored `marked` + `highlight.js`, dark application-shell UI (Console, Library, Stats) |
-| Tests / lint | pytest (1,300+ tests, all mocking the subprocess), zero-dependency node tests for the front-end helpers, ruff |
-
-A 5-minute tour of the internals is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+| Language | Python 3.12+ (CI: 3.12, 3.13, 3.14) |
+| Web | Flask, server-sent events |
+| Model | `claude` CLI (`claude -p --output-format stream-json`), no API key |
+| Sandbox | `subprocess` + Windows Job Objects (ctypes) / POSIX rlimits, `sys.addaudithook` |
+| Storage | Plain files under `output/`: Markdown docs, JSON problem records, a JSONL run log |
+| Front end | Vanilla JS, vendored `marked` + `highlight.js`, strict CSP, no build step |
+| Tests / lint | pytest (1,574 tests), zero-dependency node tests (101), ruff; GitHub Actions on Windows, Ubuntu, macOS |
 
 ## Configuration
 
@@ -256,17 +256,19 @@ the default.
 | `LEETCOACH_NO_DOTENV`    | *(unset)*                      | Set to `1`/`true`/`yes` to skip loading `.env` entirely and use real environment variables only. |
 | `LEETCOACH_DOTENV_PATH`  | `.env` in the repo root        | **Dev/test only.** Where the model picker writes its choice. The test suite and `scripts/dev/run_fake.py` point it at a scratch file. Startup always loads the repo-root `.env`, not this path. |
 
-`scripts/setup.ps1` also reads `LEETCOACH_SETUP_PYTHON_EXE`, a **test-only** override for the
-Python it bootstraps with. The fake CLI in `scripts/dev/` reads its own `FAKE_*`
-variables. Neither is an app setting.
+Not app settings, and not read from `.env`: `scripts/ensure-claude-auth.ps1` reads
+`LEETCOACH_AUTH_STATUS_TIMEOUT_MS` (default 15000) and `LEETCOACH_AUTH_LOGIN_TIMEOUT_MS`
+(default 300000) from the shell; `scripts/setup.ps1` reads `LEETCOACH_SETUP_PYTHON_EXE`,
+a **test-only** override for the Python it bootstraps with; the fake CLI in
+`scripts/dev/` reads its own `FAKE_*` variables.
 
 **Model aliases.** The picker offers `fable`, `opus`, `sonnet` and `haiku`. The alias
 itself is what reaches `claude --model`, so it always tracks the CLI's newest model of
 that family. The picker tooltips and the model chip show the concrete version from
 `config.LATEST_MODEL_IDS`, a display-only table:
 
-| Alias    | Shown as (as of this release) |
-| -------- | ----------------------------- |
+| Alias    | Shown as in 1.5.0 |
+| -------- | ----------------- |
 | `fable`  | `claude-fable-5-1` (Fable 5.1, the most capable) |
 | `opus`   | `claude-opus-5-5` (Opus 5.5, the default) |
 | `sonnet` | `claude-sonnet-5-5` (Sonnet 5.5) |
@@ -300,33 +302,41 @@ Follow-up answers are appended to the doc they were asked on. Libraries saved be
 
 ## Limitations
 
-- **Single-user localhost tool.** No accounts, no auth, no multi-user; it binds to
-  loopback and is not meant to be exposed on a network.
-- **Only Python is auto-verified.** C++ / Java solutions are compiler-probed only and
-  reported "not auto-verified"; verify those yourself.
-- **The sandbox is a convenience, not a security boundary.** It caps time, memory, and
-  process count, but do not rely on it to contain hostile code; see [SECURITY.md](docs/SECURITY.md).
-- **Requires the `claude` CLI.** It drives your Claude Code subscription through the CLI;
-  there is no API-key fallback, so runs fail until `claude` is installed and authenticated.
+- **A PASS means the pasted samples pass**, not LeetCode's hidden tests. Only Python is
+  run; C++ and Java are generated but never compiled or executed.
+- **The sandbox is not a security boundary.** It has no OS-level confinement, the memory
+  cap is best-effort on macOS, and `asyncio` solutions are blocked on Windows. See
+  [SECURITY.md](docs/SECURITY.md).
+- **Single user, this machine only.** No accounts; requests from any non-loopback
+  address are refused. At most 4 runs and 4 Quick Asks at once, and a pasted problem is
+  capped at 50,000 characters.
+- **Needs the `claude` CLI and a Claude subscription.** There is no API-key fallback.
+  Only Windows is tested by hand; Linux and macOS are covered by CI.
+
+Next on the list: running C++ and Java against the samples, and OS-level sandbox
+confinement (an AppContainer on Windows, seccomp or Landlock on Linux).
 
 ## Tests
 
-All tests mock the `claude` subprocess, so the suite runs offline with no real Claude calls.
+All tests mock the `claude` subprocess, so the suite runs offline with no real Claude
+calls. On Windows, from the repo root:
 
-```sh
-pip install -r requirements/dev.txt
-python -m pytest -q        # includes the node tests below when node is installed
-node tests/js/run.js       # front-end helper tests (zero dependencies)
-ruff check .
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements\dev.txt -c requirements\lock.txt
+.venv\Scripts\python.exe -m pytest -q     # also runs the node tests when node is installed
+node tests\js\run.js                      # front-end helper tests (zero dependencies)
+.venv\Scripts\python.exe -m ruff check .
 ```
 
+On Linux and macOS, use `.venv/bin/python` in place of `.venv\Scripts\python.exe`.
+
 To click through the app without spending anything, run
-`python scripts/dev/run_fake.py`. It starts LeetCoach on `http://127.0.0.1:5057` against a
-fake `claude` with canned answers and a freshly seeded scratch library. It never calls
-the real CLI or touches your `output/` or `.env`. Pass `--keep` to keep the previous
-scratch library.
+`.venv\Scripts\python.exe scripts\dev\run_fake.py`. It starts LeetCoach on
+`http://127.0.0.1:5057` against a fake `claude` with canned answers and a freshly seeded
+scratch library. It never calls the real CLI or touches your `output/` or `.env`. Pass
+`--keep` to keep the previous scratch library.
 
 ## License
 
-[MIT](LICENSE). Third-party attributions are in [CREDITS.md](docs/CREDITS.md); release notes in
-[CHANGELOG.md](docs/CHANGELOG.md).
+[MIT](LICENSE). Third-party attributions are in [CREDITS.md](docs/CREDITS.md); release
+notes in [CHANGELOG.md](docs/CHANGELOG.md).
