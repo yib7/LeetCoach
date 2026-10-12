@@ -346,8 +346,11 @@ def test_tracked_launcher_scripts_are_actually_crlf_on_disk():
 
 
 def test_readme_shows_execution_policy_bypass_invocations():
+    # setup.ps1 is no longer a README step: LeetCoach.cmd runs it on the first
+    # start, with the same Bypass flag (test_readme_setup.py covers the steps).
     text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "powershell -ExecutionPolicy Bypass -File .\\scripts\\setup.ps1" in text
+    launcher = (REPO_ROOT / "LeetCoach.cmd").read_text(encoding="ascii")
+    assert "-ExecutionPolicy Bypass -File \".\\scripts\\setup.ps1\"" in launcher
     assert (
         "powershell -ExecutionPolicy Bypass -File .\\scripts\\create-shortcut.ps1" in text
     )

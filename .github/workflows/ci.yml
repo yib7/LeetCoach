@@ -73,8 +73,8 @@ jobs:
         run: python -m pytest -q
 
   test-posix:
-    # The README's non-Windows path (venv + pip) claims plain cross-platform
-    # Python, so the suite runs on Linux and macOS too. Windows-only tests
+    # The README's Linux and macOS steps claim plain cross-platform Python,
+    # so the suite runs on Linux and macOS too. Windows-only tests
     # (PowerShell launchers, Job Objects) skip themselves there.
     name: test (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
@@ -110,11 +110,13 @@ jobs:
         run: python -m pytest -q
 
   readme-setup-windows:
-    # 6.4: the README's literal Windows steps on a fresh runner - clone,
-    # `powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1`, activate, start
-    # `python app.py` - then prove the app answers. The runner's own Python is
+    # 6.4: the README's literal Windows steps on a fresh runner - clone, then
+    # `.\LeetCoach.cmd`, whose first start runs scripts\setup.ps1 (.venv + the
+    # locked deps), the sign-in check and `python app.py` - then prove the app
+    # answers, and run the optional shortcut step. The runner's own Python is
     # used (no setup-python), as on a fresh machine with Python 3.12+ and the
     # `py` launcher. The `claude` CLI is the repo's fake (never real Claude).
+    # tests/test_readme_setup.py fails if a README command is missing here.
     name: README setup (windows, clean runner)
     runs-on: windows-latest
     defaults:
@@ -126,44 +128,36 @@ jobs:
           py -0p
           py -3 --version
 
-      - name: "Step 1: get the code (git clone)"
+      - name: "Step 1: get the code"
         working-directory: ${{ runner.temp }}
         run: |
           git clone --quiet "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git" LeetCoach
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          git -C LeetCoach fetch --quiet origin "$env:GITHUB_REF"
-          git -C LeetCoach checkout --quiet --detach "$env:GITHUB_SHA"
+          cd LeetCoach
+          git fetch --quiet origin "$env:GITHUB_REF"
+          git checkout --quiet --detach "$env:GITHUB_SHA"
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          git -C LeetCoach log -1 --oneline
+          git log -1 --oneline
 
-      - name: "Step 2: install (scripts/setup.ps1)"
-        working-directory: ${{ runner.temp }}/LeetCoach
-        run: |
-          powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path .\.venv\.setup-ok)) { throw "scripts\setup.ps1 did not write .venv\.setup-ok" }
-
-      - name: "Step 3: run (activate, python app.py) against the fake claude CLI"
+      - name: "Step 2: start LeetCoach against the fake claude CLI"
         working-directory: ${{ runner.temp }}/LeetCoach
         run: |
           $ErrorActionPreference = "Stop"
-          .\.venv\Scripts\Activate.ps1
           $env:LEETCOACH_CLAUDE_BIN = (Resolve-Path .\scripts\dev\fake_claude.cmd).Path
-          $env:FAKE_CLAUDE_PYTHON = (Get-Command python).Source
           $env:LEETCOACH_NO_BROWSER = "1"
           $env:LEETCOACH_NO_DOTENV = "1"
           $env:LEETCOACH_OUTPUT_DIR = Join-Path $env:RUNNER_TEMP "lc-output"
           $env:LEETCOACH_CLAUDE_CWD = Join-Path $env:RUNNER_TEMP "lc-claude-cwd"
           $env:PYTHONUNBUFFERED = "1"
           New-Item -ItemType Directory -Force -Path $env:LEETCOACH_CLAUDE_CWD | Out-Null
-          Write-Host "python: $env:FAKE_CLAUDE_PYTHON"
           $log = Join-Path $env:RUNNER_TEMP "app.out.log"
           $err = Join-Path $env:RUNNER_TEMP "app.err.log"
-          $proc = Start-Process -FilePath python -ArgumentList "app.py" -NoNewWindow -PassThru `
+          $proc = Start-Process -FilePath cmd.exe -ArgumentList "/c", ".\LeetCoach.cmd" -NoNewWindow -PassThru `
             -RedirectStandardOutput $log -RedirectStandardError $err
           $ok = $false
           try {
-            $deadline = (Get-Date).AddSeconds(60)
+            # The first start installs the dependencies, so allow for pip.
+            $deadline = (Get-Date).AddSeconds(300)
             while ((Get-Date) -lt $deadline -and -not $proc.HasExited) {
               Start-Sleep -Milliseconds 500
               $text = ((Get-Content $log -Raw -ErrorAction SilentlyContinue) + (Get-Content $err -Raw -ErrorAction SilentlyContinue))
@@ -181,52 +175,75 @@ jobs:
               break
             }
           } finally {
-            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
-            Write-Host "---- app stdout ----"; Get-Content $log -ErrorAction SilentlyContinue
-            Write-Host "---- app stderr ----"; Get-Content $err -ErrorAction SilentlyContinue
+            # /T: cmd.exe AND the python app.py it started.
+            if (-not $proc.HasExited) { & taskkill.exe /T /F /PID $proc.Id | Out-Null }
+            Write-Host "---- LeetCoach.cmd stdout ----"; Get-Content $log -ErrorAction SilentlyContinue
+            Write-Host "---- LeetCoach.cmd stderr ----"; Get-Content $err -ErrorAction SilentlyContinue
           }
-          if (-not $ok) { throw "LeetCoach did not answer /healthz within 60 s" }
+          if (-not $ok) { throw "LeetCoach did not answer /healthz within 300 s" }
+          if (-not (Test-Path .\.venv\.setup-ok)) { throw "the first start did not finish setup (.venv\.setup-ok missing)" }
           $all = (Get-Content $log -Raw) + (Get-Content $err -Raw -ErrorAction SilentlyContinue)
           if ($all -match "WARNING: the ``claude`` CLI was not found|signed out of the ``claude`` CLI") {
             throw "the app did not see the fake claude CLI as installed and signed in"
           }
 
-  readme-setup-linux:
-    # The README's non-Windows path, literally: clone, `python3 -m venv .venv`,
-    # activate, `pip install -r requirements/base.txt`, `python app.py`, against the
+      - name: "Step 3 (optional): add a desktop shortcut"
+        working-directory: ${{ runner.temp }}/LeetCoach
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\scripts\create-shortcut.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "LeetCoach.lnk"
+          if (-not (Test-Path $lnk)) { throw "no shortcut at $lnk" }
+          $target = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath
+          Write-Host "$lnk -> $target"
+          if ($target -ne (Resolve-Path .\LeetCoach.cmd).Path) { throw "the shortcut does not point at LeetCoach.cmd" }
+
+  readme-setup-posix:
+    # The README's Linux and macOS steps, literally: clone, `python3 -m venv
+    # .venv`, the pinned pip install, `.venv/bin/python app.py`, against the
     # fake claude CLI (scripts/dev/fake_claude.py), then ask /healthz.
-    name: README setup (linux, clean runner)
-    runs-on: ubuntu-latest
+    # tests/test_readme_setup.py fails if a README command is missing here.
+    name: README setup (${{ matrix.os }}, clean runner)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
-      - name: "Step 1: get the code (git clone)"
-        working-directory: ${{ runner.temp }}
+      - name: "Prerequisite check: python3 is 3.12+"
         run: |
           python3 --version
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else "python3 is older than 3.12")'
+
+      - name: "Step 1: get the code"
+        working-directory: ${{ runner.temp }}
+        run: |
           git clone --quiet "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" LeetCoach
-          git -C LeetCoach fetch --quiet origin "$GITHUB_REF"
-          git -C LeetCoach checkout --quiet --detach "$GITHUB_SHA"
-          git -C LeetCoach log -1 --oneline
+          cd LeetCoach
+          git fetch --quiet origin "$GITHUB_REF"
+          git checkout --quiet --detach "$GITHUB_SHA"
+          git log -1 --oneline
 
-      - name: "Step 2: install (venv + pip)"
+      - name: "Step 2: create a virtual environment"
+        working-directory: ${{ runner.temp }}/LeetCoach
+        run: python3 -m venv .venv
+
+      - name: "Step 3: install the pinned dependencies"
+        working-directory: ${{ runner.temp }}/LeetCoach
+        run: .venv/bin/python -m pip install -r requirements/base.txt -c requirements/lock.txt
+
+      - name: "Step 4: start LeetCoach against the fake claude CLI"
         working-directory: ${{ runner.temp }}/LeetCoach
         run: |
-          python3 -m venv .venv
-          . .venv/bin/activate
-          pip install -r requirements/base.txt
-
-      - name: "Step 3: run (python app.py) against the fake claude CLI"
-        working-directory: ${{ runner.temp }}/LeetCoach
-        run: |
-          . .venv/bin/activate
           export LEETCOACH_CLAUDE_BIN="$PWD/scripts/dev/fake_claude.py"
-          export FAKE_CLAUDE_PYTHON="$(command -v python)"
+          export FAKE_CLAUDE_PYTHON="$PWD/.venv/bin/python"
           export LEETCOACH_NO_BROWSER=1 LEETCOACH_NO_DOTENV=1 PYTHONUNBUFFERED=1
           export LEETCOACH_OUTPUT_DIR="$RUNNER_TEMP/lc-output"
           export LEETCOACH_CLAUDE_CWD="$RUNNER_TEMP/lc-claude-cwd"
           mkdir -p "$LEETCOACH_CLAUDE_CWD"
           test -x "$LEETCOACH_CLAUDE_BIN" || { echo "fake_claude.py is not executable"; exit 1; }
           log="$RUNNER_TEMP/app.log"
-          python app.py > "$log" 2>&1 &
+          .venv/bin/python app.py > "$log" 2>&1 &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true; echo "---- app log ----"; cat "$log"' EXIT
           ok=

@@ -92,10 +92,22 @@ See [SECURITY.md](docs/SECURITY.md).
 
 ## Setup
 
-Developed and tested on **Windows 11**; plain cross-platform Python with no OS-specific
-dependencies. You need **Python 3.12+** (use the `py` launcher on Windows) and the
-**`claude` CLI** installed, on your PATH, and authenticated (it drives your Claude Code
-subscription; there is no API key).
+You need:
+
+- **Windows 11**, where LeetCoach is developed and tested. Linux and macOS are not tested
+  by hand; CI runs the test suite and the Linux / macOS steps below on Ubuntu and macOS on
+  every push.
+- **Python 3.12 or newer** (CI covers 3.12 to 3.14). On Windows, install it from
+  [python.org](https://www.python.org/downloads/); that installer includes the `py`
+  launcher setup uses. On Linux and macOS, `python3 --version` must say 3.12 or newer
+  (Debian and Ubuntu also need the `python3-venv` package).
+- **Git**, to clone the repo.
+- **The `claude` CLI** (Claude Code), installed, on your PATH, and signed in. LeetCoach
+  drives your Claude Code subscription through it, so there is no API key to set up.
+
+Nothing else: no Node, no database, no build step.
+
+### Windows
 
 **Step 1: get the code.**
 
@@ -104,39 +116,67 @@ git clone https://github.com/yib7/LeetCoach.git
 cd LeetCoach
 ```
 
-**Step 2: install.** On Windows, one command creates the virtual environment and installs
-the runtime dependencies:
+**Step 2: start LeetCoach.**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+.\LeetCoach.cmd
 ```
 
-(`-ExecutionPolicy Bypass` sidesteps the default policy that blocks unsigned scripts, for
-this one process only - it changes nothing system-wide. Every LeetCoach `.ps1`/`.cmd`
-launcher, including `LeetCoach.cmd` itself, invokes scripts this same way.)
+The first start sets up a `.venv` and installs the pinned dependencies from
+`requirements/lock.txt`, which takes about a minute. Every start then checks that `claude`
+is signed in (if not, it opens `claude auth login` in its own window) and opens LeetCoach
+in your browser at `http://127.0.0.1:5000`, or the next free port if 5000 is busy. Press
+`Ctrl+C` or close the window to stop the app, and run the same command to start it again.
 
-(Not on Windows? Run `python3 -m venv .venv`, activate it, then `pip install -r requirements/base.txt`.)
-
-**Step 3: run.** Activate the virtual environment, then start the app:
+**Step 3 (optional): add a desktop shortcut.** Skip it if you start LeetCoach from a
+terminal.
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python app.py
+powershell -ExecutionPolicy Bypass -File .\scripts\create-shortcut.ps1
 ```
 
-Open the printed URL (default `http://127.0.0.1:5000`), paste a problem, pick a mode,
-language, and Code Quality level (and, if you like, a model), and click **Run**. The
-answer streams in live and is saved under `output/`. `python app.py` is the single entry
-point for every later run.
+From then on, double-click **LeetCoach** on your Desktop. `-ExecutionPolicy Bypass`
+applies to this one command and changes nothing system-wide.
 
-**Daily use.** After the one-time setup you do not need the terminal. Run
-`powershell -ExecutionPolicy Bypass -File .\scripts\create-shortcut.ps1` once to put a
-**LeetCoach** shortcut on your Desktop; from then on, double-click it (or run
-`.\LeetCoach.cmd`) to start the app and open it in your browser. If port 5000 is busy it
-picks the next free port. Close the window to stop the app.
+### Linux and macOS
 
-(Optional) Copy `.env.example` to `.env` to change the model or paths; all settings are
-optional, see [Configuration](#configuration).
+**Step 1: get the code.**
+
+```sh
+git clone https://github.com/yib7/LeetCoach.git
+cd LeetCoach
+```
+
+**Step 2: create a virtual environment.**
+
+```sh
+python3 -m venv .venv
+```
+
+**Step 3: install the pinned dependencies.**
+
+```sh
+.venv/bin/python -m pip install -r requirements/base.txt -c requirements/lock.txt
+```
+
+**Step 4: start LeetCoach.**
+
+```sh
+.venv/bin/python app.py
+```
+
+It opens your browser at the printed URL (`http://127.0.0.1:5000`, or the next free port
+if 5000 is busy). Press `Ctrl+C` to stop it, and run the same command to start it again.
+
+### First run
+
+The Console opens ready to go. Paste a problem, or click **Sample: Two Sum**, pick a
+mode, language and Code Quality level (and, if you like, a model), and click **Run**. The
+answer streams in live and is saved under `output/`. If `claude` is missing or signed
+out, the page still loads and a banner tells you what to run.
+
+Every setting is optional; see [Configuration](#configuration) to change the model or
+paths.
 
 ## Modes
 
