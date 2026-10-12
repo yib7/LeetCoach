@@ -106,7 +106,7 @@ flowchart TD
 ## What happens on a run
 
 ```mermaid
-%%{init: {"sequence": {"wrap": true, "width": 170, "actorMargin": 60, "diagramMarginX": 220}}}%%
+%%{init: {"sequence": {"wrap": true, "width": 170, "actorMargin": 60, "diagramMarginX": 270}}}%%
 sequenceDiagram
     participant U as Browser
     participant F as Flask /run
