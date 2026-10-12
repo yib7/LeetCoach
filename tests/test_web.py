@@ -29,7 +29,7 @@ from _helpers import CLASSIFY_JSON
 from _helpers import parse_sse as _parse_sse
 
 from leetcoach import app as app_module
-from leetcoach import claude_cli
+from leetcoach import claude_cli, library
 
 # --- a fake Claude that answers both the classify and the answer prompt ---
 
@@ -761,13 +761,13 @@ def test_library_listing_is_cached_and_invalidates_on_change(client, monkeypatch
     import os
     c, tmp = client
     calls = []
-    real = app_module._library_files
+    real = library.list_files
 
     def counting(root):
         calls.append(1)
         return real(root)
 
-    monkeypatch.setattr(app_module, "_library_files", counting)
+    monkeypatch.setattr(library, "list_files", counting)
 
     (tmp / "a.md").write_text("x", encoding="utf-8")
     assert c.get("/library").status_code == 200          # miss -> walks

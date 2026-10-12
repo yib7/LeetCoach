@@ -390,12 +390,12 @@ def main(argv: list[str], *, probe=running_instance) -> int:
     output = configure(scratch, keep="--keep" in argv)
     sys.path.insert(0, str(ROOT))
     os.chdir(ROOT)
-    from leetcoach import app  # env must be set first
+    from leetcoach import launcher  # env must be set first (imports the app)
 
-    app.PORT = PORT
+    launcher.PORT = PORT
     print("LeetCoach FAKE mode - the claude CLI is scripts/dev/fake_claude (never real Claude).")
     print(f"Scratch library: {output}")
-    return app.main()
+    return launcher.main()
 
 
 if __name__ == "__main__":

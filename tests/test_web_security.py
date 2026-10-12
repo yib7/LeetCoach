@@ -12,7 +12,7 @@ import pytest
 from _helpers import CLASSIFY_JSON, parse_sse
 
 from leetcoach import app as app_module
-from leetcoach import claude_cli
+from leetcoach import claude_cli, library, streaming
 
 RUN = {"problem": "Two Sum\nExample: Input: 1\nOutput: 1", "mode": "learning",
        "language": "python"}
@@ -136,7 +136,7 @@ def test_index_rejects_cross_site_subresource_loads_without_probing(env):
 # --- C3: SSE heartbeat -------------------------------------------------------------
 
 def test_sse_pings_while_claude_is_silent(env, monkeypatch):
-    monkeypatch.setattr(app_module, "SSE_PING_INTERVAL", 0.05)
+    monkeypatch.setattr(streaming, "SSE_PING_INTERVAL", 0.05)
 
     def run_fn(prompt, **kwargs):
         if _is_classify(prompt):
@@ -154,7 +154,7 @@ def test_sse_pings_while_claude_is_silent(env, monkeypatch):
 
 
 def test_sse_pings_while_waiting_on_the_classifier(env, monkeypatch):
-    monkeypatch.setattr(app_module, "SSE_PING_INTERVAL", 0.05)
+    monkeypatch.setattr(streaming, "SSE_PING_INTERVAL", 0.05)
     monkeypatch.setattr(app_module, "CLASSIFIER_JOIN_TIMEOUT", 0.5)
     stop = threading.Event()
 
@@ -176,7 +176,7 @@ def test_sse_pings_while_waiting_on_the_classifier(env, monkeypatch):
 def test_sse_pings_while_verifying(env, monkeypatch):
     from leetcoach import sandbox
 
-    monkeypatch.setattr(app_module, "SSE_PING_INTERVAL", 0.05)
+    monkeypatch.setattr(streaming, "SSE_PING_INTERVAL", 0.05)
 
     def slow_verify(code, problem, language, **kwargs):
         time.sleep(0.4)
@@ -426,10 +426,10 @@ def test_inside_root_predicate(tmp_path, monkeypatch):
     root = (tmp_path / "out").resolve()
     (root / "a").mkdir(parents=True)
     (root / "a" / "x.md").write_text("x", encoding="utf-8")
-    assert app_module._inside_root(root / "a" / "x.md", root)
-    assert app_module._inside_root(root / "a" / ".." / "a" / "x.md", root)
-    assert not app_module._inside_root(root / ".." / "other.md", root)
-    assert not app_module._inside_root(tmp_path / "out2" / "x.md", root)
+    assert library.inside_root(root / "a" / "x.md", root)
+    assert library.inside_root(root / "a" / ".." / "a" / "x.md", root)
+    assert not library.inside_root(root / ".." / "other.md", root)
+    assert not library.inside_root(tmp_path / "out2" / "x.md", root)
 
     # a path whose resolution lands outside (what a symlink / junction does)
     real_resolve = type(root).resolve
@@ -440,13 +440,13 @@ def test_inside_root_predicate(tmp_path, monkeypatch):
         return real_resolve(self, strict=strict)
 
     monkeypatch.setattr(type(root), "resolve", fake_resolve)
-    assert not app_module._inside_root(root / "a" / "x.md", root)
+    assert not library.inside_root(root / "a" / "x.md", root)
 
     def broken(self, strict=False):
         raise OSError("loop")
 
     monkeypatch.setattr(type(root), "resolve", broken)
-    assert not app_module._inside_root(root / "a" / "x.md", root)
+    assert not library.inside_root(root / "a" / "x.md", root)
 
 
 # --- Phase 4 (ship run): headers on every response type, loopback peers only --------

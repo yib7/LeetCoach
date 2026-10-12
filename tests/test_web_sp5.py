@@ -13,7 +13,7 @@ import pytest
 from _helpers import CLASSIFY_JSON, parse_sse
 
 from leetcoach import app as app_module
-from leetcoach import claude_cli, sandbox
+from leetcoach import claude_cli, library, sandbox, streaming
 
 RUN = {"problem": "Two Sum\nExample: Input: 1\nOutput: 1", "mode": "learning",
        "language": "python"}
@@ -199,7 +199,7 @@ def test_call_with_heartbeat_yields_updates_then_returns():
         updates.put("frame-2")
         return 42
 
-    gen = app_module._call_with_heartbeat(work, updates=updates)
+    gen = streaming.call_with_heartbeat(work, updates=updates)
     frames = []
     try:
         while True:
@@ -220,17 +220,17 @@ def test_call_with_heartbeat_yields_updates_then_returns():
 ])
 def test_verdict_from_text(line, verdict):
     doc = f"# T\n\n---\n\n**Verification:** {line}\n\n**Failed samples:**\n"
-    assert app_module.verdict_from_text(doc) == verdict
+    assert library.verdict_from_text(doc) == verdict
 
 
 def test_verdict_from_text_uses_the_last_block_and_none_without_one():
-    assert app_module.verdict_from_text("# Learning notes only\n") is None
+    assert library.verdict_from_text("# Learning notes only\n") is None
     doc = ("# T\n\n---\n\n**Verification:** ✗ Sample tests FAIL (0/1)\n\n"
            "---\n\n**Verification:** ✓ Sample tests PASS\n")
-    assert app_module.verdict_from_text(doc) == "pass"
+    assert library.verdict_from_text(doc) == "pass"
     # SP5 fix R2: a later `## Follow-up` section never changes the verdict.
     followed = doc + "\n## Follow-up\n\n---\n\n**Verification:** ✗ Sample tests FAIL\n"
-    assert app_module.verdict_from_text(followed) == "pass"
+    assert library.verdict_from_text(followed) == "pass"
 
 
 def test_library_listing_carries_the_verdict(env):

@@ -14,7 +14,7 @@ import pytest
 from _helpers import CLASSIFY_JSON, parse_sse
 
 from leetcoach import app as app_module
-from leetcoach import claude_cli, sandbox
+from leetcoach import claude_cli, launcher, sandbox, streaming
 
 ROOT = Path(__file__).resolve().parent.parent
 RUN = {"problem": "Two Sum\nExample: Input: 1\nOutput: 1", "mode": "learning",
@@ -210,7 +210,7 @@ def test_cancel_during_verification_stops_the_sandbox(env, monkeypatch):
 
 
 def test_abandoned_blocking_call_signals_its_cancel(monkeypatch):
-    monkeypatch.setattr(app_module, "SSE_PING_INTERVAL", 0.01)
+    monkeypatch.setattr(streaming, "SSE_PING_INTERVAL", 0.01)
     release = threading.Event()
     abandoned = threading.Event()
 
@@ -218,8 +218,8 @@ def test_abandoned_blocking_call_signals_its_cancel(monkeypatch):
         release.wait(5)
         return 1
 
-    gen = app_module._call_with_heartbeat(work, on_abandon=abandoned.set)
-    assert next(gen) == app_module.SSE_PING
+    gen = streaming.call_with_heartbeat(work, on_abandon=abandoned.set)
+    assert next(gen) == streaming.SSE_PING
     gen.close()  # the client went away mid-verification
     assert abandoned.is_set()
     release.set()
@@ -227,7 +227,7 @@ def test_abandoned_blocking_call_signals_its_cancel(monkeypatch):
 
 def test_finished_blocking_call_does_not_signal_cancel(monkeypatch):
     abandoned = threading.Event()
-    gen = app_module._call_with_heartbeat(lambda: 7, on_abandon=abandoned.set)
+    gen = streaming.call_with_heartbeat(lambda: 7, on_abandon=abandoned.set)
     with pytest.raises(StopIteration) as stop:
         while True:
             next(gen)
@@ -305,7 +305,7 @@ def _fake_opener(answers, seen, clock=None, cost=0.0):
 def test_finds_leetcoach_on_a_fallback_port():
     seen: list = []
     answers = {5000: {"app": "other"}, 5002: {"app": "leetcoach"}}
-    url = app_module._find_existing_instance(
+    url = launcher.find_existing_instance(
         "127.0.0.1", 5000, span=5, opener=_fake_opener(answers, seen),
         is_free=lambda host, port: port not in (5000, 5002),
     )
@@ -318,7 +318,7 @@ def test_finds_leetcoach_on_a_fallback_port():
 
 def test_no_instance_when_nothing_in_the_span_is_leetcoach():
     seen: list = []
-    url = app_module._find_existing_instance(
+    url = launcher.find_existing_instance(
         "127.0.0.1", 5000, span=3, opener=_fake_opener({}, seen),
         is_free=lambda host, port: False,
     )
@@ -329,7 +329,7 @@ def test_no_instance_when_nothing_in_the_span_is_leetcoach():
 def test_probing_is_bounded_by_an_overall_budget():
     clock = [0.0]
     seen: list = []
-    url = app_module._find_existing_instance(
+    url = launcher.find_existing_instance(
         "127.0.0.1", 5000, span=20, budget=2.0,
         opener=_fake_opener({}, seen, clock=clock, cost=0.5),
         is_free=lambda host, port: False, clock=lambda: clock[0],
@@ -344,22 +344,22 @@ def test_port_is_free_sees_a_running_werkzeug_server():
 
     srv = make_server("127.0.0.1", 0, lambda e, s: [], threaded=True)
     try:
-        assert app_module._port_is_free("127.0.0.1", srv.server_port) is False
+        assert launcher.port_is_free("127.0.0.1", srv.server_port) is False
     finally:
         srv.server_close()
-    assert app_module._port_is_free("127.0.0.1", srv.server_port) is True
+    assert launcher.port_is_free("127.0.0.1", srv.server_port) is True
 
 
 def test_main_uses_the_span_probe(monkeypatch):
     opened = []
-    monkeypatch.setattr(app_module, "_find_existing_instance",
+    monkeypatch.setattr(launcher, "find_existing_instance",
                         lambda host, port, **kw: "http://127.0.0.1:5003/")
 
     def no_choose(*a, **k):
         raise AssertionError("must not fall back to another port")
 
-    monkeypatch.setattr(app_module, "_choose_port", no_choose)
-    rc = app_module.main(open_browser=opened.append, serve=lambda port: None)
+    monkeypatch.setattr(launcher, "choose_port", no_choose)
+    rc = launcher.main(open_browser=opened.append, serve=lambda port: None)
     assert rc == 0
     assert opened == ["http://127.0.0.1:5003/"]
 

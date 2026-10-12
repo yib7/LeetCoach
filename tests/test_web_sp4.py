@@ -9,7 +9,7 @@ import pytest
 from _helpers import CLASSIFY_JSON, parse_sse
 
 from leetcoach import app as app_module
-from leetcoach import claude_cli
+from leetcoach import claude_cli, library
 
 ANSWER_MD = (
     "Use a hash map.\n\n"
@@ -166,8 +166,8 @@ def test_library_cache_sees_a_nested_external_add_and_delete(env):
 
 def test_library_cache_expires_after_ttl(env, monkeypatch):
     calls = []
-    real = app_module._library_files
-    monkeypatch.setattr(app_module, "_library_files", lambda root: calls.append(1) or real(root))
+    real = library.list_files
+    monkeypatch.setattr(library, "list_files", lambda root: calls.append(1) or real(root))
     c = _client(Recorder())
     c.get("/library")
     c.get("/library")

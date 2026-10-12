@@ -3,6 +3,12 @@ endpoints, the library browser (`/library`, `/library/file` GET + DELETE), the
 problem store and review queue (`/problems`, `/review`), the re-attempt sandbox
 (`/attempt/test`), flashcards, `/stats`, and the plain-JSON Quick Ask `/ask`.
 
+This module is the routes. What they lean on lives next door:
+:mod:`leetcoach.request_guard` (who may call them), :mod:`leetcoach.streaming`
+(SSE frames, heartbeat, run cancel state), :mod:`leetcoach.library` (the
+library listing and its read/delete gate) and :mod:`leetcoach.launcher`
+(``python app.py``: port choice, single instance, browser).
+
 Design mirrors the Xeno RAG pattern, in Flask flavour:
 
 * ``create_app(*, run_fn=claude_cli.run)`` is a factory with an **injectable**
@@ -48,24 +54,16 @@ then {"phase": "saving"}), a terminal ``done`` {"path", "source", "resumed",
 """
 from __future__ import annotations
 
-import contextlib
-import http.client
 import inspect
 import io
-import ipaddress
-import json
 import os
 import queue
 import re
-import socket
 import threading
 import time
-import urllib.request
 import uuid
-import webbrowser
 from html import escape as html_escape
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -76,13 +74,24 @@ from leetcoach import (
     code_blocks,
     config,
     flashcards,
+    library,
     practice,
     problem_store,
     prompts,
+    request_guard,
     sandbox,
     stats,
     storage,
+    streaming,
     topic_index,
+)
+from leetcoach.streaming import (
+    HEARTBEAT,
+    RunState,
+    call_with_heartbeat,
+    iter_with_heartbeat,
+    sse_event,
+    sse_text,
 )
 
 
@@ -119,21 +128,11 @@ _maybe_load_dotenv(config.DOTENV_FILE)
 TEMPLATES = config.PACKAGE_DIR / "templates"
 STATIC = config.PACKAGE_DIR / "static"
 
-# Bind address for `python app.py` (single source of truth — the Host-header
-# allowlist below keys off loopback hostnames, so no port is duplicated here).
-HOST = "127.0.0.1"
-PORT = 5000
 
 # Reported by GET /healthz (D16) so a second launch can recognise a running
 # LeetCoach. Matches the CHANGELOG's current release line.
 VERSION = "1.5.0"
 
-# Host-header allowlist (DNS-rebinding defense). Hostnames only, ANY port: a
-# rebinding attacker controls what IP their hostname resolves to, never the
-# hostname the victim's browser sends — so matching the hostname IS the whole
-# defense, and pinning a port would only break `flask run` on a non-default
-# port. Bracketed "[::1]" covers the IPv6 loopback literal.
-ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
 
 # Cap on how many already-learned topics get interpolated into the Learning
 # prompt (audit6 P2-12): the index grows forever, the prompt must not. The
@@ -145,10 +144,6 @@ LEARNED_TOPICS_CAP = 50
 # classifier normally answers in a few seconds on the cheap model.
 CLASSIFIER_JOIN_TIMEOUT = 60.0
 
-# Extensions the library browser (SP10) will list and serve. Everything the
-# app itself writes (storage._LANG_EXT + .md, .txt fallback, topic_index.json)
-# is covered; anything else in the output dir is invisible to the read path.
-LIBRARY_EXTENSIONS = frozenset({".md", ".py", ".cpp", ".java", ".txt", ".json"})
 
 # B10: the longest a cached /library listing is served without a re-walk, even
 # when no directory mtime moved (an in-place edit of a file). Read at call time.
@@ -289,340 +284,7 @@ def _attempt_summary(value) -> tuple[dict | None, str | None]:
     return (out or None), None
 
 
-def _is_loopback_peer(addr: str | None) -> bool:
-    """Phase 4: whether the TCP peer (``request.remote_addr``) is this machine.
-    An IPv4-mapped IPv6 peer (``::ffff:127.0.0.1``) counts by its IPv4 form.
-    A missing or unparseable address is not loopback (fail closed)."""
-    try:
-        ip = ipaddress.ip_address((addr or "").strip())
-    except ValueError:
-        return False
-    mapped = getattr(ip, "ipv4_mapped", None)
-    return (mapped or ip).is_loopback
-
-
-def _hostname(host: str) -> str:
-    """The hostname part of a Host header value, port stripped, lowercased.
-    Handles the bracketed IPv6 form ("[::1]:5000" -> "[::1]")."""
-    host = host.strip().lower()
-    if host.startswith("["):
-        return host.partition("]")[0] + "]"
-    return host.rsplit(":", 1)[0]
-
-
-_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
-
-def _split_host_port(hostport: str, scheme: str) -> tuple[str, int | None]:
-    """``("host", port)`` from a ``host[:port]`` string (bracketed IPv6 ok),
-    the scheme's default port filled in; port ``None`` if unparseable."""
-    hostport = hostport.strip().lower()
-    host = _hostname(hostport)
-    rest = hostport[len(host):]
-    if not rest:
-        return host, _DEFAULT_PORTS.get(scheme)
-    if not rest.startswith(":") or not rest[1:].isdigit():
-        return host, None
-    return host, int(rest[1:])
-
-
-def _same_origin(origin: str, host_header: str, scheme: str) -> bool:
-    """C2: True iff the ``Origin`` header names exactly this server - same
-    scheme, same loopback host, same port as the request's ``Host``. ``null``
-    (sandboxed iframes, file://) and anything unparseable are rejected."""
-    parsed = urlsplit(origin.strip())
-    if parsed.scheme not in _DEFAULT_PORTS or not parsed.netloc:
-        return False
-    if parsed.scheme != scheme or parsed.path not in ("", "/"):
-        return False
-    origin_host = _split_host_port(parsed.netloc, parsed.scheme)
-    return origin_host[1] is not None and origin_host == _split_host_port(host_header, scheme)
-
-
-def _cross_site_rejection(method: str, path: str, headers, host_header: str, scheme: str):
-    """C2: the reason to refuse a request as cross-site, or ``None``.
-
-    Unsafe methods (every state-changing route: /run, /followup, /ask,
-    /attempt/test, the /problems grade + notes routes, /config/model,
-    DELETE /library/file and the cancel routes) must come from this page: a browser
-    sends ``Origin`` on them, and it must be this exact origin;
-    ``Sec-Fetch-Site: cross-site`` is refused outright. A request with neither
-    header (curl, scripts, the test client) is allowed - the threat is a
-    hostile web page, which cannot strip them.
-
-    ``GET /`` runs the CLI sign-in probe, so a cross-site page must not be able
-    to trigger it with an ``<img>``/``<iframe>``/``fetch``; only a top-level
-    navigation (the user following a link) is allowed cross-site. SP4 review
-    M11: ``same-site`` is treated the same way - another app on a different
-    localhost port is "same-site" (the port is not part of a site), so only
-    ``same-origin`` and ``none`` (typed URL, bookmark) load it freely.
-    """
-    site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
-    if method in _UNSAFE_METHODS:
-        if site == "cross-site":
-            return "Cross-site request refused."
-        origin = headers.get("Origin")
-        if origin is not None and not _same_origin(origin, host_header, scheme):
-            return "Cross-origin request refused."
-        return None
-    if path == "/" and site in ("cross-site", "same-site"):
-        mode = (headers.get("Sec-Fetch-Mode") or "").strip().lower()
-        dest = (headers.get("Sec-Fetch-Dest") or "").strip().lower()
-        if not (mode == "navigate" and dest == "document"):
-            return "Cross-site request refused."
-    return None
-
-
-# C3: an SSE comment frame sent while the stream is otherwise silent (Claude
-# thinking, the sandbox verifying, the classifier join). It keeps proxies and
-# the browser from timing the stream out, and - the B14 point - a write to a
-# client that has gone away fails, so the server notices the disconnect and
-# frees the run instead of waiting for Claude to finish. Ignored by EventSource
-# and by app.js's parser. The interval is read at call time (tests shorten it).
-SSE_PING = ": ping\n\n"
-SSE_PING_INTERVAL = 15.0
-
-_HEARTBEAT = object()
-_ITEM, _DONE, _ERROR = "item", "done", "error"
-
-
-def _iter_with_heartbeat(iterable):
-    """Yield the items of ``iterable`` - pulled on a helper thread - and
-    ``_HEARTBEAT`` whenever ``SSE_PING_INTERVAL`` passes with no new item.
-    Exceptions from the iterable re-raise here. If the consumer stops early
-    (client disconnect, cancel), ``iterable.cancel()`` is called when it has
-    one (``claude_cli.ClaudeRun`` kills its process tree) and the helper
-    thread closes the iterator as soon as it regains control."""
-    q: queue.Queue = queue.Queue()
-    stop = threading.Event()
-
-    def pump():
-        it = iter(iterable)
-        try:
-            for item in it:
-                q.put((_ITEM, item))
-                if stop.is_set():
-                    break
-        except BaseException as exc:  # noqa: BLE001 - handed to the consumer
-            q.put((_ERROR, exc))
-            return
-        finally:
-            if stop.is_set():
-                close = getattr(it, "close", None)
-                if callable(close):
-                    with contextlib.suppress(Exception):  # best-effort teardown
-                        close()
-        q.put((_DONE, None))
-
-    threading.Thread(target=pump, name="leetcoach-stream-pump", daemon=True).start()
-    finished = False
-    try:
-        while True:
-            try:
-                kind, value = q.get(timeout=SSE_PING_INTERVAL)
-            except queue.Empty:
-                yield _HEARTBEAT
-                continue
-            if kind is _DONE:
-                finished = True
-                return
-            if kind is _ERROR:
-                finished = True
-                raise value
-            yield value
-    finally:
-        if not finished:
-            stop.set()
-            cancel = getattr(iterable, "cancel", None)
-            if callable(cancel):
-                with contextlib.suppress(Exception):  # best-effort teardown
-                    cancel()
-
-
-def _call_with_heartbeat(fn, *, on_abandon=None, updates=None):
-    """Run the blocking ``fn()`` on a helper thread, yielding ``SSE_PING``
-    every ``SSE_PING_INTERVAL`` while it works; ``return`` its result (use
-    with ``yield from`` inside an SSE generator) or re-raise its exception.
-
-    If the consumer stops early (the client went away: ``GeneratorExit`` at a
-    ping), ``on_abandon()`` is called so the work can be stopped instead of
-    running out its clock unobserved (SP4 review M2: the sandbox).
-
-    ``updates`` (SP5 D11): an optional ``queue.Queue`` of ready-made SSE
-    frames the work posts while it runs (verification progress); they are
-    yielded as they arrive, and each one also counts as keep-alive."""
-    box: dict = {}
-    done = threading.Event()
-
-    def work():
-        try:
-            box["value"] = fn()
-        except BaseException as exc:  # noqa: BLE001 - handed to the caller
-            box["error"] = exc
-        finally:
-            done.set()
-
-    threading.Thread(target=work, name="leetcoach-blocking-call", daemon=True).start()
-
-    def drain():
-        while updates is not None:
-            try:
-                yield updates.get_nowait()
-            except queue.Empty:
-                return
-
-    try:
-        if updates is None:
-            while not done.wait(SSE_PING_INTERVAL):
-                yield SSE_PING
-        else:
-            last = time.monotonic()
-            while True:
-                for frame in drain():
-                    yield frame
-                    last = time.monotonic()
-                if done.is_set():
-                    break
-                wait = SSE_PING_INTERVAL - (time.monotonic() - last)
-                if wait <= 0:
-                    yield SSE_PING
-                    last = time.monotonic()
-                    continue
-                done.wait(min(wait, 0.1))
-            yield from drain()
-    finally:
-        if not done.is_set() and on_abandon is not None:
-            with contextlib.suppress(Exception):  # best-effort teardown
-                on_abandon()
-    if "error" in box:
-        raise box["error"]
-    return box["value"]
-
-
-class _RunCancelled(Exception):
-    """Raised inside a /run stream once ``POST /run/cancel`` named it."""
-
-
-class _RunState:
-    """One in-flight /run (B14): its dedup key and the cancel hooks of every
-    Claude call it started, so ``POST /run/cancel`` can kill them all.
-
-    SP4 review M1: :meth:`commit` is the point of no return (the save). It and
-    :meth:`cancel` decide under one lock, so exactly one of them wins: a run
-    cancelled first saves nothing, and a cancel that arrives after the commit
-    is refused (the run finishes and reports ``done``)."""
-
-    def __init__(self, key) -> None:
-        self.key = key
-        self._lock = threading.Lock()
-        self._cancelled = False
-        self._committed = False
-        self._hooks: list = []
-
-    @property
-    def cancelled(self) -> bool:
-        return self._cancelled
-
-    def add_cancel_hook(self, hook) -> None:
-        with self._lock:
-            self._hooks.append(hook)
-            fire = self._cancelled
-        if fire:
-            hook()
-
-    def cancel(self) -> bool:
-        """Cancel the run; ``False`` (and nothing fired) if it already
-        committed to saving."""
-        with self._lock:
-            if self._committed:
-                return False
-            self._cancelled = True
-            hooks = list(self._hooks)
-        for hook in hooks:
-            hook()
-        return True
-
-    def check(self) -> None:
-        if self._cancelled:
-            raise _RunCancelled()
-
-    def commit(self) -> None:
-        """Final cancel check before the save; after it, cancel() refuses."""
-        with self._lock:
-            if self._cancelled:
-                raise _RunCancelled()
-            self._committed = True
-
-
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
-
-
-def _sweep_sandbox_temp() -> int:
-    """Startup housekeeping (SP3 B6): remove ``leetcoach_run_*`` sandbox dirs
-    older than a day that a crashed or killed run left in the temp dir.
-    Returns how many were removed; never raises, so a hiccup can't block
-    launch."""
-    try:
-        return sandbox.sweep_stale_run_dirs()
-    except Exception:  # noqa: BLE001 - housekeeping must never stop the app launching
-        return 0
-
-
-PORT_SPAN = 20  # how far past PORT the fallback (and the instance probe) looks
-
-
-def _port_is_free(host: str, port: int) -> bool:
-    """Whether a fresh ``SOCK_STREAM`` socket (no ``SO_REUSEADDR``) can bind
-    ``host:port`` right now. The socket is always closed again."""
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    sock = socket.socket(family, socket.SOCK_STREAM)
-    try:
-        sock.bind((host, port))
-        return True
-    except OSError:
-        return False
-    finally:
-        sock.close()
-
-
-def _choose_port(preferred: int, host: str, *, span: int = PORT_SPAN) -> int:
-    """Pick a bindable TCP port on ``host``, preferring ``preferred`` (SP-A).
-
-    Probe-bind a fresh ``SOCK_STREAM`` socket (address family derived from ``host``,
-    so an IPv6 ``HOST`` such as ``::1`` works as well as IPv4) with NO
-    ``SO_REUSEADDR`` (so probing an in-use port genuinely fails); if ``preferred``
-    binds, return it. Otherwise scan ``preferred+1 … preferred+span`` (clamped to the
-    valid ``<= 65535`` range) and return the first port that binds. If the whole span
-    is busy, bind to port ``0`` and return the OS-assigned ephemeral port. Every probe
-    socket is closed before returning. A tiny TOCTOU window between the probe and
-    ``app.run`` is acceptable for a single-user localhost tool — this only turns a
-    hard crash on an occupied port into a graceful fallback."""
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
-
-    # Clamp the scan so a candidate never exceeds the valid port range (a high
-    # PORT would otherwise raise OverflowError, not OSError, past 65535).
-    for candidate in range(preferred, min(preferred + span, 65535) + 1):
-        if _port_is_free(host, candidate):
-            return candidate
-    # Whole span occupied (or preferred out of range) — OS-assigned ephemeral port.
-    sock = socket.socket(family, socket.SOCK_STREAM)
-    try:
-        sock.bind((host, 0))
-        return sock.getsockname()[1]
-    finally:
-        sock.close()
-
-
-def _sse_text(delta: str) -> str:
-    """A streamed text delta. JSON-encoded so newlines/markdown survive transport
-    (a raw newline is an SSE event boundary)."""
-    return f"data: {json.dumps(delta)}\n\n"
-
-
-def _sse_event(name: str, payload) -> str:
-    """A named terminal event carrying a JSON payload."""
-    return f"event: {name}\ndata: {json.dumps(payload)}\n\n"
 
 
 def _verification_line(result) -> str:
@@ -666,269 +328,6 @@ def _verify_code(code: str, problem: str, language: str, *, cancel=None, progres
         return result, _verification_line(result)
     except Exception as exc:  # noqa: BLE001 - verification is strictly best-effort
         return None, f"⚠ not auto-verified (verifier error: {exc})"
-
-
-def _topic_index_resolved() -> Path | None:
-    try:
-        return config.topic_index_path().resolve()
-    except OSError:
-        return None
-
-
-def _is_hidden(root: Path, path: Path, topic_index_file: Path | None = None) -> bool:
-    """B19: True for app metadata that is never part of the library - any
-    path with a dot-prefixed segment (``.leetcoach/``, temp files), the topic
-    index (``topic_index.json`` or wherever ``LEETCOACH_TOPIC_INDEX`` points
-    inside the output dir). ``path`` is inside ``root``; pass the resolved
-    topic-index path when checking many files (else it is looked up)."""
-    rel = path.relative_to(root)
-    if any(part.startswith(".") for part in rel.parts):
-        return True
-    if rel.as_posix() == "topic_index.json":
-        return True
-    if topic_index_file is None:
-        topic_index_file = _topic_index_resolved()
-    return path == topic_index_file
-
-
-def _library_signature(root: Path) -> tuple:
-    """B10: a cheap freshness signature for the listing - the mtime of the
-    root AND of every (non-hidden) directory under it. Adding, removing or
-    renaming a file anywhere bumps its parent directory's mtime, so a nested
-    change made outside the app (Explorer, git, a sync client) invalidates the
-    cache too, not just a top-level one."""
-    sig = []
-    stack = [root]
-    while stack:
-        folder = stack.pop()
-        try:
-            sig.append((str(folder), folder.stat().st_mtime_ns))
-            with os.scandir(folder) as entries:
-                for entry in entries:
-                    if entry.name.startswith("."):
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        stack.append(Path(entry.path))
-        except OSError:
-            sig.append((str(folder), None))
-    out = tuple(sorted(sig, key=lambda item: item[0]))
-    # SP6 fix M4: the hidden metadata store (run log + problem records) feeds
-    # each file's verdict / difficulty, so an append made outside the app
-    # (another instance, a hand edit) must invalidate the listing too.
-    try:
-        meta = problem_store.store_signature(root=root)
-    except Exception:  # noqa: BLE001 - a signature must never fail the listing
-        meta = None
-    return out + (("<meta>", meta),)
-
-
-# SP5 B18: the sandbox verdict a saved doc recorded in its trailing
-# "**Verification:** <line>" (written by /run for Answer and Guided). Keyed by
-# path + (mtime_ns, size) so an unchanged file is read once per process.
-# SP5 fix R2: only the block /run itself appends ("---", blank line,
-# "**Verification:** <line>") counts - a "**Verification:**" line the MODEL
-# wrote inside a doc (e.g. a Learning doc quoting the format) is not a verdict.
-_VERIFICATION_LINE_RE = re.compile(
-    r"(?:^|\n)---\n\n\*\*Verification:\*\*[ \t]*([^\n]+?)[ \t]*(?=\n|$)"
-)
-_SAMPLE_VERDICT_RE = re.compile(r"Sample tests (PASS|FAIL|ERROR)\b")
-_FOLLOW_UP_RE = re.compile(r"^##[ \t]+Follow-up\b", re.MULTILINE | re.IGNORECASE)
-_VERDICT_READ_CAP = 1024 * 1024
-_verdict_cache: dict = {}
-_verdict_lock = threading.Lock()
-
-
-def verdict_from_text(text: str) -> str | None:
-    """``pass`` / ``fail`` / ``error`` / ``not_verified`` from the app-written
-    ``---`` / ``**Verification:**`` block in ``text``, or ``None`` when it has
-    none (Learning docs, legacy files). Mirrors :func:`_verification_line`.
-
-    SP5 fix R2: anything under a ``## Follow-up`` heading that comes AFTER the
-    first verification block is a later addition to the saved run and never
-    changes its verdict; the last block before that point wins."""
-    text = (text or "").replace("\r\n", "\n")
-    first = _VERIFICATION_LINE_RE.search(text)
-    if first is None:
-        return None
-    follow_up = _FOLLOW_UP_RE.search(text, first.end())
-    if follow_up is not None:
-        text = text[: follow_up.start()]
-    matches = _VERIFICATION_LINE_RE.findall(text)
-    m = _SAMPLE_VERDICT_RE.search(matches[-1])
-    if m:
-        return m.group(1).lower()
-    return "not_verified"
-
-
-def verdict_from_line(line: str | None) -> str | None:
-    """``pass`` / ``fail`` / ``error`` / ``not_verified`` for a
-    :func:`_verification_line`, ``None`` when the run was not verified."""
-    if line is None:
-        return None
-    m = _SAMPLE_VERDICT_RE.search(line)
-    return m.group(1).lower() if m else "not_verified"
-
-
-def _log_index(root: Path) -> dict:
-    """SP6: path -> {verdict, problem_id, difficulty} from the run log;
-    empty (doc fallback everywhere) if the log can't be read."""
-    try:
-        return problem_store.path_index(root=root)
-    except Exception:  # noqa: BLE001 - the listing must never fail on metadata
-        return {}
-
-
-def _md_verdict(path: Path, stat) -> str | None:
-    key = str(path)
-    sig = (stat.st_mtime_ns, stat.st_size)
-    with _verdict_lock:
-        hit = _verdict_cache.get(key)
-        if hit is not None and hit[0] == sig:
-            return hit[1]
-    try:
-        with open(path, "rb") as fh:
-            raw = fh.read(_VERDICT_READ_CAP)
-    except OSError:
-        return None
-    verdict = verdict_from_text(raw.decode("utf-8", errors="replace"))
-    with _verdict_lock:
-        _verdict_cache[key] = (sig, verdict)
-    return verdict
-
-
-def _inside_root(path: Path, resolved_root: Path) -> bool:
-    """3A W4: whether ``path`` - with every symlink / junction on the way
-    followed - still lies inside ``resolved_root`` (an already-resolved
-    library root). ``rglob`` descends into a junction and ``is_file()``
-    follows a symlink, so without this a link inside ``output/`` would list,
-    read and export a file from anywhere. Unresolvable paths count as
-    outside. The same rule :func:`_resolve_library_file` applies to reads."""
-    try:
-        return path.resolve().is_relative_to(resolved_root)
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-
-def _library_files(root: Path) -> list[dict]:
-    """The library listing: every allowlisted file under ``root``, as
-    ``{"path": <relative, forward slashes>, "size": <bytes>, "mtime": <epoch
-    seconds>}`` dicts, sorted by path. ``mtime`` lets the frontend show real
-    saved dates and derive the recent-runs list; it is an additive field, so
-    older callers that read only ``path``/``size`` are unaffected. A
-    missing/empty root is an empty list, never an error. App metadata
-    (``.leetcoach/``, the topic index) is left out (B19)."""
-    if not root.is_dir():
-        return []
-    files = []
-    topic_index_file = _topic_index_resolved()
-    log_index = _log_index(root)
-    try:
-        resolved_root = root.resolve()
-    except OSError:
-        return []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in LIBRARY_EXTENSIONS:
-            continue
-        if _is_hidden(root, path, topic_index_file):
-            continue
-        if not _inside_root(path, resolved_root):
-            continue  # 3A W4: a symlink / junction pointing out of output/
-        try:
-            stat = path.stat()
-        except OSError:
-            continue  # vanished mid-walk — skip, never 500 a listing
-        entry = {
-            "path": path.relative_to(root).as_posix(),
-            "size": stat.st_size,
-            "mtime": stat.st_mtime,
-        }
-        logged = log_index.get(entry["path"])
-        if logged is not None:
-            # SP6: the run log is the source of truth for a run it recorded.
-            if logged.get("difficulty"):
-                entry["difficulty"] = logged["difficulty"]
-            if logged.get("problem_id"):
-                entry["problem_id"] = logged["problem_id"]
-            # SP6 fix O3: the record's own title / number for display.
-            if logged.get("title"):
-                entry["title"] = logged["title"]
-            if isinstance(logged.get("number"), int):
-                entry["number"] = logged["number"]
-            if path.suffix.lower() == ".md" and logged.get("verdict"):
-                entry["verdict"] = logged["verdict"]
-        elif path.suffix.lower() == ".md":
-            # SP5 B18 (legacy files the log never saw): parsed from the doc.
-            verdict = _md_verdict(path, stat)
-            if verdict:
-                entry["verdict"] = verdict
-        files.append(entry)
-    _prune_verdict_cache(root, files)
-    return files
-
-
-def _prune_verdict_cache(root: Path, files: list[dict]) -> None:
-    """SP5 fix R7: forget cached verdicts of docs under ``root`` that are no
-    longer listed (deleted / renamed), so the cache cannot grow without bound
-    as runs come and go. Entries for other roots are left alone."""
-    listed = {str(root / f["path"]) for f in files}
-    prefix = str(root)
-    with _verdict_lock:
-        stale = [k for k in _verdict_cache if k.startswith(prefix) and k not in listed]
-        for key in stale:
-            del _verdict_cache[key]
-
-
-def _existing_runs(runs, listed: set[str] | frozenset[str] = frozenset()) -> list[str]:
-    """SP8 fix M7: the paths of a problem record's ``runs`` that are still
-    library files. The record on disk is never pruned (a delete in Explorer
-    or a restored file is reflected either way); the response just stops
-    pointing at docs that are gone, so counts and "show the solution" agree
-    with the library.
-
-    3B 3.5: ``listed`` holds the paths of the (cached, freshness-keyed)
-    library listing; a path in it is a library file without touching the
-    disk, so only a path it lacks pays :func:`_resolve_library_file`'s
-    realpath calls."""
-    if not isinstance(runs, list):
-        return []
-    return [p for p in runs if isinstance(p, str)
-            and (p in listed or _resolve_library_file(p) is not None)]
-
-
-def _resolve_library_file(rel: str) -> Path | None:
-    """Resolve a request's ``path`` param against the output root, or ``None``.
-
-    This is the containment gate for the library's read path — the same rigor
-    as ``storage.slug`` on the write path. ``None`` (-> a uniform 404) unless
-    ALL of the following hold, so a rejection never leaks what exists:
-
-    * non-empty, no NUL, and not absolute / drive-anchored (``C:\\...``,
-      ``\\\\server\\share``, ``/etc``, ``\\foo``);
-    * ``(root / rel).resolve()`` — which collapses ``..`` (in slash OR
-      backslash form; Windows Path treats both as separators) and follows
-      symlinks — stays inside ``root.resolve()`` per ``is_relative_to``;
-    * the suffix is on ``LIBRARY_EXTENSIONS`` (checked on the RESOLVED path);
-    * it is an existing regular file (directories and reserved names fail).
-    """
-    if not rel or "\x00" in rel:
-        return None
-    root = config.output_dir().resolve()
-    try:
-        candidate = Path(rel)
-        if candidate.is_absolute() or candidate.drive:
-            return None
-        resolved = (root / candidate).resolve()
-    except (OSError, ValueError):
-        return None
-    if not resolved.is_relative_to(root):
-        return None
-    if resolved.suffix.lower() not in LIBRARY_EXTENSIONS:
-        return None
-    if not resolved.is_file():
-        return None
-    if _is_hidden(root, resolved):  # B19: app metadata is not a library file
-        return None
-    return resolved
 
 
 def _verification_detail(result) -> str:
@@ -1013,7 +412,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     # In-flight /run de-duplication (P2-12): a single-user local tool should not
     # fan the same (problem, mode, language, tier, model) into N concurrent
     # Claude runs (double-click, impatient re-submit). ``_inflight_runs`` maps
-    # each key to the run_id that owns it, ``_runs`` maps run_id -> _RunState;
+    # each key to the run_id that owns it, ``_runs`` maps run_id -> RunState;
     # both guarded by one lock. The key is registered after validation and
     # released when the stream ends — on normal completion, client disconnect
     # (GeneratorExit), or error — or right away by POST /run/cancel (B14), and
@@ -1030,7 +429,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     _attempt_running: dict = {"cancel": None}
     # SP8 / D6: follow-ups have their own slot - one at a time per app,
     # independent of /run (a follow-up may stream while a study run does).
-    _followups: dict = {}  # followup_id -> _RunState, for /followup/cancel
+    _followups: dict = {}  # followup_id -> RunState, for /followup/cancel
     _inflight_lock = threading.Lock()
 
     def _cancel_ask_call(call) -> None:
@@ -1041,7 +440,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             except Exception:  # cancelling is best-effort
                 app.logger.exception("could not cancel the quick ask call")
 
-    def _release_run(run_id: str, state: _RunState) -> None:
+    def _release_run(run_id: str, state: RunState) -> None:
         with _inflight_lock:
             if _inflight_runs.get(state.key) == run_id:
                 del _inflight_runs[state.key]
@@ -1065,7 +464,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     def _cached_library_files() -> list[dict]:
         root = config.output_dir().resolve()
-        dirs = _library_signature(root) if root.is_dir() else ()
+        dirs = library.signature(root) if root.is_dir() else ()
         with _lib_lock:
             sig = (_lib_version[0], dirs)
             now = time.monotonic()
@@ -1074,7 +473,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 or _lib_cache["sig"] != sig
                 or now - _lib_cache["at"] >= LIBRARY_CACHE_TTL
             ):
-                _lib_cache["files"] = _library_files(root)
+                _lib_cache["files"] = library.list_files(root)
                 _lib_cache["sig"] = sig
                 _lib_cache["at"] = now
             return _lib_cache["files"]
@@ -1090,13 +489,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # binds 127.0.0.1, but `flask run --host 0.0.0.0` or a WSGI server on
         # a LAN address would expose every route, and a LAN client can send
         # `Host: 127.0.0.1` itself - the Host check alone does not stop it.
-        if not _is_loopback_peer(request.remote_addr):
+        if not request_guard.is_loopback_peer(request.remote_addr):
             return jsonify({"error": "LeetCoach only serves this computer."}), 403
-        if _hostname(request.host) not in ALLOWED_HOSTNAMES:
+        if request_guard.hostname(request.host) not in request_guard.ALLOWED_HOSTNAMES:
             return jsonify({"error": "Forbidden host."}), 403
         # C2: a hostile page on another origin can still POST to loopback
         # (the Host check can't see that) - refuse it by Origin/Sec-Fetch-Site.
-        reason = _cross_site_rejection(
+        reason = request_guard.cross_site_rejection(
             request.method, request.path, request.headers, request.host, request.scheme
         )
         if reason:
@@ -1196,7 +595,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         return jsonify({"ok": True, "model": alias})
 
     @app.get("/library")
-    def library():
+    def library_listing():
         # Listing of the study library (SP10). Missing/empty output
         # dir is an empty listing — the library just hasn't accumulated yet.
         # Served from the freshness-keyed cache (P2-6).
@@ -1209,7 +608,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # client-side through the same hardened pipeline as run output. Every
         # rejection is the same 404 — don't leak which check failed or what
         # exists outside the root.
-        resolved = _resolve_library_file(request.args.get("path", ""))
+        resolved = library.resolve_file(request.args.get("path", ""))
         if resolved is None:
             return jsonify({"error": "Not found."}), 404
         try:
@@ -1233,7 +632,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         scope = request.args.get("scope", "file")
         if scope not in ("file", "run"):
             return jsonify({"error": "Unknown delete scope."}), 400
-        resolved = _resolve_library_file(request.args.get("path", ""))
+        resolved = library.resolve_file(request.args.get("path", ""))
         if resolved is None:
             return jsonify({"error": "Not found."}), 404
         targets = [resolved]
@@ -1243,7 +642,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 if sibling == resolved:
                     continue
                 rel_sibling = sibling.relative_to(config.output_dir().resolve()).as_posix()
-                if _resolve_library_file(rel_sibling) is not None:
+                if library.resolve_file(rel_sibling) is not None:
                     targets.append(sibling)
         root = config.output_dir().resolve()
         deleted = []
@@ -1281,7 +680,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         listing = []
         for rec in problem_store.list_problems():
             item = {k: rec.get(k) for k in PROBLEM_SUMMARY_FIELDS}
-            runs = _existing_runs(rec.get("runs"), listed)
+            runs = library.existing_runs(rec.get("runs"), listed)
             # 3A W3: a hand-edited record may hold non-string aliases; an
             # unhashable one would crash the set below, so keep strings only.
             raw_aliases = rec.get("aliases")
@@ -1302,7 +701,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # An alias (an id merged into this record) resolves to the record.
         log = problem_store.runs_for(pid)
         # SP8 fix M7: a deleted doc drops out of ``runs`` (the log keeps it).
-        return jsonify({**rec, "runs": _existing_runs(rec.get("runs")), "log": log})
+        return jsonify({**rec, "runs": library.existing_runs(rec.get("runs")), "log": log})
 
     @app.get("/review")
     def review_queue():
@@ -1458,7 +857,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return None, None, (jsonify({"error": "Invalid problem id."}), 400)
         path = request.args.get("path")
         if path is not None:
-            resolved = _resolve_library_file(path)
+            resolved = library.resolve_file(path)
             if resolved is None or resolved.suffix.lower() != ".md":
                 return None, None, (jsonify({"error": "Not found."}), 404)
             path = resolved.relative_to(config.output_dir().resolve()).as_posix()
@@ -1571,7 +970,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # validation; an exact duplicate that's still streaming gets a 409.
         run_key = (problem, mode, language, tier, model, attempt_code)
         study_kwargs = {"model": model} if model else {}
-        state = _RunState(run_key)
+        state = RunState(run_key)
         with _inflight_lock:
             if run_key in _inflight_runs or run_id in _runs:
                 return jsonify(
@@ -1604,7 +1003,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             # (in the neutral cwd's project bucket) for a later --resume.
             try:
                 state.check()  # cancelled before the stream even started
-                yield _sse_event("phase", {"phase": "streaming"})
+                yield sse_event("phase", {"phase": "streaming"})
                 call = run_fn(
                     prompt,
                     system_prompt=prompts.TUTOR_SYSTEM_PROMPT,
@@ -1614,15 +1013,15 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 # B14: POST /run/cancel kills this call's process tree.
                 state.add_cancel_hook(lambda: _cancel_call(call, "study call"))
                 # C3: pings keep flowing while Claude thinks in silence.
-                for delta in _iter_with_heartbeat(call):
+                for delta in iter_with_heartbeat(call):
                     yield from _announce_model(call)
-                    if delta is _HEARTBEAT:
-                        yield SSE_PING
+                    if delta is HEARTBEAT:
+                        yield streaming.SSE_PING
                         continue
                     state.check()
                     if delta:
                         full.append(delta)
-                        yield _sse_text(delta)
+                        yield sse_text(delta)
                 yield from _announce_model(call)
                 # SP6: the session id (from system/init or result) goes into
                 # the run log - D6's follow-up resumes it.
@@ -1654,7 +1053,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             model_id = getattr(call, "model", None)
             if isinstance(model_id, str) and model_id and "model" not in run_meta:
                 run_meta["model"] = model_id
-                yield _sse_event("meta", {"model": model_id})
+                yield sse_event("meta", {"model": model_id})
 
         # A6: the classifier call(s) this run started, so they can be
         # cancelled when the run no longer needs them (bounded join expired,
@@ -1738,10 +1137,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             updates: queue.Queue = queue.Queue()
 
             def progress(i, n):
-                updates.put(_sse_event("phase", {"phase": "verifying", "i": i, "n": n}))
+                updates.put(sse_event("phase", {"phase": "verifying", "i": i, "n": n}))
 
-            yield _sse_event("phase", {"phase": "verifying"})
-            verified = yield from _call_with_heartbeat(
+            yield sse_event("phase", {"phase": "verifying"})
+            verified = yield from call_with_heartbeat(
                 lambda: _verify_code(
                     code, problem, language, cancel=stop, progress=progress
                 ),
@@ -1762,7 +1161,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     language=language,
                     tier=tier if mode == "answer" else None,  # O2: Answer only
                     model=run_meta.get("model") or model or config.model(),
-                    verdict=verdict_from_line(verification),
+                    verdict=library.verdict_from_line(verification),
                     paths=paths,
                     session_id=run_meta.get("session_id"),
                     duration_s=time.monotonic() - started,
@@ -1823,9 +1222,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             break
-                        cls_thread.join(min(SSE_PING_INTERVAL, remaining))
+                        cls_thread.join(min(streaming.SSE_PING_INTERVAL, remaining))
                         if cls_thread.is_alive() and time.monotonic() < deadline:
-                            yield SSE_PING  # C3: keep the stream alive meanwhile
+                            yield streaming.SSE_PING  # C3: keep the stream alive meanwhile
                     if cls_thread.is_alive():
                         app.logger.warning(
                             "classifier still running after %ss; saving as %s",
@@ -1859,13 +1258,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     # PLUS the per-sample failure detail (audit6 P2-9).
                     result, verdict = yield from _verify(code)
                     verification = verdict
-                    yield _sse_text("\n\n" + verdict + "\n")
+                    yield sse_text("\n\n" + verdict + "\n")
                     reasoning = (
                         body + "\n\n---\n\n**Verification:** " + verdict + "\n"
                         + _verification_detail(result)
                     )
 
-                    yield _sse_event("phase", {"phase": "saving"})  # SP5 D11
+                    yield sse_event("phase", {"phase": "saving"})  # SP5 D11
                     cls = yield from _classification()  # join before the save
                     state.commit()  # B14 / M1: cancel wins only before this point
 
@@ -1899,7 +1298,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         meta=paste_meta,
                     )
                     yield from _stream_and_accumulate(prompt)
-                    yield _sse_event("phase", {"phase": "saving"})  # SP5 D11
+                    yield sse_event("phase", {"phase": "saving"})  # SP5 D11
                     cls = yield from _classification()  # join before the save
                     state.commit()  # B14 / M1: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
@@ -1927,12 +1326,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     code = code_blocks.extract_code(body, language)
                     result, verdict = yield from _verify(code)
                     verification = verdict
-                    yield _sse_text("\n\n" + verdict + "\n")
+                    yield sse_text("\n\n" + verdict + "\n")
                     saved = (
                         body + "\n\n---\n\n**Verification:** " + verdict + "\n"
                         + _verification_detail(result)
                     )
-                    yield _sse_event("phase", {"phase": "saving"})  # SP5 D11
+                    yield sse_event("phase", {"phase": "saving"})  # SP5 D11
                     cls = yield from _classification()  # join before the save
                     state.commit()  # B14 / M1: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
@@ -1952,7 +1351,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         out[0].rstrip("\n") + "\n\n---\n\n## Your attempt\n\n"
                         + storage.attempt_block(attempt_code, language)
                     )
-                    yield _sse_event("phase", {"phase": "saving"})
+                    yield sse_event("phase", {"phase": "saving"})
                     cls = yield from _classification()  # join before the save
                     state.commit()  # B14 / M1: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
@@ -1982,20 +1381,20 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     done_payload["model"] = run_meta["model"]
                 if problem_id:
                     done_payload["problem_id"] = problem_id
-                yield _sse_event("done", done_payload)
+                yield sse_event("done", done_payload)
             except Exception as exc:  # noqa: BLE001 - last resort, logged by _log_failure
                 if state.cancelled:
                     # B14: Stop -> POST /run/cancel. Whatever the killed call
-                    # raised (ClaudeCancelledError, _RunCancelled), say so -
+                    # raised (ClaudeCancelledError, RunCancelled), say so -
                     # as its own terminal `cancelled` event (SP5 fix B2): a
                     # user Stop is not a failure, and the page shows it as
                     # the neutral "Stopped" state, not "Run failed".
-                    yield _sse_event("cancelled", "Run cancelled.")
+                    yield sse_event("cancelled", "Run cancelled.")
                 else:
                     # Keep the full traceback in the server log (audit P2-8);
                     # the client still gets only the short message below.
                     _log_failure(app.logger, exc, "run failed (mode=%s)", mode)
-                    yield _sse_event("error", f"Run failed: {exc}")
+                    yield sse_event("error", f"Run failed: {exc}")
             finally:
                 # A6: a classifier call still running is no longer needed -
                 # the client left (GeneratorExit), the answer failed, or the
@@ -2155,7 +1554,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             _cancel_ask_call(call)
         return jsonify({"cancelled": True})
 
-    def _release_followup(followup_id: str, state: _RunState) -> None:
+    def _release_followup(followup_id: str, state: RunState) -> None:
         with _inflight_lock:
             if _followups.get(followup_id) is state:
                 del _followups[followup_id]
@@ -2197,7 +1596,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
         # The library's containment gate (traversal, absolute paths, hidden
         # .leetcoach/ metadata all 404), and only a Markdown doc takes one.
-        resolved = _resolve_library_file(data.get("path") or "")
+        resolved = library.resolve_file(data.get("path") or "")
         if resolved is None or resolved.suffix.lower() != ".md":
             return jsonify({"error": "Not found."}), 404
         rel_path = resolved.relative_to(config.output_dir().resolve()).as_posix()
@@ -2225,7 +1624,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 and claude_cli.SESSION_ID_RE.fullmatch(session_id)):
             session_id = None
 
-        state = _RunState(("followup", followup_id))
+        state = RunState(("followup", followup_id))
         with _inflight_lock:
             if _followups:
                 return jsonify({"error": "A follow-up is already running."}), 409
@@ -2238,7 +1637,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             model_id = getattr(call, "model", None)
             if isinstance(model_id, str) and model_id and "model" not in run_meta:
                 run_meta["model"] = model_id
-                yield _sse_event("meta", {"model": model_id})
+                yield sse_event("meta", {"model": model_id})
 
         def _stream(prompt, acc, *, resume):
             """Stream one claude call's deltas (SSE text) into ``acc``."""
@@ -2255,15 +1654,15 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             state.check()
             call = run_fn(prompt, **kwargs)
             state.add_cancel_hook(lambda: _cancel_ask_call(call))
-            for delta in _iter_with_heartbeat(call):
+            for delta in iter_with_heartbeat(call):
                 yield from _announce_model(call)
-                if delta is _HEARTBEAT:
-                    yield SSE_PING
+                if delta is HEARTBEAT:
+                    yield streaming.SSE_PING
                     continue
                 state.check()
                 if delta:
                     acc.append(delta)
-                    yield _sse_text(delta)
+                    yield sse_text(delta)
             yield from _announce_model(call)
             state.check()
 
@@ -2276,7 +1675,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 if session_id is None:
                     reason = "no_session"
                 else:
-                    yield _sse_event("phase", {"phase": "streaming", "source": "resume"})
+                    yield sse_event("phase", {"phase": "streaming", "source": "resume"})
                     try:
                         yield from _stream(prompts.build_followup(question), acc,
                                            resume=session_id)
@@ -2297,7 +1696,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                                   else "resume_failed")
                         app.logger.info("follow-up resume failed (%s); falling back", exc)
                 if source is None:
-                    yield _sse_event(
+                    yield sse_event(
                         "phase", {"phase": "streaming", "source": "fallback", "reason": reason}
                     )
                     acc = []
@@ -2307,7 +1706,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 answer = "".join(acc).strip()
                 if not answer:
                     raise RuntimeError("Claude returned an empty answer")
-                yield _sse_event("phase", {"phase": "saving"})
+                yield sse_event("phase", {"phase": "saving"})
                 state.commit()  # cancel wins only before this point
                 try:
                     heading = storage.append_followup(resolved, question, answer)
@@ -2342,13 +1741,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     done["reason"] = reason
                 if run_meta.get("model"):
                     done["model"] = run_meta["model"]
-                yield _sse_event("done", done)
+                yield sse_event("done", done)
             except Exception as exc:  # noqa: BLE001 - last resort, logged by _log_failure
                 if state.cancelled:
-                    yield _sse_event("cancelled", "Follow-up cancelled.")
+                    yield sse_event("cancelled", "Follow-up cancelled.")
                 else:
                     _log_failure(app.logger, exc, "follow-up failed on %s", rel_path)
-                    yield _sse_event("error", f"Follow-up failed: {exc}")
+                    yield sse_event("error", f"Follow-up failed: {exc}")
             finally:
                 _release_followup(followup_id, state)
 
@@ -2389,157 +1788,3 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
 # Module-level app for `flask run` / WSGI servers (real claude runner).
 app = create_app()
-
-
-def _browser_url(host: str, port: int) -> str:
-    """The URL a browser should open for a server bound to ``host:port``.
-    A wildcard bind (0.0.0.0 / ::) is not browsable, so it maps to loopback;
-    an IPv6 literal is bracketed."""
-    if host in ("0.0.0.0", "::"):
-        host = "127.0.0.1"
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    return f"http://{host}:{port}/"
-
-
-def _default_opener(url: str, timeout: float):
-    # No proxies: a loopback probe must never be routed through HTTP_PROXY.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    return opener.open(url, timeout=timeout)
-
-
-def _existing_instance_url(host: str, port: int, *, timeout: float = 1.0, opener=None):
-    """D16/B11: the URL of a LeetCoach already serving on ``host:port``, or
-    ``None``. Asks ``/healthz`` and accepts only LeetCoach's own answer, so a
-    different app on that port is never mistaken for it."""
-    url = _browser_url(host, port)
-    opener = opener or _default_opener
-    try:
-        with opener(url + "healthz", timeout=timeout) as resp:
-            data = json.loads(resp.read(4096).decode("utf-8"))
-    except (OSError, ValueError, http.client.HTTPException):
-        # 3A W1: a non-HTTP listener (say Redis) in the probe span makes
-        # urllib raise BadStatusLine, an HTTPException rather than OSError.
-        return None
-    if isinstance(data, dict) and data.get("app") == "leetcoach":
-        return url
-    return None
-
-
-def _find_existing_instance(
-    host: str,
-    preferred: int,
-    *,
-    span: int = PORT_SPAN,
-    timeout: float = 1.0,
-    fallback_timeout: float = 0.5,
-    budget: float = 3.0,
-    opener=None,
-    is_free=None,
-    clock=time.monotonic,
-):
-    """SP4 review M10: the URL of a LeetCoach already serving anywhere in the
-    port span :func:`_choose_port` would fall back across, or ``None``.
-
-    An earlier instance that found ``preferred`` taken by another app is on a
-    fallback port, so probing only ``preferred`` would start a second server.
-    A port that is free (nothing listening) is skipped without a request -
-    on Windows a connect to a closed loopback port can take a second or two
-    to be refused. Each probe has a short timeout (``timeout`` for the
-    preferred port, ``fallback_timeout`` for the rest) and the whole scan an
-    overall ``budget``, so a port held by something that never answers can't
-    hang the launch."""
-    is_free = is_free or _port_is_free
-    deadline = clock() + budget
-    for port in range(preferred, min(preferred + span, 65535) + 1):
-        if is_free(host, port):
-            continue
-        remaining = deadline - clock()
-        if remaining <= 0:
-            break
-        per_probe = timeout if port == preferred else fallback_timeout
-        url = _existing_instance_url(
-            host, port, timeout=min(per_probe, remaining), opener=opener
-        )
-        if url:
-            return url
-    return None
-
-
-def _browser_enabled() -> bool:
-    return os.environ.get("LEETCOACH_NO_BROWSER", "").lower() not in {"1", "true", "yes"}
-
-
-def main(*, open_browser=webbrowser.open, serve=None) -> int:
-    """Launch LeetCoach (``python app.py`` / the desktop launcher).
-
-    D16/B11: if LeetCoach is already running on the preferred port - or on a
-    fallback port in the span (M10) - open the browser there and exit - a
-    second double-click must not start a second server on the next free port
-    sharing ``output/`` (the per-process locks don't coordinate across
-    processes). Only when no LeetCoach answers does it fall back to a nearby
-    free port.
-    ``open_browser`` / ``serve`` are injectable for tests.
-    """
-    host = HOST
-    existing = _find_existing_instance(host, PORT)
-    if existing:
-        print(f"LeetCoach is already running at  {existing}  - opening it.")
-        if _browser_enabled():
-            open_browser(existing)
-        return 0
-    # Fall back to a nearby free port instead of crashing when PORT is occupied
-    # (another app on 5000) — a double-click launch must never die on "address
-    # already in use".
-    port = _choose_port(PORT, host)
-    # Migrate any pre-rename answer files (simple/complex -> basic/optimal) so an
-    # existing library keeps working after the "Code Quality" rename. Idempotent
-    # and guarded: a failure here must never stop the app from launching.
-    try:
-        renamed = storage.migrate_tier_suffixes()
-        if renamed:
-            print(f"Migrated {len(renamed)} saved answer file(s) to the new tier names.")
-    except Exception as exc:  # noqa: BLE001 - a migration hiccup must not block launch
-        print(f"WARNING: could not migrate old tier filenames ({exc}).")
-    # Clear sandbox temp dirs a crashed/killed run left behind (B6).
-    swept = _sweep_sandbox_temp()
-    if swept:
-        print(f"Removed {swept} stale sandbox temp dir(s).")
-    # Surface the CLI sign-in state so a terminal launch is guided too (the
-    # launcher script handles the interactive `claude auth login`; here we only
-    # tell the user what to do).
-    try:
-        # Also primes the B1 cache, so the first page load is instant.
-        auth = claude_cli.cached_auth_status()
-    except Exception:  # noqa: BLE001 - the probe must never stop the app launching
-        auth = claude_cli.AuthStatus(installed=False, logged_in=False)
-    if not auth.installed:
-        print(
-            "WARNING: the `claude` CLI was not found on PATH. The page will load "
-            "but runs will fail until Claude Code is installed (or set "
-            "LEETCOACH_CLAUDE_BIN)."
-        )
-    elif not auth.logged_in:
-        print(
-            "WARNING: you are signed out of the `claude` CLI. Runs will fail until "
-            "you sign in — run `claude auth login` in a terminal, then reload."
-        )
-    url = _browser_url(host, port)
-    print(f"LeetCoach running at  {url}  (Ctrl-C to stop)")
-    # Auto-open the browser shortly after the server starts accepting connections
-    # (the ~1s delay lets the server bind first). Suppressed for headless/dev use
-    # via LEETCOACH_NO_BROWSER.
-    if _browser_enabled():
-        threading.Timer(1.0, lambda: open_browser(url)).start()
-    if serve is None:
-        # load_dotenv=False (3A G1): Flask would re-read .env from the cwd as
-        # strict UTF-8, crashing on a UTF-16 one that _maybe_load_dotenv
-        # handles, and ignoring LEETCOACH_NO_DOTENV.
-        app.run(host=host, port=port, debug=False, threaded=True, load_dotenv=False)
-    else:
-        serve(port)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

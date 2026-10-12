@@ -17,7 +17,7 @@ import pytest
 from werkzeug.serving import make_server
 
 from leetcoach import app as app_module
-from leetcoach import claude_cli
+from leetcoach import claude_cli, launcher
 
 
 def _authed():
@@ -76,7 +76,7 @@ def served():
 
 def test_probe_finds_a_running_leetcoach(served):
     port = served(_app())
-    assert app_module._existing_instance_url("127.0.0.1", port) == f"http://127.0.0.1:{port}/"
+    assert launcher.existing_instance_url("127.0.0.1", port) == f"http://127.0.0.1:{port}/"
 
 
 def test_probe_ignores_some_other_server(served):
@@ -85,7 +85,7 @@ def test_probe_ignores_some_other_server(served):
         return [json.dumps({"app": "something-else"}).encode()]
 
     port = served(other)
-    assert app_module._existing_instance_url("127.0.0.1", port) is None
+    assert launcher.existing_instance_url("127.0.0.1", port) is None
 
 
 def test_probe_ignores_a_non_json_answer(served):
@@ -94,7 +94,7 @@ def test_probe_ignores_a_non_json_answer(served):
         return [b"<html>hi</html>"]
 
     port = served(html)
-    assert app_module._existing_instance_url("127.0.0.1", port) is None
+    assert launcher.existing_instance_url("127.0.0.1", port) is None
 
 
 @pytest.fixture
@@ -129,11 +129,11 @@ def test_probe_of_a_non_http_listener_is_none(garbage_listener):
     # 3A W1: urllib raises http.client.BadStatusLine (an HTTPException, not an
     # OSError) for a non-HTTP reply; the probe must treat it as "not LeetCoach"
     # instead of crashing the launch with a traceback.
-    assert app_module._existing_instance_url("127.0.0.1", garbage_listener, timeout=2) is None
+    assert launcher.existing_instance_url("127.0.0.1", garbage_listener, timeout=2) is None
 
 
 def test_find_existing_instance_survives_a_non_http_listener(garbage_listener):
-    assert app_module._find_existing_instance("127.0.0.1", garbage_listener, span=0) is None
+    assert launcher.find_existing_instance("127.0.0.1", garbage_listener, span=0) is None
 
 
 def test_probe_of_a_closed_port_is_none():
@@ -141,7 +141,7 @@ def test_probe_of_a_closed_port_is_none():
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
-    assert app_module._existing_instance_url("127.0.0.1", port, timeout=0.5) is None
+    assert launcher.existing_instance_url("127.0.0.1", port, timeout=0.5) is None
 
 
 def test_probe_url_brackets_ipv6_and_maps_wildcard_hosts():
@@ -151,8 +151,8 @@ def test_probe_url_brackets_ipv6_and_maps_wildcard_hosts():
         seen.append(url)
         raise OSError("no server")
 
-    app_module._existing_instance_url("::1", 5000, opener=fake_open)
-    app_module._existing_instance_url("0.0.0.0", 5000, opener=fake_open)
+    launcher.existing_instance_url("::1", 5000, opener=fake_open)
+    launcher.existing_instance_url("0.0.0.0", 5000, opener=fake_open)
     assert seen == ["http://[::1]:5000/healthz", "http://127.0.0.1:5000/healthz"]
 
 
@@ -160,27 +160,27 @@ def test_probe_url_brackets_ipv6_and_maps_wildcard_hosts():
 
 def test_main_reuses_a_running_instance_and_does_not_serve(monkeypatch):
     opened, served_ports = [], []
-    monkeypatch.setattr(app_module, "_port_is_free", lambda host, port: False)
-    monkeypatch.setattr(app_module, "_existing_instance_url",
+    monkeypatch.setattr(launcher, "port_is_free", lambda host, port: False)
+    monkeypatch.setattr(launcher, "existing_instance_url",
                         lambda host, port, **kw: f"http://127.0.0.1:{port}/")
 
     def no_choose(*a, **k):
         raise AssertionError("must not fall back to another port")
 
-    monkeypatch.setattr(app_module, "_choose_port", no_choose)
-    rc = app_module.main(open_browser=opened.append, serve=lambda port: served_ports.append(port))
+    monkeypatch.setattr(launcher, "choose_port", no_choose)
+    rc = launcher.main(open_browser=opened.append, serve=lambda port: served_ports.append(port))
     assert rc == 0
-    assert opened == [f"http://127.0.0.1:{app_module.PORT}/"]
+    assert opened == [f"http://127.0.0.1:{launcher.PORT}/"]
     assert served_ports == []
 
 
 def test_main_reuse_respects_no_browser(monkeypatch, capsys):
     opened = []
     monkeypatch.setenv("LEETCOACH_NO_BROWSER", "1")
-    monkeypatch.setattr(app_module, "_port_is_free", lambda host, port: False)
-    monkeypatch.setattr(app_module, "_existing_instance_url",
+    monkeypatch.setattr(launcher, "port_is_free", lambda host, port: False)
+    monkeypatch.setattr(launcher, "existing_instance_url",
                         lambda host, port, **kw: f"http://127.0.0.1:{port}/")
-    rc = app_module.main(open_browser=opened.append, serve=lambda port: None)
+    rc = launcher.main(open_browser=opened.append, serve=lambda port: None)
     assert rc == 0
     assert opened == []
     assert "already running" in capsys.readouterr().out
@@ -189,11 +189,11 @@ def test_main_reuse_respects_no_browser(monkeypatch, capsys):
 def test_main_serves_when_no_instance_is_running(monkeypatch):
     served_ports = []
     monkeypatch.setenv("LEETCOACH_NO_BROWSER", "1")
-    monkeypatch.setattr(app_module, "_existing_instance_url", lambda host, port, **kw: None)
-    monkeypatch.setattr(app_module, "_choose_port", lambda preferred, host: 5007)
-    monkeypatch.setattr(app_module, "_sweep_sandbox_temp", lambda: 0)
+    monkeypatch.setattr(launcher, "existing_instance_url", lambda host, port, **kw: None)
+    monkeypatch.setattr(launcher, "choose_port", lambda preferred, host: 5007)
+    monkeypatch.setattr(launcher, "sweep_sandbox_temp", lambda: 0)
     monkeypatch.setattr(app_module.storage, "migrate_tier_suffixes", list)
-    rc = app_module.main(open_browser=lambda url: None, serve=served_ports.append)
+    rc = launcher.main(open_browser=lambda url: None, serve=served_ports.append)
     assert rc == 0
     assert served_ports == [5007]
 
@@ -206,10 +206,10 @@ def test_main_never_lets_flask_reload_the_dotenv(monkeypatch):
     ``.env`` even under ``LEETCOACH_NO_DOTENV``. main() must opt out."""
     calls = []
     monkeypatch.setenv("LEETCOACH_NO_BROWSER", "1")
-    monkeypatch.setattr(app_module, "_existing_instance_url", lambda host, port, **kw: None)
-    monkeypatch.setattr(app_module, "_choose_port", lambda preferred, host: 5007)
-    monkeypatch.setattr(app_module, "_sweep_sandbox_temp", lambda: 0)
+    monkeypatch.setattr(launcher, "existing_instance_url", lambda host, port, **kw: None)
+    monkeypatch.setattr(launcher, "choose_port", lambda preferred, host: 5007)
+    monkeypatch.setattr(launcher, "sweep_sandbox_temp", lambda: 0)
     monkeypatch.setattr(app_module.storage, "migrate_tier_suffixes", list)
     monkeypatch.setattr(app_module.app, "run", lambda *a, **k: calls.append(k))
-    assert app_module.main(open_browser=lambda url: None) == 0
+    assert launcher.main(open_browser=lambda url: None) == 0
     assert calls and calls[0].get("load_dotenv") is False, calls

@@ -12,7 +12,7 @@ import pytest
 from _helpers import CLASSIFY_JSON, parse_sse
 
 from leetcoach import app as app_module
-from leetcoach import claude_cli
+from leetcoach import claude_cli, library
 
 RUN = {"problem": "Two Sum\nExample: Input: 1\nOutput: 1", "mode": "learning",
        "language": "python"}
@@ -242,24 +242,24 @@ def test_quick_ask_cancel_that_races_ahead_of_run_fn(env):
 def test_model_written_verification_line_is_not_a_verdict():
     doc = ("# Learning notes\n\nWhen you are done, write:\n\n"
            "**Verification:** ✓ Sample tests PASS\n\nMore notes.\n")
-    assert app_module.verdict_from_text(doc) is None
+    assert library.verdict_from_text(doc) is None
 
 
 def test_follow_up_sections_are_ignored_for_the_verdict():
     doc = ("# T\n\nbody\n\n---\n\n**Verification:** ✗ Sample tests FAIL (0/1)\n\n"
            "## Follow-up\n\n---\n\n**Verification:** ✓ Sample tests PASS\n")
-    assert app_module.verdict_from_text(doc) == "fail"
+    assert library.verdict_from_text(doc) == "fail"
 
 
 def test_a_model_follow_up_heading_before_the_verdict_does_not_hide_it():
     doc = ("# T\n\n## Follow-up\n\nask more\n\n---\n\n"
            "**Verification:** ✓ Sample tests PASS (1/1)\n")
-    assert app_module.verdict_from_text(doc) == "pass"
+    assert library.verdict_from_text(doc) == "pass"
 
 
 def test_crlf_saved_doc_still_has_its_verdict():
     doc = "# T\r\n\r\nbody\r\n\r\n---\r\n\r\n**Verification:** ✓ Sample tests PASS\r\n"
-    assert app_module.verdict_from_text(doc) == "pass"
+    assert library.verdict_from_text(doc) == "pass"
 
 
 # --- R7: the verdict cache forgets files that left the library -----------------
@@ -271,7 +271,7 @@ def test_verdict_cache_prunes_paths_no_longer_listed(env):
     doc.write_text("# T\n\n---\n\n**Verification:** ✓ Sample tests PASS\n", encoding="utf-8")
     client = _client(_cli_run_fn())
     client.get("/library")
-    assert str(doc) in app_module._verdict_cache
+    assert str(doc) in library._verdict_cache
     doc.unlink()
     client.get("/library")
-    assert str(doc) not in app_module._verdict_cache
+    assert str(doc) not in library._verdict_cache

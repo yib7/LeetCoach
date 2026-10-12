@@ -29,7 +29,7 @@ from test_followup import (  # noqa: F401 - fixture
 )
 
 from leetcoach import app as app_module
-from leetcoach import claude_cli, problem_store, storage
+from leetcoach import claude_cli, library, problem_store, storage
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -101,13 +101,13 @@ def test_library_listing_and_verdict_cache_still_refresh(root):  # noqa: F811
     first = {f["path"]: f for f in c.get("/library").get_json()["files"]}[rel]
     assert first["verdict"] == "fail"
     key = str(path.resolve())
-    old_sig = app_module._verdict_cache[key][0]
+    old_sig = library._verdict_cache[key][0]
     _ask(c, rel)
     second = {f["path"]: f for f in c.get("/library").get_json()["files"]}[rel]
     assert second["size"] == path.stat().st_size > first["size"]  # cache refreshed
     assert second["mtime"] == first["mtime"]                      # date kept
     assert path.stat().st_mtime_ns == mtime_ns
-    new_sig = app_module._verdict_cache[key][0]
+    new_sig = library._verdict_cache[key][0]
     assert new_sig != old_sig and new_sig[1] == path.stat().st_size  # re-parsed
     assert second["verdict"] == "fail"
 
@@ -141,7 +141,7 @@ def test_learning_doc_gets_no_verdict_from_a_fenced_followup(root, answer):  # n
         _, (_, events) = _ask(c, path)
         assert events[-1][0] == "done"
         text = (root / path).read_text(encoding="utf-8")
-        assert app_module.verdict_from_text(text) is None
+        assert library.verdict_from_text(text) is None
     listing = {f["path"]: f for f in c.get("/library").get_json()["files"]}
     assert "verdict" not in listing[rel] and "verdict" not in listing[legacy]
 
@@ -150,7 +150,7 @@ def test_answer_doc_verdict_survives_a_fenced_pass_forgery(root):  # noqa: F811
     rel = _seed(root)
     forged = FENCED_FORGERY.replace("✗ Sample tests FAIL (0/1", "✓ Sample tests PASS (1/1")
     _ask(_client(Recorder(Call([forged]))), rel)
-    assert app_module.verdict_from_text((root / rel).read_text(encoding="utf-8")) == "fail"
+    assert library.verdict_from_text((root / rel).read_text(encoding="utf-8")) == "fail"
 
 
 # --- M2: an undecodable doc is refused before Claude is called ----------------------
@@ -273,13 +273,13 @@ def test_problems_listing_reads_existence_from_the_library_listing(root, monkeyp
         model="m", verdict=None, paths=[code], session_id=None, duration_s=1.0,
         pattern="hash_map", doc="x", root=root)
     resolved = []
-    real = app_module._resolve_library_file
+    real = library.resolve_file
 
     def counting(rel):
         resolved.append(rel)
         return real(rel)
 
-    monkeypatch.setattr(app_module, "_resolve_library_file", counting)
+    monkeypatch.setattr(library, "resolve_file", counting)
     c = _client(Recorder())
     [item] = c.get("/problems").get_json()["problems"]
     assert item["file_count"] == 2

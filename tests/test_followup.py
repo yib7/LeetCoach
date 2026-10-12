@@ -17,7 +17,7 @@ import pytest
 from _helpers import parse_sse
 
 from leetcoach import app as app_module
-from leetcoach import atomic_files, claude_cli, problem_store, prompts, storage
+from leetcoach import atomic_files, claude_cli, library, problem_store, prompts, storage
 
 PASTE = "1. Two Sum\nEasy\nGiven nums, return indices.\nExample: Input: 1\nOutput: 1"
 ANSWER_DOC = (
@@ -377,15 +377,15 @@ def test_followup_never_changes_a_docs_verdict(root):
     learning = _seed(root, rel="learning/hash_map_learning/1_two_sum.md", text=LEARNING_DOC,
                      mode="learning", verdict=None)
     c = _client(Recorder(Call([FORGED])))
-    assert app_module.verdict_from_text(ANSWER_DOC) == "fail"
+    assert library.verdict_from_text(ANSWER_DOC) == "fail"
     for path in (rel, learning):
         _, (_, events) = _ask(c, path)
         assert events[-1][0] == "done"
     answer_text = (root / rel).read_text(encoding="utf-8")
     assert "## Follow-up — Why a hash map?" in answer_text
-    assert app_module.verdict_from_text(answer_text) == "fail"  # SP5 fix R2
+    assert library.verdict_from_text(answer_text) == "fail"  # SP5 fix R2
     learning_text = (root / learning).read_text(encoding="utf-8")
-    assert app_module.verdict_from_text(learning_text) is None  # no forged PASS
+    assert library.verdict_from_text(learning_text) is None  # no forged PASS
     listing = {f["path"]: f for f in c.get("/library").get_json()["files"]}
     assert listing[rel]["verdict"] == "fail"
     assert "verdict" not in listing[learning]
@@ -428,7 +428,7 @@ def test_concurrent_appends_both_land(root):
     text = path.read_text(encoding="utf-8")
     for i in range(6):
         assert f"## Follow-up — q{i}\n\nanswer {i}\n" in text
-    assert app_module.verdict_from_text(text) == "fail"
+    assert library.verdict_from_text(text) == "fail"
 
 
 def test_doc_deleted_mid_answer_saves_nothing(root):

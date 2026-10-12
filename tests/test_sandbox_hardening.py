@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from leetcoach import sandbox
+from leetcoach import launcher, sandbox
 
 # --- A5: bootstrap handshake ------------------------------------------------
 
@@ -746,23 +746,23 @@ def test_app_startup_sweeps_stale_run_dirs(monkeypatch):
 
     calls = []
     monkeypatch.setattr(sandbox, "sweep_stale_run_dirs", lambda **k: calls.append(k) or 4)
-    assert app_module._sweep_sandbox_temp() == 4
+    assert launcher.sweep_sandbox_temp() == 4
     assert calls
 
     def boom(**k):
         raise RuntimeError("disk on fire")
 
     monkeypatch.setattr(sandbox, "sweep_stale_run_dirs", boom)
-    assert app_module._sweep_sandbox_temp() == 0  # a hiccup never blocks launch
+    assert launcher.sweep_sandbox_temp() == 0  # a hiccup never blocks launch
 
-    # The launch path (app.main(), run by `python app.py`) really sweeps.
+    # The launch path (launcher.main(), run by `python app.py`) really sweeps.
     swept = []
     monkeypatch.setenv("LEETCOACH_NO_BROWSER", "1")
-    monkeypatch.setattr(app_module, "_existing_instance_url", lambda host, port, **kw: None)
-    monkeypatch.setattr(app_module, "_choose_port", lambda preferred, host: 5007)
-    monkeypatch.setattr(app_module, "_sweep_sandbox_temp", lambda: swept.append(1) or 0)
+    monkeypatch.setattr(launcher, "existing_instance_url", lambda host, port, **kw: None)
+    monkeypatch.setattr(launcher, "choose_port", lambda preferred, host: 5007)
+    monkeypatch.setattr(launcher, "sweep_sandbox_temp", lambda: swept.append(1) or 0)
     monkeypatch.setattr(app_module.storage, "migrate_tier_suffixes", list)
-    assert app_module.main(open_browser=lambda url: None, serve=lambda port: None) == 0
+    assert launcher.main(open_browser=lambda url: None, serve=lambda port: None) == 0
     assert swept == [1]
 
 

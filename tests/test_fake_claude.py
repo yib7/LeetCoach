@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from leetcoach import app, classifier, claude_cli, code_blocks, prompts, sandbox
+from leetcoach import app, classifier, claude_cli, code_blocks, library, prompts, sandbox
 
 ROOT = Path(__file__).resolve().parent.parent
 DEV = ROOT / "scripts" / "dev"
@@ -183,7 +183,7 @@ def test_seed_builds_a_multi_day_library_with_every_verdict(tmp_path):
     verdicts = set()
     mtimes = set()
     for md in out.rglob("*.md"):
-        verdicts.add(app.verdict_from_text(md.read_text(encoding="utf-8")))
+        verdicts.add(library.verdict_from_text(md.read_text(encoding="utf-8")))
         mtimes.add(int(md.stat().st_mtime // 86400))
     assert {"pass", "fail", "error", "not_verified", None} <= verdicts
     assert len(mtimes) >= 4
@@ -571,7 +571,7 @@ def test_app_followup_on_the_seeded_library(tmp_path, monkeypatch, flags, path, 
         run_fn=run_fn,
         auth_probe=lambda: claude_cli.AuthStatus(installed=True, logged_in=True))
     before = (out / path).read_text(encoding="utf-8")
-    verdict = app.verdict_from_text(before)
+    verdict = library.verdict_from_text(before)
     body = application.test_client().post(
         "/followup", json={"path": path, "question": question}).get_data(as_text=True)
     name, done = parse_sse(body)[1][-1]
@@ -580,7 +580,7 @@ def test_app_followup_on_the_seeded_library(tmp_path, monkeypatch, flags, path, 
     after = (out / path).read_text(encoding="utf-8")
     assert after.startswith(before.rstrip("\n"))
     assert f"## Follow-up — {question}" in after
-    assert app.verdict_from_text(after) == verdict
+    assert library.verdict_from_text(after) == verdict
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the .cmd shim is Windows-only")
