@@ -347,7 +347,7 @@ def test_tracked_launcher_scripts_are_actually_crlf_on_disk():
 
 def test_readme_shows_execution_policy_bypass_invocations():
     text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert "powershell -ExecutionPolicy Bypass -File .\\setup.ps1" in text
+    assert "powershell -ExecutionPolicy Bypass -File .\\scripts\\setup.ps1" in text
     assert (
         "powershell -ExecutionPolicy Bypass -File .\\scripts\\create-shortcut.ps1" in text
     )

@@ -28,11 +28,11 @@ to a database or a cloud service. All state lives in files under `output/`.
 
 ```
 app.py           entry point: `python app.py` (a few lines that call leetcoach.launcher)
-LeetCoach.cmd    Windows double-click launcher (first run calls setup.ps1, then app.py)
-setup.ps1        Windows one-command setup (.venv + requirements/base.txt)
+LeetCoach.cmd    Windows double-click launcher (first run calls scripts/setup.ps1, then app.py)
 leetcoach/       the app: Python modules (table below) + static/ and templates/
 tests/           pytest suite (tests/js/: node tests for leetcoach/static/lib/core.js)
-scripts/         desktop shortcut, claude sign-in check, dev/ fake CLI harness
+scripts/         setup.ps1 (Windows one-command setup: .venv + requirements/base.txt),
+                 desktop shortcut, claude sign-in check, dev/ fake CLI harness
 docs/            this file, CHANGELOG, SECURITY, CREDITS, README media
 requirements/    base.txt (runtime), dev.txt (+ pytest, ruff), lock.txt (exact pins)
 .env, output/    yours, not tracked: settings and the study library (repo root)

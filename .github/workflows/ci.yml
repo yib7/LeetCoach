@@ -111,7 +111,7 @@ jobs:
 
   readme-setup-windows:
     # 6.4: the README's literal Windows steps on a fresh runner - clone,
-    # `powershell -ExecutionPolicy Bypass -File .\setup.ps1`, activate, start
+    # `powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1`, activate, start
     # `python app.py` - then prove the app answers. The runner's own Python is
     # used (no setup-python), as on a fresh machine with Python 3.12+ and the
     # `py` launcher. The `claude` CLI is the repo's fake (never real Claude).
@@ -136,12 +136,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           git -C LeetCoach log -1 --oneline
 
-      - name: "Step 2: install (setup.ps1)"
+      - name: "Step 2: install (scripts/setup.ps1)"
         working-directory: ${{ runner.temp }}/LeetCoach
         run: |
-          powershell -ExecutionPolicy Bypass -File .\setup.ps1
+          powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path .\.venv\.setup-ok)) { throw "setup.ps1 did not write .venv\.setup-ok" }
+          if (-not (Test-Path .\.venv\.setup-ok)) { throw "scripts\setup.ps1 did not write .venv\.setup-ok" }
 
       - name: "Step 3: run (activate, python app.py) against the fake claude CLI"
         working-directory: ${{ runner.temp }}/LeetCoach

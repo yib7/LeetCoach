@@ -82,8 +82,11 @@ follow-up questions on a saved doc.
     3.14 is the pinned development version; 3.12 is still the minimum.
 - **Lint.** Ruff moves to 0.16 with its larger default rule set, and every finding is
   fixed in code. The only `noqa` comments left each give a reason.
-- **Repository layout.** `python app.py`, `LeetCoach.cmd` and `setup.ps1` work as before,
-  and `.env` and `output/` stay at the repo root, so an existing library is kept.
+- **Repository layout.** `python app.py` and `LeetCoach.cmd` work as before, and `.env`
+  and `output/` stay at the repo root, so an existing library is kept.
+  - The Windows setup script moves to `scripts/setup.ps1`: run
+    `powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1` from the repo root.
+    It still creates `.venv` in the repo root, and `LeetCoach.cmd` calls it there.
   - The code moves into a `leetcoach/` package, with `static/` and `templates/` inside it.
     The root `app.py` is now a short entry point.
   - The old `app.py` is split by job into `app.py` (routes), `request_guard.py`,
@@ -100,7 +103,7 @@ follow-up questions on a saved doc.
   levels on Windows) that `sys.setrecursionlimit` does not raise. A sample that dies with
   a `RecursionError` there now says so in its verdict note; Python 3.14 has no such cap.
 - **Ship audit: launch and setup.**
-  - `setup.ps1` no longer aborts under Windows PowerShell 5.1 when a native command
+  - `scripts/setup.ps1` no longer aborts under Windows PowerShell 5.1 when a native command
     writes to stderr. A `.venv` missing packages is installed into, and one whose Python
     is missing or cannot start is recreated with `venv --clear`.
   - `LeetCoach.cmd` works from a folder whose path contains `!`.
@@ -152,7 +155,7 @@ follow-up questions on a saved doc.
   can be diagnosed.
 - **Launch and sign-in (A1, B9).** `ensure-claude-auth.ps1` is now ASCII-only, so it
   parses under Windows PowerShell 5.1. The desktop shortcut's automatic sign-in now
-  actually runs, in its own visible window. `setup.ps1` checks every step's exit code,
+  actually runs, in its own visible window. `scripts/setup.ps1` checks every step's exit code,
   and the launcher pauses on failure.
 - **Verification correctness (A2-A4, B4, B5, B24).**
   - The verifier picks the tagged solution block, not the first teaching snippet.

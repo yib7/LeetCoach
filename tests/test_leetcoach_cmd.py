@@ -1,9 +1,9 @@
 """B9: behavioral tests for LeetCoach.cmd (the desktop-shortcut launcher).
 
 Every test stages LeetCoach.cmd into an isolated tmp_path next to FAKE
-setup.ps1 / ensure-claude-auth.ps1 / .venv\\Scripts\\python.exe stand-ins, so
-nothing here ever touches the real project .venv, runs the real setup, or
-spawns the real `claude` CLI.
+scripts\\setup.ps1 / scripts\\ensure-claude-auth.ps1 / .venv\\Scripts\\python.exe
+stand-ins, so nothing here ever touches the real project .venv, runs the real
+setup, or spawns the real `claude` CLI.
 
 The fake "python.exe" for the app-launch tests is a tiny compiled .NET stub
 (LeetCoach.cmd hardcodes a literal `.exe` path with no test-seam env var, and
@@ -55,7 +55,7 @@ def _stage(tmp_path, *, marker_present=False):
     stage = tmp_path / "stage"
     (stage / "scripts").mkdir(parents=True, exist_ok=True)
     shutil.copy(LEETCOACH_CMD, stage / "LeetCoach.cmd")
-    (stage / "setup.ps1").write_text(_FAKE_SETUP_PS1, encoding="utf-8")
+    (stage / "scripts" / "setup.ps1").write_text(_FAKE_SETUP_PS1, encoding="utf-8")
     (stage / "scripts" / "ensure-claude-auth.ps1").write_text(_NOOP_PS1, encoding="utf-8")
     if marker_present:
         (stage / ".venv").mkdir(exist_ok=True)

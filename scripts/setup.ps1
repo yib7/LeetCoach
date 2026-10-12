@@ -1,16 +1,19 @@
-# One-command setup for LeetCoach on Windows.  Run:
-#   powershell -ExecutionPolicy Bypass -File .\setup.ps1
-# Creates a local .venv and installs the runtime dependencies.
+# One-command setup for LeetCoach on Windows.  Run, from the repo root:
+#   powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+# Creates a local .venv in the repo root and installs the runtime dependencies.
 $ErrorActionPreference = "Stop"
 
-# Resolve every path relative to THIS SCRIPT's own directory, not the caller's
+# Resolve every path from THIS SCRIPT's own location, not the caller's
 # current working directory (B9) - so `setup.ps1` behaves the same whether
-# it's run as `.\setup.ps1`, via a full path, or from LeetCoach.cmd.
-Set-Location -Path $PSScriptRoot
+# it's run as `.\scripts\setup.ps1`, via a full path, or from LeetCoach.cmd.
+# The script lives in scripts\; the repo root (where .venv, requirements\ and
+# app.py are) is its parent folder.
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location -Path $RepoRoot
 
-$VenvPath = Join-Path $PSScriptRoot ".venv"
+$VenvPath = Join-Path $RepoRoot ".venv"
 $MarkerPath = Join-Path $VenvPath ".setup-ok"
-$RequirementsPath = Join-Path $PSScriptRoot "requirements\base.txt"
+$RequirementsPath = Join-Path $RepoRoot "requirements\base.txt"
 
 # Test seam only: lets tests point pip installs at a fake stub instead of a
 # real interpreter, without a real `.venv` ever being created. Unset (the

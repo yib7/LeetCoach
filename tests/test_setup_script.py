@@ -1,10 +1,11 @@
-"""B9: behavioral tests for setup.ps1.
+"""B9: behavioral tests for scripts/setup.ps1.
 
-NEVER a real Python/pip invocation: every test copies setup.ps1 into an
-isolated tmp_path (so the real project .venv is never touched) and points
-`py` at a fake stub prepended onto PATH, plus (for the pip-install steps)
-LEETCOACH_SETUP_PYTHON_EXE at a second fake stub - setup.ps1 honours that env
-var as a test seam instead of always hardcoding the venv's own python.exe.
+NEVER a real Python/pip invocation: every test copies setup.ps1 into
+scripts/ under an isolated tmp_path that stands in for the repo root (so the
+real project .venv is never touched) and points `py` at a fake stub prepended
+onto PATH, plus (for the pip-install steps) LEETCOACH_SETUP_PYTHON_EXE at a
+second fake stub - setup.ps1 honours that env var as a test seam instead of
+always hardcoding the venv's own python.exe.
 
 Skipped off-Windows, like tests/test_scripts.py (same rationale: these are
 Windows-only launcher scripts, exercised via powershell.exe).
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SETUP_PS1 = REPO_ROOT / "setup.ps1"
+SETUP_PS1 = REPO_ROOT / "scripts" / "setup.ps1"
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "win32", reason="Windows launcher script; powershell.exe only"
@@ -153,12 +154,15 @@ _EXISTING_VENV_PYTHON_CMD = (
 
 
 def _stage(tmp_path):
-    """Copy setup.ps1 + a throwaway requirements/base.txt into an isolated
-    directory that stands in for the repo root, so nothing ever touches the
-    real project .venv."""
+    """Copy scripts/setup.ps1 + a throwaway requirements/base.txt into an
+    isolated directory that stands in for the repo root, so nothing ever
+    touches the real project .venv."""
     stage = tmp_path / "stage"
     (stage / "requirements").mkdir(parents=True, exist_ok=True)
-    (stage / "setup.ps1").write_text(SETUP_PS1.read_text(encoding="utf-8"), encoding="utf-8")
+    (stage / "scripts").mkdir(parents=True, exist_ok=True)
+    (stage / "scripts" / "setup.ps1").write_text(
+        SETUP_PS1.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     (stage / "requirements" / "base.txt").write_text("flask>=3.0\n", encoding="utf-8")
     return stage
 
@@ -186,7 +190,7 @@ def _run_setup(tmp_path, *, cwd=None, extra_env=None, python_stub=True):
     result = subprocess.run(
         [
             "powershell.exe", "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-File", str(stage / "setup.ps1"),
+            "-ExecutionPolicy", "Bypass", "-File", str(stage / "scripts" / "setup.ps1"),
         ],
         capture_output=True,
         text=True, encoding="utf-8", errors="replace",
@@ -285,7 +289,7 @@ def test_existing_working_venv_skips_full_setup_without_py_launcher(tmp_path):
     result = subprocess.run(
         [
             str(Path(ps_home) / "powershell.exe"), "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-File", str(stage / "setup.ps1"),
+            "-ExecutionPolicy", "Bypass", "-File", str(stage / "scripts" / "setup.ps1"),
         ],
         capture_output=True,
         text=True, encoding="utf-8", errors="replace",
@@ -323,7 +327,7 @@ def test_existing_venv_missing_dotenv_does_not_get_the_marker(tmp_path):
     result = subprocess.run(
         [
             str(Path(ps_home) / "powershell.exe"), "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-File", str(stage / "setup.ps1"),
+            "-ExecutionPolicy", "Bypass", "-File", str(stage / "scripts" / "setup.ps1"),
         ],
         capture_output=True,
         text=True, encoding="utf-8", errors="replace",
@@ -341,8 +345,9 @@ def test_existing_venv_missing_dotenv_does_not_get_the_marker(tmp_path):
 
 
 def test_setup_is_dollar_psscriptroot_relative_not_cwd_relative(tmp_path):
-    """Running setup.ps1 via a full path from an unrelated working directory
-    must still create .venv NEXT TO THE SCRIPT, not in the caller's cwd (B9)."""
+    """Running scripts/setup.ps1 via a full path from an unrelated working
+    directory must still create .venv in the repo root (the script folder's
+    parent), not in the caller's cwd (B9) and not in scripts/."""
     stage = _stage(tmp_path)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -358,7 +363,7 @@ def test_setup_is_dollar_psscriptroot_relative_not_cwd_relative(tmp_path):
     result = subprocess.run(
         [
             "powershell.exe", "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-File", str(stage / "setup.ps1"),
+            "-ExecutionPolicy", "Bypass", "-File", str(stage / "scripts" / "setup.ps1"),
         ],
         capture_output=True,
         text=True, encoding="utf-8", errors="replace",
@@ -370,6 +375,7 @@ def test_setup_is_dollar_psscriptroot_relative_not_cwd_relative(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert (stage / ".venv" / ".setup-ok").exists()
     assert not (elsewhere / ".venv").exists()
+    assert not (stage / "scripts" / ".venv").exists()
 
 
 # --- 3A S1: native stderr under PS 5.1 + "Stop"; a venv without python.exe ---
@@ -378,7 +384,7 @@ def _run_ps(stage, env):
     return subprocess.run(
         [
             "powershell.exe", "-NoProfile", "-NonInteractive",
-            "-ExecutionPolicy", "Bypass", "-File", str(stage / "setup.ps1"),
+            "-ExecutionPolicy", "Bypass", "-File", str(stage / "scripts" / "setup.ps1"),
         ],
         capture_output=True,
         text=True, encoding="utf-8", errors="replace",

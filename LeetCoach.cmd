@@ -9,13 +9,13 @@ setlocal
 cd /d "%~dp0"
 rem #9: EnableDelayedExpansion so the errorlevel check INSIDE the block below
 rem can use !errorlevel! -- %errorlevel% would be substituted just ONCE, when
-rem this whole "if not exist (...)" block is first PARSED (before setup.ps1
+rem this whole "if not exist (...)" block is first PARSED (before scripts\setup.ps1
 rem even runs), silently freezing it at a stale value from before the block
 rem started, rather than the real exit code afterward.
 setlocal EnableDelayedExpansion
 if not exist ".venv\.setup-ok" (
   echo First run: setting up LeetCoach...
-  powershell -NoProfile -ExecutionPolicy Bypass -File ".\setup.ps1"
+  powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\setup.ps1"
   rem #9: "if errorlevel 1" only catches errorlevel >= 1 -- a crash that
   rem exits with a NEGATIVE NTSTATUS code (e.g. 0xC0000005 shows up as
   rem -1073741819) is NOT ">= 1" so the old check silently let a broken setup

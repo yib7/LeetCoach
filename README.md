@@ -108,7 +108,7 @@ cd LeetCoach
 the runtime dependencies:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 ```
 
 (`-ExecutionPolicy Bypass` sidesteps the default policy that blocks unsigned scripts, for
@@ -216,7 +216,7 @@ the default.
 | `LEETCOACH_NO_DOTENV`    | *(unset)*                      | Set to `1`/`true`/`yes` to skip loading `.env` entirely and use real environment variables only. |
 | `LEETCOACH_DOTENV_PATH`  | `.env` in the repo root        | **Dev/test only.** Where the model picker writes its choice. The test suite and `scripts/dev/run_fake.py` point it at a scratch file. Startup always loads the repo-root `.env`, not this path. |
 
-`setup.ps1` also reads `LEETCOACH_SETUP_PYTHON_EXE`, a **test-only** override for the
+`scripts/setup.ps1` also reads `LEETCOACH_SETUP_PYTHON_EXE`, a **test-only** override for the
 Python it bootstraps with. The fake CLI in `scripts/dev/` reads its own `FAKE_*`
 variables. Neither is an app setting.
 
