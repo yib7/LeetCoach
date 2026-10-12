@@ -9,8 +9,8 @@ secrets: it uses your Claude Code subscription through the CLI.
 Everything it stores lives under `output/`:
 
 - the study docs you generate;
-- per-problem records (statement, notes, review schedule) and a run log, in the hidden
-  `output/.leetcoach/` folder;
+- a problem record for each problem (statement, notes, review schedule) and the run log
+  (`runs.jsonl`), in the hidden `output/.leetcoach/` folder;
 - the topic index.
 
 These parts handle untrusted input, and each is deliberately contained:
@@ -23,9 +23,9 @@ These parts handle untrusted input, and each is deliberately contained:
     `..` so a write can never escape `output/`.
   - A library path named in a request must resolve inside `output/` and not be
     dot-prefixed, so the app's metadata is never served or deleted.
-- **Answer / Guided verification** runs the Python solution Claude generated, to check
-  it against the problem's own sample I/O.
-- **"Test my code" (`POST /attempt/test`)** runs the Python you type in the re-attempt
+- **Answer / Guided Learning verification** runs the Python solution Claude generated,
+  to check it against the problem's own sample I/O.
+- **"Test my code" (`POST /attempt/test`)** runs the Python you type in the Re-attempt
   view against the samples and your own cases.
   - It runs **only** through the same sandbox: there is no other code path that executes
     submitted code.
@@ -98,9 +98,9 @@ best-effort. What the sandbox does:
     whatever the address (`127.0.0.1` and other local services included). There
     are no exceptions, so `asyncio` is not available in the sandbox: on Windows
     its event loop needs a loopback socket pair, so `asyncio.run(...)` stops the
-    run as "blocked by sandbox (socket.bind)". (An earlier exception for that
-    socket pair was removed after it was bypassed three times; LeetCode
-    solutions need neither sockets nor `asyncio`.)
+    run as "blocked by sandbox (socket.bind)". Exempting that socket pair would
+    give the generated code a hole to reach through, and LeetCode solutions
+    need neither sockets nor `asyncio`;
   - starting processes (`subprocess`, `os.system`, `os.exec*`, `os.spawn*`,
     `multiprocessing`). On POSIX that includes `_posixsubprocess.fork_exec`,
     which raises no audit event of its own: `multiprocessing` calls it directly
@@ -147,11 +147,11 @@ call (`claude_cli.build_argv`):
   that folder cannot be created, the fallback under the temp folder is per user
   (`leetcoach-claude-cwd-<uid>`); on Linux and macOS it is created `0o700` and one
   owned by another user is refused, so a shared `/tmp` cannot plant a `CLAUDE.md`.
-- **Subscription only.** `claude` children never inherit `ANTHROPIC_API_KEY`,
+- **Subscription only:** `claude` children never inherit `ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX`, from
   the shell or `.env`, so a stray key cannot switch runs to billed API credits. The
   first call logs a warning naming any variable it withheld.
-- **Session persistence.** Study runs (`/run`) keep their session, because a later
+- **Session persistence:** study runs (`/run`) keep their session, because a later
   follow-up resumes it with `claude -p --resume <session_id>`. That session lives in the
   neutral directory's project bucket, not in your own projects' history. A session id
   read back from the run log must be a plain token (`[A-Za-z0-9_-]`) before it reaches
@@ -180,25 +180,25 @@ sandbox's temp folder.
 
 Other web hardening:
 
-- **CSP.** Every response carries `default-src 'none'; script-src 'self';
+- **CSP:** every response carries `default-src 'none'; script-src 'self';
   style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self';
   base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. All scripts, styles and
   fonts are vendored, with no CDN and no inline script.
-- **No framing.** `frame-ancestors 'none'` and `X-Frame-Options: DENY` stop
+- **No framing:** `frame-ancestors 'none'` and `X-Frame-Options: DENY` stop
   clickjacking of Run, Delete and the model picker.
-- **Plain-text library files.** `X-Content-Type-Options: nosniff` keeps
+- **Plain-text library files:** `X-Content-Type-Options: nosniff` keeps
   `/library/file`, which is served as `text/plain`, from being interpreted as HTML.
-- **No referrer.** `Referrer-Policy: no-referrer` keeps a link in a study doc from
+- **No referrer:** `Referrer-Policy: no-referrer` keeps a link in a study doc from
   telling the site it opens about the local URL.
-- **Same-origin check.** Every unsafe request (POST, PUT, PATCH, DELETE) with an
+- **Same-origin check:** every unsafe request (POST, PUT, PATCH, DELETE) with an
   `Origin` header must come from this exact origin, and `Sec-Fetch-Site: cross-site` is
   refused. `GET /`, which runs the sign-in probe, may be loaded cross-site only by a
   top-level navigation. JSON routes accept only a JSON object body.
-- **Limits on spend.** Every study run and Quick Ask uses your subscription, so at
-  most 4 of each run at once (more get a 429), one follow-up and one "Test my code"
-  at a time. Request bodies are capped at 2 MB and a pasted problem at 50,000
-  characters.
-- **Anki export.** In `GET /flashcards.tsv`, any cell a spreadsheet would read as a
+- **Limits on spend:** every study run and Quick Ask uses your subscription, so at
+  most 4 study runs and 4 Quick Asks run at once (more get a 429), and only one
+  follow-up and one "Test my code" at a time. Request bodies are capped at 2 MB and a
+  pasted problem at 50,000 characters.
+- **Anki export:** in `GET /flashcards.tsv`, any cell a spreadsheet would read as a
   formula (starting with `=`, `+`, `-`, `@`, a tab or a line break) is prefixed with `'`.
   A field holding a tab, a line break or a quote is quoted, so it cannot break the
   columns.

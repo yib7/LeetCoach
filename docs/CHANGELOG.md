@@ -15,18 +15,19 @@ follow-up questions on a saved doc.
 - **Problem records and a run log (D1).** Each saved run records its problem under
   `output/.leetcoach/problems/` (number, title and difficulty parsed from the paste,
   pattern, statement) and appends one line to `output/.leetcoach/runs.jsonl`. The library
-  table's Diff column now shows real data, and `GET /problems` / `/problems/<id>` expose
-  the records. The library, search and delete all hide the metadata folder.
+  table's Diff column now shows each problem's difficulty, and `GET /problems` /
+  `/problems/<id>` expose the records. The library, search and delete all hide the
+  metadata folder.
 - **A study-doc contract and a hint ladder (D2).** Every mode follows one structure:
   problem in brief, target complexity, how to recognise the pattern, key insight,
   approach, solution, complexity, edge cases, common mistakes, related problems,
-  flashcards. Each doc tags exactly one ```` ```<lang> solution```` block. Guided and
-  Learning add `### Hint 1..4`, shown click-to-reveal, and Learning never contains a full
+  flashcards. Each doc tags exactly one ```` ```<lang> solution```` block. Guided Learning
+  and Learning add `### Hint 1..4`, shown click-to-reveal, and Learning never contains a full
   solution. Problems are filed under a fixed list of about 18 patterns.
 - **Re-attempt and "Test my code" (D3).** Re-open a saved problem with the answer hidden,
   write your own Python, and run it in the sandbox against the problem's samples and your
-  own cases (`POST /attempt/test`, cancellable). Give up to reveal the latest doc. C++ and
-  Java say clearly that they are not supported yet.
+  own cases (`POST /attempt/test`, cancellable). Give up to reveal the latest doc. For C++
+  and Java, "Test my code" answers "not supported yet".
 - **A spaced-repetition review queue (D4).** Grade each attempt as solo, with hints, or
   peeked. A Leitner schedule (1, 3, 7, 14, 30 days) moves the due date. The Console shows
   "Due today (N)" and Stats shows review counts.
@@ -40,7 +41,7 @@ follow-up questions on a saved doc.
   cancels, and nothing is added unless the answer completes. Follow-ups never change the
   doc's verdict and do not count as runs in Stats.
 - **Workspace persistence and summary actions (D7).** The draft problem, mode, language
-  and Code Quality level survive a reload, and leaving mid-run asks first. A finished run
+  and Code Quality tier survive a reload, and leaving mid-run asks first. A finished run
   offers Open in Library, Re-run as Optimal, Re-run in another language, and Learn this
   topic.
 - **Notes per problem (D9).** Edit them in the library viewer; they are saved in the
@@ -78,8 +79,8 @@ follow-up questions on a saved doc.
   - highlight.js moves from 11.9.0 to 11.12.0. CREDITS.md lists both versions, and a test
     keeps it in step with the vendored files.
   - The lock file (now `requirements/lock.txt`) is regenerated from a clean resolve and
-    passes `pip check`. Python
-    3.14 is the pinned development version; 3.12 is still the minimum.
+    passes `pip check`. Python 3.14 is the pinned development version; 3.12 is still the
+    minimum.
 - **Lint.** Ruff moves to 0.16 with its larger default rule set, and every finding is
   fixed in code. The only `noqa` comments left each give a reason.
 - **Repository layout.** `python app.py` and `LeetCoach.cmd` work as before, and `.env`
@@ -89,7 +90,7 @@ follow-up questions on a saved doc.
     It still creates `.venv` in the repo root, and `LeetCoach.cmd` calls it there.
   - The code moves into a `leetcoach/` package, with `static/` and `templates/` inside it.
     The root `app.py` is now a short entry point.
-  - The old `app.py` is split by job into `app.py` (routes), `request_guard.py`,
+  - The old `app.py` is split by area into `app.py` (routes), `request_guard.py`,
     `streaming.py`, `library.py` and `launcher.py`. Helpers are named for what they hold:
     `fsutil` becomes `atomic_files`, `proc_util` becomes `process_tree` and `parsing`
     becomes `code_blocks`.
@@ -126,7 +127,7 @@ follow-up questions on a saved doc.
   - A body that is not JSON now gets "Request body must be a JSON object." instead of a
     misleading "Problem text is required.". A deeply nested body gets the same JSON 400,
     and a body over 2 MB gets a JSON 413 that Run and Quick Ask display.
-  - "Test my code" returns an actionable JSON error when the sandbox cannot start.
+  - "Test my code" returns a JSON error with the reason when the sandbox cannot start.
   - An expected CLI failure (not installed, signed out, failed to start) is logged as one
     line instead of a traceback; unexpected errors keep theirs.
   - Multi-line CLI errors no longer repeat their first line. A failed `claude --help`
@@ -160,9 +161,9 @@ follow-up questions on a saved doc.
   with the error is logged before the fallback pattern is used, so a persistent failure
   can be diagnosed.
 - **Launch and sign-in (A1, B9).** `ensure-claude-auth.ps1` is now ASCII-only, so it
-  parses under Windows PowerShell 5.1. The desktop shortcut's automatic sign-in now
-  actually runs, in its own visible window. `scripts/setup.ps1` checks every step's exit code,
-  and the launcher pauses on failure.
+  parses under Windows PowerShell 5.1, and the desktop shortcut's automatic sign-in runs
+  in its own visible window. `scripts/setup.ps1` checks every step's exit code, and the
+  launcher pauses on failure.
 - **Verification correctness (A2-A4, B4, B5, B24).**
   - The verifier picks the tagged solution block, not the first teaching snippet.
   - Output is compared structurally: `[0, 1]` equals `[0,1]`, and `True` equals `true`.
@@ -244,8 +245,8 @@ follow-up questions on a saved doc.
 - **`Referrer-Policy: no-referrer`** on every response, so a link in a study doc does not
   tell the site it opens where it came from.
 - **Saved docs no longer name the temp folder.** A failed sample's traceback in a saved
-  Answer or Guided doc shows `solution.py` instead of the sandbox's temp path, which
-  included your OS user name.
+  Answer or Guided Learning doc shows `solution.py` instead of the sandbox's temp path,
+  which included your OS user name.
 
 ### Notes
 - **CI and tests (C14).** CI parses every `.ps1` under Windows PowerShell 5.1. The
@@ -264,9 +265,9 @@ follow-up questions on a saved doc.
   README now opens with what the project does under the hood, a flow diagram,
   screenshots and a Limitations section, and its test commands use the project's
   `.venv` without activating it.
-- **Existing libraries.** Existing `output/` libraries keep working with no migration:
-  legacy files count in Stats and open in the viewer. Follow-ups on them use the fallback
-  path.
+- **Existing libraries.** An `output/` library from an earlier version keeps working with
+  no migration: legacy files count in Stats and open in the viewer, and follow-ups on them
+  use the fallback path.
 
 ## [1.4.0] - 2026-09-25 (never released on its own)
 
@@ -278,7 +279,7 @@ users in 1.5.0, together with that release's fixes.
   `scripts/create-shortcut.ps1`, which drops a `LeetCoach` shortcut on your Desktop
   (resolving a OneDrive-redirected Desktop), so a double-click starts the app and
   opens it in your browser. The first run bootstraps the virtual environment through
-  `setup.ps1` if it is missing. The shortcut and browser tab get a real `[lc]` app icon.
+  `setup.ps1` if it is missing. The shortcut and browser tab get an `[lc]` app icon.
 - **The app opens your browser on start**, and when the default port is already in
   use it falls back to the next free port instead of failing to launch. Set
   `LEETCOACH_NO_BROWSER=1` to suppress the auto-open for headless or dev use.
@@ -289,36 +290,35 @@ users in 1.5.0, together with that release's fixes.
   stays offline and adds no new storage.
 - **A search palette** (`Ctrl`/`Cmd` + `K`) that filters your saved runs and library by
   problem, topic, mode, or language and opens the file you pick.
-- **A keyboard-shortcuts dialog** (press `?`) listing what the app responds to. Pressing
-  `?` while typing in the problem box does nothing, as expected.
+- **A keyboard-shortcuts dialog** (press `?`) listing what the app responds to. Typing
+  `?` in the problem box does not open it.
 - **An in-app model picker** in the Console (Opus / Sonnet / Haiku). Your choice is saved
-  to `.env` and applied to the very next run with no restart, so you can switch to a
-  stronger or cheaper model whenever the mood strikes. Quick Ask and the topic classifier
-  keep their own Haiku defaults.
+  to `.env` and applies to the next run with no restart. Quick Ask and the topic
+  classifier keep their own Haiku defaults.
 - **The desktop shortcut signs you in when needed.** Before starting the app, the launcher
   checks the `claude` CLI's sign-in state and, if you are signed out, runs
-  `claude auth login` for you — so a run never fails on an expired session. *(In 1.4.0
+  `claude auth login` for you, so a run does not fail on an expired session. *(In 1.4.0
   the sign-in script did not parse under Windows PowerShell 5.1, so this step silently
   did nothing. Fixed in 1.5.0; see A1.)*
 
 ### Changed
 - **The default model now tracks the latest Opus** through the `opus` alias instead of
-  a pinned id, and **Fable** (the most capable model) is added to the model picker. The
+  a pinned id, and Fable (the most capable model) is added to the model picker. The
   picker tooltips show the current version of each model; the aliases themselves are
   what reach `claude --model`.
-- Renamed the **Tier** control to **Code Quality**, with clearer levels **Basic / Normal /
-  Optimal** (previously Simple / Normal / Complex). Existing saved answers are renamed to
-  match on startup — a one-time, idempotent migration that never overwrites a file.
+- Renamed the Tier control to Code Quality, with clearer levels Basic / Normal / Optimal
+  (previously Simple / Normal / Complex). Existing saved answers are renamed to match on
+  startup by a one-time, idempotent migration that never overwrites a file.
 - Removed two placeholder controls that never did anything: the sidebar Bookmarks entry
   and the recent-runs Clear link.
 
 ### Fixed
-- A failed run now says *why*, and how to fix it. `claude` reports an expired login (and
-  other API errors) on stdout as stream-json, which the app discarded — leaving a bare
-  "exited with code 1." The run-failed message now surfaces the real reason (e.g. "Failed
-  to authenticate: OAuth session expired…") and names the exact fix, `claude auth login`.
-  The startup banner likewise tells signed-out and not-installed apart and shows the
-  copy-paste command.
+- A failed run now says why it failed and how to fix it. `claude` reports an expired
+  login (and other API errors) on stdout as stream-json, which the app discarded, leaving
+  a bare "exited with code 1." The run-failed message now shows the real reason (e.g.
+  "Failed to authenticate: OAuth session expired…") and names the exact fix,
+  `claude auth login`. The startup banner likewise tells signed-out and not-installed
+  apart and shows the copy-paste command.
 
 ### Notes
 - Runs work exactly as before: the `claude` CLI dependency, the SSE streaming pipeline,

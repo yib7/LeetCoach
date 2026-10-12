@@ -7,10 +7,10 @@ follow-ups, Quick Ask and commands after it are reference.
 ## What it is
 
 LeetCoach is a small Flask web app that runs on `localhost`. You paste a LeetCode-style
-problem and pick a language and a mode. The app then shells out to the **`claude` CLI**
-(`claude -p`, no API key) to generate study material. The response streams back to the
-browser live over server-sent events (SSE) and is saved under `output/`, so your docs
-accumulate into a personal study library.
+problem and pick a language and a mode. The app then shells out to the `claude` CLI
+(`claude -p`, no API key) to generate a study doc. The response streams back to the
+browser live over server-sent events (SSE) and is saved under `output/`, so your study
+docs accumulate into a personal study library.
 
 The library also feeds a practice loop:
 
@@ -139,13 +139,13 @@ noticed. `POST /run/cancel {run_id}` stops a run, and nothing is saved.
 
 ## The modules
 
-All of these live in `leetcoach/`, grouped by job.
+All of these live in `leetcoach/`, grouped by area.
 
 **Web layer**
 
 | Module | Responsibility |
 | --- | --- |
-| `app.py` | The Flask app factory and every route above. It loads `.env` at import, validates input (allowlists, JSON-object bodies, length and concurrency caps), runs classify → prompt → stream → verify → save for `/run`, and sets the CSP, anti-framing, `nosniff` and `Referrer-Policy` headers. The Claude runner is injectable, so tests never spawn a real process. |
+| `app.py` | The Flask app factory and every route (see Routes below). It loads `.env` at import, validates input (allowlists, JSON-object bodies, length and concurrency caps), runs classify → prompt → stream → verify → save for `/run`, and sets the CSP, anti-framing, `nosniff` and `Referrer-Policy` headers. The Claude runner is injectable, so tests never spawn a real process. |
 | `request_guard.py` | The checks every request passes first: a loopback peer, a loopback `Host` (DNS-rebinding defense), and the same-origin rule for state-changing requests and for loading `/`. |
 | `streaming.py` | SSE plumbing for `/run` and `/followup`: frame formatters, the `: ping` heartbeat that notices a closed tab, and `RunState`, which lets either a cancel or the save win, never both. |
 | `library.py` | The `/library` listing (verdict, difficulty and title from the run log, or parsed from a legacy doc) and `resolve_file`, the containment gate every library read and delete goes through. |
@@ -157,7 +157,7 @@ All of these live in `leetcoach/`, grouped by job.
 
 | Module | Responsibility |
 | --- | --- |
-| `claude_cli.py` | The keystone. It runs `claude -p --output-format stream-json` with the prompt on **stdin**, parses the stream into text deltas plus the model and `session_id`, gates optional flags on a cached `claude --help` probe, and kills the whole process tree on timeout. It also holds the cached sign-in probe. |
+| `claude_cli.py` | The keystone. It runs `claude -p --output-format stream-json` with the prompt on stdin, parses the stream into text deltas plus the model and `session_id`, gates optional flags on a cached `claude --help` probe, and kills the whole process tree on timeout. It also holds the cached sign-in probe. |
 | `classifier.py` | One short Claude call that labels the problem with a pattern and topics. It never raises; anything unreadable becomes `uncategorized`. |
 | `patterns.py` | The fixed list of about 18 patterns, and the mapping of free-form labels onto it. |
 | `prompts.py` | The personas and prompt builders for every mode, tier and language, the shared study-doc contract, and the random-nonce fences around pasted text. |
@@ -180,7 +180,7 @@ All of these live in `leetcoach/`, grouped by job.
 | `problem_store.py` | Problem records and the append-only run log under `.leetcoach/`, plus review scheduling, grading, notes and the doc-to-session lookup follow-ups use. |
 | `stats.py` | `/stats` (streaks, heatmap, totals) from the run log, with a per-file fallback for older libraries. |
 | `flashcards.py` | Parses `## Flashcards` sections and writes the Anki TSV. |
-| `topic_index.py` | What Learning and Guided have already covered, per language, so later runs can skip it. |
+| `topic_index.py` | What Learning and Guided Learning have already covered, per language, so later runs can skip it. |
 | `atomic_files.py` | The shared atomic write (temp file + `os.replace`, retried on a Windows lock) used for every file the app owns. |
 | `config.py` | Every setting, read from the environment at call time, plus `REPO_ROOT` (where `.env` and `output/` live), `PACKAGE_DIR` and the `.env` upsert. |
 
@@ -210,20 +210,20 @@ docs, and deletes files or whole runs on request. Every write is atomic
 listed, counted in Stats by their own mtime, and accept follow-ups through the fallback
 path.
 
-## Design decisions worth knowing
+## Design decisions
 
-- **No API key.** The app uses your Claude Code subscription through the CLI, so there
+- **No API key:** the app uses your Claude Code subscription through the CLI, so there
   is no secret to configure or leak.
-- **Isolated Claude calls.** Every call gets `--safe-mode`, `--tools ""`,
+- **Isolated Claude calls:** every call gets `--safe-mode`, `--tools ""`,
   `--strict-mcp-config` and a `--system-prompt` persona, and runs in a neutral cwd. Each
   flag is passed only if `claude --help` lists it, and `--bare` is never passed. Study
   runs keep their session for follow-ups. Utility calls use `--no-session-persistence`.
-- **Injectable Claude runner.** `claude_cli.run` and `create_app` both take an injectable
+- **Injectable Claude runner:** `claude_cli.run` and `create_app` both take an injectable
   runner, so the whole suite mocks the subprocess and runs offline. No test spawns a real
   `claude`.
-- **Prompt on stdin.** A pasted problem can be large. Sending it on stdin avoids
+- **Prompt on stdin:** a pasted problem can be large. Sending it on stdin avoids
   argument-length limits and any shell-escaping surface.
-- **One containment chokepoint.** Every user- or model-supplied path segment goes through
+- **One containment chokepoint:** every user- or model-supplied path segment goes through
   `storage.slug()`. Every library path a request names goes through
   `library.resolve_file`, which also hides dot-prefixed paths.
 - **The sandbox is a convenience, not a security boundary.** See
@@ -240,9 +240,9 @@ the same-origin check. `/run` and `/ask` each allow 4 calls in flight (429 past 
 | GET | `/` | The single page. It shows the CLI sign-in banner from a cached `claude auth status` probe. |
 | GET | `/healthz` | `{"app": "leetcoach", "version"}`. A second launch uses it to find a running instance. |
 | GET | `/favicon.ico` | The app icon (`/static/favicon.svg`), for pages without the `<link rel="icon">` (JSON and plain-text routes). |
-| POST | `/run` | Study run (Answer / Learning / Guided / Code Review) as an SSE stream. |
+| POST | `/run` | Study run (Answer / Learning / Guided Learning / Code Review) as an SSE stream. |
 | POST | `/run/cancel` | Cancel a run by `run_id`. |
-| POST | `/followup` | Follow-up question on a saved doc, as an SSE stream (see above). |
+| POST | `/followup` | Follow-up question on a saved doc, as an SSE stream (see below). |
 | POST | `/followup/cancel` | Cancel a follow-up by `followup_id`. |
 | POST | `/ask` | Quick Ask (plain JSON). |
 | POST | `/ask/cancel` | Cancel a Quick Ask. |
@@ -290,12 +290,11 @@ the same injected Claude runner as `/run`, pointed at the cheap Quick Ask model 
 default; see `config.quick_ask_model()`). The page's Quick Ask tag shows that configured
 model.
 
-It is a lookup, not a lesson: the reply is plain JSON rather than an SSE stream, and
-nothing is written to the library. `prompts.build_quick_ask` carries a guardrail so the
-cheap model refuses questions that really ask how to solve the current problem. A
-deliberate carve-out keeps genuinely abstract questions ("what does `defaultdict` do?")
-answerable. When a problem is pasted, it is fenced as context and used only for that
-guardrail.
+The reply is plain JSON rather than an SSE stream, and nothing is written to the
+library. `prompts.build_quick_ask` carries a guardrail so the cheap model refuses
+questions that amount to asking how to solve the current problem. A deliberate carve-out
+keeps purely abstract questions ("what does `defaultdict` do?") answerable. When a
+problem is pasted, it is fenced as context and used only for that guardrail.
 
 ## Environment and commands
 

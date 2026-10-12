@@ -22,14 +22,14 @@ with the code, so the full texts are reproduced under [License texts](#license-t
 
 ## Original assets
 
-- **Icons.** The `[lc]` mark (`leetcoach/static/favicon.svg`, `docs/media/leetcoach.ico`)
+- **Icons:** the `[lc]` mark (`leetcoach/static/favicon.svg`, `docs/media/leetcoach.ico`)
   and the inline SVG interface icons in `leetcoach/templates/index.html` and
   `leetcoach/static/app.js` are drawn for this project. No icon set is bundled.
-- **Fonts.** None are bundled. The CSS uses the operating system's own UI and monospace
+- **Fonts:** none are bundled. The CSS uses the operating system's own UI and monospace
   font stacks.
-- **README media.** The screenshots (`docs/media/screenshot-*.png`) and the walkthrough
+- **README media:** the screenshots (`docs/media/screenshot-*.png`) and the walkthrough
   (`docs/media/demo.gif`) are captures of LeetCoach itself.
-- **Sample problems.** Test fixtures, the fake-CLI library seed (`scripts/dev/`) and the
+- **Sample problems:** test fixtures, the fake-CLI library seed (`scripts/dev/`) and the
   in-app "Sample: Two Sum" quote a sentence or two of well-known LeetCode problem prompts
   (titles, a one-line task, one sample case) as parser input. No full problem statements
   are included.
