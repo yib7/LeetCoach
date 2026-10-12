@@ -260,18 +260,18 @@ follow-up questions on a saved doc.
   any `LEETCOACH_*` variable missing from `.env.example`.
 - **Tests no longer depend on the clock.** Review and Stats tests freeze "now", so they
   pass across midnight and DST changes.
-- **Docs (C13).** README, ARCHITECTURE, SECURITY and this changelog are up to date.
+- **Docs (C13).** README, ARCHITECTURE, SECURITY and this changelog are up to date. The
+  README now opens with what the project does under the hood, a flow diagram,
+  screenshots and a Limitations section, and its test commands use the project's
+  `.venv` without activating it.
 - **Existing libraries.** Existing `output/` libraries keep working with no migration:
   legacy files count in Stats and open in the viewer. Follow-ups on them use the fallback
   path.
 
-## [1.4.0] - Unreleased
+## [1.4.0] - 2026-09-25 (never released on its own)
 
-### Changed
-- **The default model now tracks the latest Opus** through the `opus` alias instead of
-  a pinned id, and **Fable** (the most capable model) is added to the model picker. The
-  picker tooltips show the current version of each model; the aliases themselves are
-  what reach `claude --model`.
+Merged on 2026-09-25 but never tagged or published. Everything below first reaches
+users in 1.5.0, together with that release's fixes.
 
 ### Added
 - **One-click desktop launch.** A `LeetCoach.cmd` launcher plus
@@ -302,6 +302,10 @@ follow-up questions on a saved doc.
   did nothing. Fixed in 1.5.0; see A1.)*
 
 ### Changed
+- **The default model now tracks the latest Opus** through the `opus` alias instead of
+  a pinned id, and **Fable** (the most capable model) is added to the model picker. The
+  picker tooltips show the current version of each model; the aliases themselves are
+  what reach `claude --model`.
 - Renamed the **Tier** control to **Code Quality**, with clearer levels **Basic / Normal /
   Optimal** (previously Simple / Normal / Complex). Existing saved answers are renamed to
   match on startup — a one-time, idempotent migration that never overwrites a file.

@@ -27,8 +27,8 @@ with the code, so the full texts are reproduced under [License texts](#license-t
   `leetcoach/static/app.js` are drawn for this project. No icon set is bundled.
 - **Fonts.** None are bundled. The CSS uses the operating system's own UI and monospace
   font stacks.
-- **README media.** `docs/media/screenshot.png` and `docs/media/demo.gif` are captures of
-  LeetCoach itself.
+- **README media.** The screenshots (`docs/media/screenshot-*.png`) and the walkthrough
+  (`docs/media/demo.gif`) are captures of LeetCoach itself.
 - **Sample problems.** Test fixtures, the fake-CLI library seed (`scripts/dev/`) and the
   in-app "Sample: Two Sum" quote a sentence or two of well-known LeetCode problem prompts
   (titles, a one-line task, one sample case) as parser input. No full problem statements

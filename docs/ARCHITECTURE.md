@@ -299,17 +299,23 @@ guardrail.
 
 ## Environment and commands
 
-- Windows 11 with PowerShell is the developed and tested platform. The code is plain
-  cross-platform Python with no OS-specific dependencies.
-- Python 3.12+ (through the `py` launcher on Windows). A project `.venv` is recommended.
+- Windows 11 with PowerShell is the developed and hand-tested platform. CI also runs the
+  suite on Ubuntu and macOS. The only OS-specific code is the process containment in
+  `process_tree.py` and `sandbox.py`: Job Objects through `ctypes` on Windows, rlimits
+  and process groups on POSIX. There are no OS-specific third-party dependencies.
+- Python 3.12+ (CI runs 3.12, 3.13 and 3.14) in the project `.venv` that `LeetCoach.cmd`
+  (through `scripts/setup.ps1`) creates. Nothing needs the venv activated.
 - The `claude` CLI must be installed, on your PATH, and authenticated.
 
-```sh
-py -m pytest -q                  # run the tests (all mock the claude subprocess)
-node tests/js/run.js             # front-end helper tests (also run by pytest when node exists)
-py -m ruff check .               # lint
-python app.py                    # run the app, then open the printed localhost URL
-python scripts/dev/run_fake.py   # the app on :5057 against the fake CLI and a scratch library
+On Windows, from the repo root (on Linux and macOS use `.venv/bin/python`):
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements\dev.txt -c requirements\lock.txt
+.venv\Scripts\python.exe -m pytest -q             # tests (all mock the claude subprocess)
+node tests\js\run.js                              # front-end helper tests (pytest runs them too when node exists)
+.venv\Scripts\python.exe -m ruff check .          # lint
+.\LeetCoach.cmd                                   # run the app (or .venv\Scripts\python.exe app.py)
+.venv\Scripts\python.exe scripts\dev\run_fake.py  # the app on :5057 against the fake CLI and a scratch library
 ```
 
 `scripts/smoke_claude.py` is a small developer utility that makes one real `claude -p`
