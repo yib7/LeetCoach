@@ -35,12 +35,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.lock
+          cache-dependency-path: requirements/lock.txt
 
       - name: Install the locked dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.lock
+          python -m pip install -r requirements/lock.txt
           python -m pip check
 
       - name: Lint (ruff)
@@ -93,12 +93,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.lock
+          cache-dependency-path: requirements/lock.txt
 
       - name: Install the locked dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.lock
+          python -m pip install -r requirements/lock.txt
           python -m pip check
 
       - name: Front-end unit tests (node)
@@ -193,7 +193,7 @@ jobs:
 
   readme-setup-linux:
     # The README's non-Windows path, literally: clone, `python3 -m venv .venv`,
-    # activate, `pip install -r requirements.txt`, `python app.py`, against the
+    # activate, `pip install -r requirements/base.txt`, `python app.py`, against the
     # fake claude CLI (scripts/dev/fake_claude.py), then ask /healthz.
     name: README setup (linux, clean runner)
     runs-on: ubuntu-latest
@@ -212,7 +212,7 @@ jobs:
         run: |
           python3 -m venv .venv
           . .venv/bin/activate
-          pip install -r requirements.txt
+          pip install -r requirements/base.txt
 
       - name: "Step 3: run (python app.py) against the fake claude CLI"
         working-directory: ${{ runner.temp }}/LeetCoach

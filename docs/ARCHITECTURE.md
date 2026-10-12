@@ -241,7 +241,7 @@ path.
   `storage.slug()`. Every library path a request names goes through
   `_resolve_library_file`, which also hides dot-prefixed paths.
 - **The sandbox is a convenience, not a security boundary.** See
-  [SECURITY.md](../SECURITY.md).
+  [SECURITY.md](SECURITY.md).
 
 ## Environment and commands
 

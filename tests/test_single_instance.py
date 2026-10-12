@@ -44,7 +44,7 @@ def test_version_matches_the_latest_changelog_release():
     # The Cycle 11 release; the CHANGELOG's newest entry must name the same version.
     assert app_module.VERSION == "1.5.0"
     repo_root = Path(__file__).resolve().parent.parent
-    changelog = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
+    changelog = (repo_root / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
     first = next(line for line in changelog.splitlines() if line.startswith("## ["))
     assert first.startswith(f"## [{app_module.VERSION}]")
 

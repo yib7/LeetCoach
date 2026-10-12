@@ -136,7 +136,7 @@ exit /b 0
 # ALREADY-EXISTING .venv, before any pip install). Varies its answer on the
 # `-c` argument's own content rather than always succeeding, so a test can
 # tell apart a venv that only has `flask` installed from one that has BOTH
-# `flask` AND `python-dotenv` (requirements.txt lists both; app.py imports
+# `flask` AND `python-dotenv` (requirements/base.txt lists both; app.py imports
 # `dotenv` too). If the checked import statement doesn't even mention
 # `dotenv` (the OLD, buggy fast-path check - `import flask` alone), this
 # always reports success, since flask-only is exactly what that narrower
@@ -153,13 +153,13 @@ _EXISTING_VENV_PYTHON_CMD = (
 
 
 def _stage(tmp_path):
-    """Copy setup.ps1 + a throwaway requirements.txt into an isolated
+    """Copy setup.ps1 + a throwaway requirements/base.txt into an isolated
     directory that stands in for the repo root, so nothing ever touches the
     real project .venv."""
     stage = tmp_path / "stage"
-    stage.mkdir(exist_ok=True)
+    (stage / "requirements").mkdir(parents=True, exist_ok=True)
     (stage / "setup.ps1").write_text(SETUP_PS1.read_text(encoding="utf-8"), encoding="utf-8")
-    (stage / "requirements.txt").write_text("flask>=3.0\n", encoding="utf-8")
+    (stage / "requirements" / "base.txt").write_text("flask>=3.0\n", encoding="utf-8")
     return stage
 
 
@@ -301,7 +301,7 @@ def test_existing_working_venv_skips_full_setup_without_py_launcher(tmp_path):
 
 
 def test_existing_venv_missing_dotenv_does_not_get_the_marker(tmp_path):
-    """requirements.txt lists BOTH `flask` and `python-dotenv` (app.py
+    """requirements/base.txt lists BOTH `flask` and `python-dotenv` (app.py
     imports `dotenv`) - the fast-path check must prove BOTH are importable,
     not just `flask`. A venv with flask installed but dotenv missing must
     NOT get the marker from the fast path; it must fall through to the full

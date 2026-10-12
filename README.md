@@ -88,7 +88,7 @@ LeetCoach runs every `claude` call in isolation:
 - a neutral working folder (`LEETCOACH_CLAUDE_CWD`), so your plugins, hooks,
   `CLAUDE.md` and output style never shape a study doc.
 
-See [SECURITY.md](SECURITY.md).
+See [SECURITY.md](docs/SECURITY.md).
 
 ## Setup
 
@@ -115,7 +115,7 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 this one process only - it changes nothing system-wide. Every LeetCoach `.ps1`/`.cmd`
 launcher, including `LeetCoach.cmd` itself, invokes scripts this same way.)
 
-(Not on Windows? Run `python3 -m venv .venv`, activate it, then `pip install -r requirements.txt`.)
+(Not on Windows? Run `python3 -m venv .venv`, activate it, then `pip install -r requirements/base.txt`.)
 
 **Step 3: run.** Activate the virtual environment, then start the app:
 
@@ -179,7 +179,7 @@ Verification is best-effort and **Python-first**:
 - When a problem has no parseable sample I/O, the result is likewise "not auto-verified". A
   not-verified result is never a failure.
 
-The sandbox is a convenience check, not a security boundary; see [SECURITY.md](SECURITY.md).
+The sandbox is a convenience check, not a security boundary; see [SECURITY.md](docs/SECURITY.md).
 
 ## Tech stack
 
@@ -265,7 +265,7 @@ Follow-up answers are appended to the doc they were asked on. Libraries saved be
 - **Only Python is auto-verified.** C++ / Java solutions are compiler-probed only and
   reported "not auto-verified"; verify those yourself.
 - **The sandbox is a convenience, not a security boundary.** It caps time, memory, and
-  process count, but do not rely on it to contain hostile code; see [SECURITY.md](SECURITY.md).
+  process count, but do not rely on it to contain hostile code; see [SECURITY.md](docs/SECURITY.md).
 - **Requires the `claude` CLI.** It drives your Claude Code subscription through the CLI;
   there is no API-key fallback, so runs fail until `claude` is installed and authenticated.
 
@@ -274,7 +274,7 @@ Follow-up answers are appended to the doc they were asked on. Libraries saved be
 All tests mock the `claude` subprocess, so the suite runs offline with no real Claude calls.
 
 ```sh
-pip install -r requirements-dev.txt
+pip install -r requirements/dev.txt
 python -m pytest -q        # includes the node tests below when node is installed
 node tests/js/run.js       # front-end helper tests (zero dependencies)
 ruff check .
@@ -288,5 +288,5 @@ scratch library.
 
 ## License
 
-[MIT](LICENSE). Third-party attributions are in [CREDITS.md](CREDITS.md); release notes in
-[CHANGELOG.md](CHANGELOG.md).
+[MIT](LICENSE). Third-party attributions are in [CREDITS.md](docs/CREDITS.md); release notes in
+[CHANGELOG.md](docs/CHANGELOG.md).

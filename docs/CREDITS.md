@@ -1,6 +1,6 @@
 # Credits
 
-LeetCoach is original work by yib7 under the [MIT License](LICENSE). It bundles two
+LeetCoach is original work by yib7 under the [MIT License](../LICENSE). It bundles two
 third-party front-end libraries, vendored under `static/vendor/` so the app needs no
 runtime CDN. Everything else in the repo is original to this project.
 

@@ -10,7 +10,7 @@ Set-Location -Path $PSScriptRoot
 
 $VenvPath = Join-Path $PSScriptRoot ".venv"
 $MarkerPath = Join-Path $VenvPath ".setup-ok"
-$RequirementsPath = Join-Path $PSScriptRoot "requirements.txt"
+$RequirementsPath = Join-Path $PSScriptRoot "requirements\base.txt"
 
 # Test seam only: lets tests point pip installs at a fake stub instead of a
 # real interpreter, without a real `.venv` ever being created. Unset (the

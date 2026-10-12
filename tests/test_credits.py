@@ -17,7 +17,7 @@ def _head(name: str) -> str:
 
 
 def _credits_row(file_cell: str) -> str:
-    text = (ROOT / "CREDITS.md").read_text(encoding="utf-8")
+    text = (ROOT / "docs" / "CREDITS.md").read_text(encoding="utf-8")
     rows = [ln for ln in text.splitlines() if ln.startswith("| ") and file_cell in ln.split("|")[1]]
     assert len(rows) == 1, f"expected one CREDITS.md row for {file_cell}, got {rows}"
     return rows[0]
@@ -45,6 +45,6 @@ def test_highlight_js_core_and_grammars_share_the_credited_version():
 
 
 def test_every_vendored_file_is_credited():
-    text = (ROOT / "CREDITS.md").read_text(encoding="utf-8")
+    text = (ROOT / "docs" / "CREDITS.md").read_text(encoding="utf-8")
     for f in sorted(VENDOR.iterdir()):
         assert f"`{f.name}`" in text, f"{f.name} is vendored but not listed in CREDITS.md"
