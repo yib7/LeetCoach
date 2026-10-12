@@ -485,3 +485,29 @@ test("summaryActions for a review: open + learn only", function () {
   var answer = core.summaryActions({ mode: "answer", language: "python", tier: "brute" });
   assert.ok(answer.some(function (a) { return a.id === "lang-java"; }));
 });
+
+// ---- Phase 7: the top-bar CLI pill says its state in words, not just with a dot colour -----
+test("cliStatus names every state in text and only colours the not-ready ones", function () {
+  assert.deepStrictEqual(core.cliStatus(true, true), { ready: true, state: "ready", dot: "" });
+  assert.deepStrictEqual(core.cliStatus(true, false), { ready: false, state: "signed out", dot: "red" });
+  assert.deepStrictEqual(core.cliStatus(false, false), { ready: false, state: "not found", dot: "red" });
+  assert.deepStrictEqual(core.cliStatus(false, true), { ready: false, state: "not found", dot: "red" });
+});
+
+test("verdict glyphs differ by shape, so the verdict never rests on colour alone", function () {
+  var glyphs = {};
+  ["pass", "fail", "not_verified", ""].forEach(function (v) {
+    var info = core.verdictInfo(v);
+    assert.ok(info.glyph && info.label, "glyph + label for " + v);
+    glyphs[info.cls] = info.glyph;
+  });
+  var shapes = Object.keys(glyphs).map(function (k) { return glyphs[k]; });
+  assert.strictEqual(new Set(shapes).size, shapes.length, "one shape per verdict class: " + shapes);
+});
+
+test("tierNote explains a disabled Code Quality group", function () {
+  assert.strictEqual(core.tierNote("answer"), "");
+  assert.strictEqual(core.tierNote("guided"), "");
+  assert.ok(/Learning/.test(core.tierNote("learning")) && /Answer and Guided/.test(core.tierNote("learning")));
+  assert.ok(/Code Review/.test(core.tierNote("review")));
+});
