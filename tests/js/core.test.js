@@ -367,3 +367,121 @@ test("hardened renderer: block and inline raw HTML is shown as text", function (
   assert.ok(html.indexOf("<div") === -1 && html.indexOf("&lt;div") !== -1, html);
   assert.ok(html.indexOf("<img") === -1 && html.indexOf("&lt;img") !== -1, html);
 });
+
+// ---- D1: the Diff column ----------------------------------------------------------
+test("diffInfo maps difficulties to the table's classes", function () {
+  assert.deepStrictEqual(core.diffInfo("Easy"), { cls: "easy", label: "Easy" });
+  assert.deepStrictEqual(core.diffInfo("medium"), { cls: "med", label: "Medium" });
+  assert.deepStrictEqual(core.diffInfo("HARD"), { cls: "hard", label: "Hard" });
+  assert.strictEqual(core.diffInfo(""), null);
+  assert.strictEqual(core.diffInfo("Insane"), null);
+  assert.strictEqual(core.diffInfo(null), null);
+});
+
+// ---- A8: one run per tier / slot ----------------------------------------------------
+test("deriveRuns keeps tiers and __N slots apart (A8)", function () {
+  var runs = core.deriveRuns([
+    { path: "answers/hash_map/two_sum__normal.md", mtime: 100, verdict: "fail", difficulty: "Easy" },
+    { path: "answers/hash_map/two_sum__normal.py", mtime: 101, difficulty: "Easy" },
+    { path: "answers/hash_map/two_sum__optimal.md", mtime: 200, verdict: "pass" },
+    { path: "answers/hash_map/two_sum__normal__2.md", mtime: 300 },
+    { path: "learning/hash_map_learning/two_sum__2.md", mtime: 400 },
+  ]);
+  assert.strictEqual(runs.length, 4);
+  var byPath = {};
+  runs.forEach(function (r) { byPath[r.mdPath] = r; });
+  var first = byPath["answers/hash_map/two_sum__normal.md"];
+  assert.strictEqual(first.tier, "normal");
+  assert.strictEqual(first.language, "Python");
+  assert.strictEqual(first.verdict, "fail");
+  assert.strictEqual(first.difficulty, "Easy");
+  assert.strictEqual(first.savedAt, 101);
+  var slot = byPath["answers/hash_map/two_sum__normal__2.md"];
+  assert.strictEqual(slot.tier, "normal");          // "__2" is a slot, not a tier
+  assert.strictEqual(slot.slot, 2);
+  assert.strictEqual(slot.problem, "Two Sum");
+  var learn = byPath["learning/hash_map_learning/two_sum__2.md"];
+  assert.strictEqual(learn.tier, "");
+  assert.strictEqual(learn.slot, 2);
+});
+
+test("computeStats over derived runs: the A8 4-day scenario gives a streak of 4", function () {
+  var now = new Date(2026, 9, 8, 18, 0, 0);
+  function at(daysAgo, hour) { return new Date(2026, 9, 8 - daysAgo, hour || 10, 0, 0).getTime() / 1000; }
+  var files = [
+    { path: "answers/hash_map/two_sum__normal.md", mtime: at(3) },
+    { path: "answers/hash_map/two_sum__normal.py", mtime: at(3) },
+    { path: "answers/hash_map/two_sum__optimal.md", mtime: at(2) },
+    { path: "answers/hash_map/two_sum__normal__2.md", mtime: at(2, 16) },
+    { path: "answers/hash_map/two_sum__normal__3.md", mtime: at(1) },
+    { path: "learning/hash_map_learning/two_sum.md", mtime: at(0) },
+  ];
+  var s = core.computeStats(core.deriveRuns(files), now);
+  assert.strictEqual(s.currentStreak, 4);
+  assert.strictEqual(s.total, 5);
+  assert.strictEqual(s.distinctProblems, 1);
+});
+
+// ---- O2: tier only for Answer --------------------------------------------------------
+test("tierApplies is Answer-only and the Optimal re-run follows it", function () {
+  assert.strictEqual(core.tierApplies("answer"), true);
+  assert.strictEqual(core.tierApplies("Answer"), true);
+  assert.strictEqual(core.tierApplies("guided"), false);
+  assert.strictEqual(core.tierApplies("Learning"), false);
+  assert.strictEqual(core.tierApplies(""), false);
+  var ids = core.summaryActions({ mode: "guided", language: "python", tier: "basic" })
+    .map(function (a) { return a.id; });
+  assert.strictEqual(ids.indexOf("optimal"), -1);
+});
+
+// ---- O3: display titles -----------------------------------------------------------------
+test("problemTitle prefers the record and splits the number off", function () {
+  assert.deepStrictEqual(core.problemTitle({ title: "Two Sum", number: 1, stem: "1_two_sum" }),
+    { title: "Two Sum", number: 1, label: "#1 · Two Sum" });
+  assert.deepStrictEqual(core.problemTitle({ stem: "1_two_sum" }),
+    { title: "Two Sum", number: 1, label: "#1 · Two Sum" });
+  assert.deepStrictEqual(core.problemTitle({ stem: "two_sum" }),
+    { title: "Two Sum", number: null, label: "Two Sum" });
+  assert.strictEqual(core.problemTitle({ stem: "3sum" }).title, "3sum");      // no space: kept
+  assert.strictEqual(core.problemTitle({ title: "1. Two Sum" }).title, "Two Sum");
+  assert.strictEqual(core.problemTitle({ title: "1) Two Sum" }).number, 1);
+  assert.strictEqual(core.problemTitle({ stem: "" }).label, "");
+});
+
+test("deriveRuns shows the record title and number, legacy names stripped", function () {
+  var runs = core.deriveRuns([
+    { path: "guided/hash_map/1_two_sum.md", mtime: 3, title: "Two Sum", number: 1 },
+    { path: "answers/heap/215_kth_largest_element_in_an_array__optimal.md", mtime: 2 },
+    { path: "answers/stack/valid_parentheses__optimal.md", mtime: 1 },
+  ]);
+  var byPath = {};
+  runs.forEach(function (r) { byPath[r.mdPath] = r; });
+  var a = byPath["guided/hash_map/1_two_sum.md"];
+  assert.strictEqual(a.problem, "Two Sum");
+  assert.strictEqual(a.number, 1);
+  assert.strictEqual(a.problemLabel, "#1 · Two Sum");
+  var b = byPath["answers/heap/215_kth_largest_element_in_an_array__optimal.md"];
+  assert.strictEqual(b.problem, "Kth Largest Element In An Array");
+  assert.strictEqual(b.number, 215);
+  var c = byPath["answers/stack/valid_parentheses__optimal.md"];
+  assert.strictEqual(c.problemLabel, "Valid Parentheses");
+  assert.strictEqual(c.number, null);
+});
+
+// ---- Code Review mode (D5) ------------------------------------------------------
+test("modeName / modeLabel / untiered know Code Review", function () {
+  assert.strictEqual(core.modeName("review"), "Code Review");
+  assert.strictEqual(core.modeName("guided"), "Guided");
+  assert.strictEqual(core.modeName("answer"), "Answer");
+  assert.strictEqual(core.modeLabel("reviews"), "Code Review");
+  assert.strictEqual(core.untiered("review"), true);
+  assert.strictEqual(core.untiered("learning"), true);
+  assert.strictEqual(core.untiered("answer"), false);
+});
+
+test("summaryActions for a review: open + learn only", function () {
+  var acts = core.summaryActions({ mode: "review", language: "python", mdPath: "reviews/x.md" });
+  assert.deepStrictEqual(acts.map(function (a) { return a.id; }), ["open", "learn"]);
+  var answer = core.summaryActions({ mode: "answer", language: "python", tier: "brute" });
+  assert.ok(answer.some(function (a) { return a.id === "lang-java"; }));
+});

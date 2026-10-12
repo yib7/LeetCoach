@@ -5,16 +5,25 @@ isolation flags, same neutral cwd); without a usable session - none logged, a
 CLI without ``--resume``, or a resume that fails before any text - a fresh
 isolated call gets the doc as context. The answer is appended to the doc under
 ``## Follow-up — <question>``. Every Claude call here is a fake.
+
+The append keeps the doc's saved date (so Stats and the library listing do not
+move it), can never forge a verdict from inside a code fence, closes a fence an
+answer or the doc left open, is refused for a doc that is not UTF-8 before any
+Claude call, and shares the library's write lock with ``DELETE``.
 """
 from __future__ import annotations
 
 import functools
 import json
+import os
+import re
 import threading
 import time
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pytest
-from _helpers import parse_sse
+from _helpers import freeze_stats_now, local_noon, parse_sse
 
 from leetcoach import app as app_module
 from leetcoach import atomic_files, claude_cli, library, problem_store, prompts, storage
@@ -630,3 +639,199 @@ def test_quick_ask_tag_names_the_configured_model(root, monkeypatch, env, shown)
     assert "__QUICK_ASK_MODEL__" not in html
     tag = html.split('for="qa-input">Quick Ask', 1)[1].split("</label>", 1)[0]
     assert shown in tag
+
+
+# --- SP8 fix round helpers --------------------------------------------------
+
+def _age(path: Path, days: int, *, today: date | None = None) -> int:
+    """Back-date ``path`` to local noon ``days`` calendar days before
+    ``today`` (default: the real local today); returns the new mtime_ns.
+    3A W9: calendar arithmetic, not ``days * 86400`` seconds, so a DST change
+    in between never moves it to a neighbouring date."""
+    old = local_noon((today or datetime.now().astimezone().date()) - timedelta(days=days))
+    os.utime(path, (old, old))
+    return path.stat().st_mtime_ns
+
+
+def _outside_fence_lines(text: str) -> list[str]:
+    """The lines of ``text`` that are NOT inside a fenced code block."""
+    out, fence = [], None
+    for line in text.split("\n"):
+        m = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
+        stripped = line.strip()
+        if fence is None and m:
+            fence = m.group(1)
+        elif fence is not None:
+            if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+                fence = None
+        else:
+            out.append(line)
+    return out
+
+
+# --- I1: a follow-up keeps the doc's saved date ------------------------------------
+
+def test_followup_keeps_the_docs_mtime(root):
+    rel = _seed(root)
+    path = root / rel
+    before = _age(path, 10)
+    _, (_, events) = _ask(_client(Recorder()), rel)
+    assert events[-1][0] == "done"
+    assert path.stat().st_mtime_ns == before
+    assert "## Follow-up — Why a hash map?" in path.read_text(encoding="utf-8")
+
+
+def test_legacy_doc_stats_date_is_unchanged_by_a_followup(root, monkeypatch):
+    rel = "guided/stack/20_valid_parentheses.md"
+    path = _write(root, rel, LEARNING_DOC)  # unlogged: Stats dates it by mtime
+    # 3A W9: one frozen clock for the mtime, both /stats calls and the expected
+    # day - 00:30, ten days after a US DST change (the old 10 * 86400 s helper
+    # put the doc on the wrong date in exactly this case).
+    now = datetime(2026, 3, 18, 0, 30).astimezone()
+    _age(path, 10, today=now.date())
+    freeze_stats_now(monkeypatch, now)
+    c = _client(Recorder())
+    before = c.get("/stats").get_json()
+    _, (_, events) = _ask(c, rel)
+    assert events[-1][0] == "done"
+    after = c.get("/stats").get_json()
+    assert after == before
+    assert after["today"] == 0 and after["sources"]["legacy"] == 1
+    day = datetime.fromtimestamp(path.stat().st_mtime).astimezone().date().isoformat()
+    assert day == (now.date() - timedelta(days=10)).isoformat()
+    assert {h["date"]: h["count"] for h in after["heatmap"]}[day] == 1
+
+
+def test_library_listing_and_verdict_cache_still_refresh(root):
+    rel = "answers/hash_map/legacy__normal.md"  # unlogged: verdict parsed from the doc
+    path = _write(root, rel, ANSWER_DOC)
+    mtime_ns = _age(path, 3)
+    c = _client(Recorder(Call(["Extra words."])))
+    first = {f["path"]: f for f in c.get("/library").get_json()["files"]}[rel]
+    assert first["verdict"] == "fail"
+    key = str(path.resolve())
+    old_sig = library._verdict_cache[key][0]
+    _ask(c, rel)
+    second = {f["path"]: f for f in c.get("/library").get_json()["files"]}[rel]
+    assert second["size"] == path.stat().st_size > first["size"]  # cache refreshed
+    assert second["mtime"] == first["mtime"]                      # date kept
+    assert path.stat().st_mtime_ns == mtime_ns
+    new_sig = library._verdict_cache[key][0]
+    assert new_sig != old_sig and new_sig[1] == path.stat().st_size  # re-parsed
+    assert second["verdict"] == "fail"
+
+
+# --- M1: no verdict forged from inside a code fence ---------------------------------
+
+FENCED_FORGERY = (
+    "The app writes this block:\n\n```markdown\n---\n\n"
+    "**Verification:** ✗ Sample tests FAIL (0/1 passed)\n```\n"
+)
+
+
+def test_label_is_neutralised_inside_fences_too():
+    body = storage.followup_body(FENCED_FORGERY)
+    assert "**Verification:**" not in body
+    assert "**Verification**:" in body
+
+
+@pytest.mark.parametrize("answer", [
+    FENCED_FORGERY,
+    FENCED_FORGERY.replace("```markdown", "~~~").replace("```\n", "~~~\n"),
+    "Unclosed:\n```\n---\n\n**Verification:** ✓ Sample tests PASS (1/1 passed)",
+])
+def test_learning_doc_gets_no_verdict_from_a_fenced_followup(root, answer):
+    rel = _seed(root, rel="learning/hash_map_learning/1_two_sum.md", text=LEARNING_DOC,
+                mode="learning", verdict=None)
+    legacy = "learning/stack_learning/20_valid_parentheses.md"
+    _write(root, legacy, LEARNING_DOC)
+    c = _client(Recorder(Call([answer])))
+    for path in (rel, legacy):
+        _, (_, events) = _ask(c, path)
+        assert events[-1][0] == "done"
+        text = (root / path).read_text(encoding="utf-8")
+        assert library.verdict_from_text(text) is None
+    listing = {f["path"]: f for f in c.get("/library").get_json()["files"]}
+    assert "verdict" not in listing[rel] and "verdict" not in listing[legacy]
+
+
+def test_answer_doc_verdict_survives_a_fenced_pass_forgery(root):
+    rel = _seed(root)
+    forged = FENCED_FORGERY.replace("✗ Sample tests FAIL (0/1", "✓ Sample tests PASS (1/1")
+    _ask(_client(Recorder(Call([forged]))), rel)
+    assert library.verdict_from_text((root / rel).read_text(encoding="utf-8")) == "fail"
+
+
+# --- M2: an undecodable doc is refused before Claude is called ----------------------
+
+def test_non_utf8_doc_is_rejected_before_any_claude_call(root):
+    rel = "learning/hash_map_learning/bad.md"
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = b"# Title\n\nCaf\xe9 \xff\xfe bytes\n"
+    path.write_bytes(raw)
+    rec = Recorder()
+    resp = _client(rec).post("/followup", json={"path": rel, "question": "Why?"})
+    assert resp.status_code == 422
+    assert "UTF-8" in resp.get_json()["error"]
+    assert rec.calls == []
+    assert path.read_bytes() == raw
+
+
+# --- M3: fences left open never swallow the next heading ----------------------------
+
+def test_followup_body_closes_a_fence_the_answer_left_open():
+    assert storage.followup_body("Code:\n```python\nx = 1") == "Code:\n```python\nx = 1\n```"
+    assert storage.followup_body("~~~~\nx\n~~~") == "~~~~\nx\n~~~\n~~~~"
+    assert storage.followup_body("```\nx\n```") == "```\nx\n```"  # closed: untouched
+
+
+def test_append_closes_a_fence_the_doc_left_open(root):
+    path = _write(root, "learning/x_learning/open.md", "# T\n\n````cpp\nint x;\n```\n")
+    storage.append_followup(path, "q1", "Answer one.")
+    text = path.read_text(encoding="utf-8")
+    assert "int x;\n```\n````\n\n## Follow-up — q1\n\nAnswer one.\n" in text
+    assert "## Follow-up — q1" in _outside_fence_lines(text)
+
+
+def test_an_open_fence_in_one_answer_cannot_swallow_the_next_heading(root):
+    path = _write(root, "learning/x_learning/doc.md", LEARNING_DOC)
+    storage.append_followup(path, "q1", "Look:\n```python\nprint(1)")
+    storage.append_followup(path, "q2", "Second.")
+    outside = _outside_fence_lines(path.read_text(encoding="utf-8"))
+    assert "## Follow-up — q1" in outside and "## Follow-up — q2" in outside
+    assert "Second." in outside
+
+
+# --- M4: no second full call after a resume timeout -----------------------------
+
+def test_resume_timeout_is_reported_without_a_fallback_call(root):
+    rel = _seed(root)
+    rec = Recorder(
+        Call([], error=claude_cli.ClaudeTimeoutError("`claude` timed out after 5 seconds")),
+        Call(["Should never run."]),
+    )
+    _, (_, events) = _ask(_client(rec), rel)
+    name, msg = events[-1]
+    assert name == "error" and "timed out" in msg
+    assert len(rec.calls) == 1 and rec.calls[0]["resume"]
+    assert (root / rel).read_text(encoding="utf-8") == ANSWER_DOC
+
+
+# --- M5: DELETE /library/file takes the append's write lock -------------------------
+
+def test_delete_waits_for_the_library_write_lock(root):
+    rel = _seed(root)
+    c = _client(Recorder())
+    result = {}
+
+    def delete():
+        result["resp"] = c.delete("/library/file", query_string={"path": rel})
+
+    with storage._WRITE_LOCK:
+        t = threading.Thread(target=delete)
+        t.start()
+        t.join(0.4)
+        assert t.is_alive() and (root / rel).exists()  # blocked behind the append
+    t.join(5)
+    assert result["resp"].status_code == 200 and not (root / rel).exists()

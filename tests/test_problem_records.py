@@ -1,7 +1,9 @@
-"""SP6 fix round: problem-store robustness (M1 difficulty source + record
-merge, M2 generic first lines, M3 log-first, M4 caches, M8 no-files runs),
-the /problems list shape (O1), no tier outside Answer (O2) and the Guided /
-Learning approach-section contract (I1). Every Claude call is a fake."""
+"""How ``problem_store`` files runs into problem records, past the basics in
+``test_problem_store``: where a record's difficulty comes from (M1), folding an
+un-numbered record into its numbered twin - runs, aliases, review schedule,
+notes (M1, SP7 fix 7) - titles and ids from generic first lines (M2), when a
+run is logged at all (M3, M8, O2), and the cached run log / record index that
+external edits invalidate (M4)."""
 from __future__ import annotations
 
 import json
@@ -9,8 +11,9 @@ import os
 from datetime import datetime, timedelta
 
 import pytest
+from _helpers import write_problem_record as _write
 
-from leetcoach import atomic_files, prompts
+from leetcoach import atomic_files
 from leetcoach import problem_store as ps
 
 NOW = datetime(2026, 10, 8, 14, 30).astimezone()
@@ -211,20 +214,89 @@ def test_path_index_carries_title_and_number(root):
     assert (hit["title"], hit["number"]) == ("Two Sum", 1)
 
 
-# --- I1: a fixed H3 follows the hint ladder ---------------------------------------------
+# --- SP7 fix 7: merging an un-numbered record into a numbered one keeps the
+# review schedule and caps the notes
 
-def test_guided_requires_a_walkthrough_heading_after_the_hints():
-    p = prompts.build_guided("1. Two Sum\n", tier="normal", language="python")
-    assert "`### Walkthrough`" in p
-    assert p.index("### Hint 4") < p.index("`### Walkthrough`")
-
-
-def test_learning_requires_a_techniques_heading_after_the_hints():
-    p = prompts.build_learning("1. Two Sum\n", language="python")
-    assert "`### Techniques`" in p
-    assert "### Walkthrough" not in p
+PASTE = (
+    "1. Two Sum\nEasy\n\nGiven nums.\n\n"
+    "Example 1:\nInput: nums = [2,7,11,15], target = 9\nOutput: [0,1]\n"
+)
 
 
-def test_answer_has_neither_fixed_heading():
-    p = prompts.build_answer("1. Two Sum\n", tier="normal", language="python")
-    assert "### Walkthrough" not in p and "### Techniques" not in p
+def _seed(root, paste=PASTE):
+    return ps.record_run(
+        paste, mode="answer", language="python", tier="normal", model="m", verdict="pass",
+        paths=[root / "answers/hash_map/two_sum__normal.md"], session_id=None,
+        duration_s=1.0, pattern="hash_map", root=root)
+
+
+def _read(root, pid):
+    return json.loads((root / ".leetcoach/problems" / f"{pid}.json").read_text("utf-8"))
+
+
+def _merge(root):
+    """A numbered paste folds the un-numbered ``two_sum`` into ``1-two_sum``."""
+    pid = _seed(root)
+    assert pid == "1-two_sum"
+    assert not (root / ".leetcoach/problems/two_sum.json").exists()
+    return _read(root, pid)
+
+
+def _h(day, grade, box):
+    return {"ts": f"{day}T09:00:00", "day": day, "grade": grade, "from_box": 1, "box": box,
+            "due": day}
+
+
+def test_merge_keeps_the_more_recently_reviewed_schedule(root):
+    _write(root, "two_sum", review={
+        "box": 4, "due": "2026-03-01", "last_reviewed": "2026-02-15T09:00:00",
+        "history": [_h("2026-02-01", "solo", 3), _h("2026-02-15", "solo", 4)]})
+    _write(root, "1-two_sum", number=1, review={
+        "box": 2, "due": "2026-02-10", "last_reviewed": "2026-02-07T09:00:00",
+        "history": [_h("2026-02-07", "solo", 2)]})
+    rec = _merge(root)
+    assert rec["review"]["box"] == 4 and rec["review"]["due"] == "2026-03-01"
+    assert rec["review"]["last_reviewed"] == "2026-02-15T09:00:00"
+    assert [h["day"] for h in rec["review"]["history"]] == [
+        "2026-02-01", "2026-02-07", "2026-02-15"]
+
+
+def test_merge_keeps_the_numbered_schedule_when_it_is_newer(root):
+    _write(root, "two_sum", review={"box": 1, "due": "2026-01-02", "history": []})
+    _write(root, "1-two_sum", number=1, review={
+        "box": 3, "due": "2026-02-20", "last_reviewed": "2026-02-13T09:00:00",
+        "history": [_h("2026-02-13", "solo", 3)]})
+    rec = _merge(root)
+    assert (rec["review"]["box"], rec["review"]["due"]) == (3, "2026-02-20")
+    assert len(rec["review"]["history"]) == 1
+
+
+def test_merge_history_is_deduplicated_and_capped(root, monkeypatch):
+    monkeypatch.setattr(ps, "REVIEW_HISTORY_CAP", 3)
+    shared = _h("2026-02-01", "solo", 2)
+    _write(root, "two_sum", review={
+        "box": 2, "due": "2026-02-04", "last_reviewed": "2026-02-03T09:00:00",
+        "history": [shared, _h("2026-02-02", "hints", 2), _h("2026-02-03", "hints", 2)]})
+    _write(root, "1-two_sum", number=1, review={
+        "box": 1, "due": "2026-01-31", "last_reviewed": "2026-02-01T09:00:00",
+        "history": [_h("2026-01-30", "peeked", 1), shared]})
+    rec = _merge(root)
+    assert [h["day"] for h in rec["review"]["history"]] == [
+        "2026-02-01", "2026-02-02", "2026-02-03"]
+
+
+def test_merged_notes_are_capped_with_a_marker(root):
+    _write(root, "two_sum", notes="a" * 15_000)
+    _write(root, "1-two_sum", number=1, notes="b" * 15_000)
+    rec = _merge(root)
+    assert len(rec["notes"]) == ps.NOTES_CAP
+    assert rec["notes"].startswith("a" * 100)
+    assert rec["notes"].endswith(ps.MERGED_NOTES_MARKER)
+    # a later notes save of the capped text still fits the endpoint's cap
+    assert ps.set_notes("1-two_sum", rec["notes"], root=root) is not None
+
+
+def test_short_merged_notes_are_joined_unchanged(root):
+    _write(root, "two_sum", notes="first")
+    _write(root, "1-two_sum", number=1, notes="second")
+    assert _merge(root)["notes"] == "first\n\nsecond"

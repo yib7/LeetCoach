@@ -1,27 +1,13 @@
 "use strict";
-/* SP7 front-end helpers: the practice loop - Leitner preview (D4), due labels,
- * the give-up doc pick and case statuses (D3), the code textarea's Tab indent,
- * flashcard deck wrap (D10), notes status (D9) and the Code Review mode name (D5). */
+/* The practice loop's front-end helpers: the Leitner preview and due labels
+ * (D4) and the review queue's "today" once a tab stays open past midnight; the
+ * re-attempt view - the give-up doc pick that never offers a deleted doc (D3,
+ * SP8 fix M7), case statuses, starter code and the code textarea's Tab indent;
+ * flashcard deck wrap (D10); and problem notes - the status text and the save
+ * queue (D9: one PUT at a time, newest text last, flushNow on pagehide). */
 var assert = require("assert");
 var path = require("path");
 var core = require(path.join(require("./paths.js").STATIC, "lib", "core.js"));
-
-test("modeName / modeLabel / untiered know Code Review", function () {
-  assert.strictEqual(core.modeName("review"), "Code Review");
-  assert.strictEqual(core.modeName("guided"), "Guided");
-  assert.strictEqual(core.modeName("answer"), "Answer");
-  assert.strictEqual(core.modeLabel("reviews"), "Code Review");
-  assert.strictEqual(core.untiered("review"), true);
-  assert.strictEqual(core.untiered("learning"), true);
-  assert.strictEqual(core.untiered("answer"), false);
-});
-
-test("summaryActions for a review: open + learn only", function () {
-  var acts = core.summaryActions({ mode: "review", language: "python", mdPath: "reviews/x.md" });
-  assert.deepStrictEqual(acts.map(function (a) { return a.id; }), ["open", "learn"]);
-  var answer = core.summaryActions({ mode: "answer", language: "python", tier: "brute" });
-  assert.ok(answer.some(function (a) { return a.id === "lang-java"; }));
-});
 
 test("leitnerPreview mirrors the server rule", function () {
   assert.deepStrictEqual(core.leitnerPreview(1, "solo"), { box: 2, days: 3 });
@@ -108,4 +94,150 @@ test("notesStatus wording", function () {
   assert.strictEqual(core.notesStatus("idle"), "");
   assert.strictEqual(core.plural(1, "card"), "1 card");
   assert.strictEqual(core.plural(2, "card"), "2 cards");
+});
+
+// ---- the notes save queue -------------------------------------------------------
+function fakeSend() {
+  var calls = [];
+  var send = function (text, keepalive, done) { calls.push({ text: text, keepalive: keepalive, done: done }); };
+  return { calls: calls, send: send };
+}
+
+test("saveQueue sends at once when idle and reports the saved text", function () {
+  var f = fakeSend();
+  var q = core.makeSaveQueue(f.send);
+  var got = [];
+  q.push("a", false, function (err, text) { got.push([err, text]); });
+  assert.strictEqual(f.calls.length, 1);
+  assert.strictEqual(q.pending(), true);
+  f.calls[0].done(null);
+  assert.deepStrictEqual(got, [[null, "a"]]);
+  assert.strictEqual(q.pending(), false);
+  assert.strictEqual(q.latest(), "a");
+});
+
+test("saveQueue holds the newest text while a save is in flight, then sends it", function () {
+  var f = fakeSend();
+  var q = core.makeSaveQueue(f.send);
+  var got = [];
+  q.push("a", false);
+  q.push("ab", false, function (err, text) { got.push(text); });
+  q.push("abc", true, function (err, text) { got.push(text); });
+  assert.strictEqual(f.calls.length, 1, "nothing new until the first save lands");
+  assert.strictEqual(q.latest(), "abc");
+  f.calls[0].done(null);
+  assert.strictEqual(f.calls.length, 2);
+  assert.strictEqual(f.calls[1].text, "abc", "coalesced to the newest text");
+  assert.strictEqual(f.calls[1].keepalive, true, "a keepalive request stays keepalive");
+  f.calls[1].done(null);
+  assert.deepStrictEqual(got, ["abc", "abc"]);
+  assert.strictEqual(q.pending(), false);
+});
+
+test("saveQueue still sends the follow-up when no callback (editor) is left", function () {
+  var f = fakeSend();
+  var q = core.makeSaveQueue(f.send);
+  q.push("one", false);
+  q.push("two", true); // the editor closed with this text pending
+  f.calls[0].done(new Error("x")); // even a failed first save does not drop it
+  assert.strictEqual(f.calls.length, 2);
+  assert.strictEqual(f.calls[1].text, "two");
+});
+
+test("saveQueue reports an error and ignores a second done()", function () {
+  var f = fakeSend();
+  var q = core.makeSaveQueue(f.send);
+  var got = [];
+  q.push("a", false, function (err, text) { got.push(err ? err.message : "ok:" + text); });
+  f.calls[0].done(new Error("HTTP 500"));
+  f.calls[0].done(null);
+  assert.deepStrictEqual(got, ["HTTP 500"]);
+  assert.strictEqual(q.pending(), false);
+});
+
+test("saveQueue survives a throwing send", function () {
+  var q = core.makeSaveQueue(function () { throw new Error("boom"); });
+  var got = [];
+  q.push("a", false, function (err) { got.push(err && err.message); });
+  assert.deepStrictEqual(got, ["boom"]);
+  assert.strictEqual(q.pending(), false);
+});
+
+test("saveQueue.flushNow sends the queued text with keepalive without waiting", function () {
+  var f = fakeSend();
+  var q = core.makeSaveQueue(f.send);
+  q.push("a", false);
+  q.push("ab", false);
+  q.flushNow();
+  assert.strictEqual(f.calls.length, 2);
+  assert.strictEqual(f.calls[1].text, "ab");
+  assert.strictEqual(f.calls[1].keepalive, true);
+  q.flushNow(); // nothing queued: no-op
+  assert.strictEqual(f.calls.length, 2);
+  // the older save landing does not start anything new
+  f.calls[0].done(null);
+  assert.strictEqual(f.calls.length, 2);
+  assert.strictEqual(q.pending(), true);
+  // a push while the flushed save is still in flight waits for it
+  q.push("abc", false);
+  assert.strictEqual(f.calls.length, 2);
+  f.calls[1].done(null);
+  assert.strictEqual(f.calls.length, 3);
+  assert.strictEqual(f.calls[2].text, "abc");
+});
+
+test("saveQueue.latest is null before any push", function () {
+  var q = core.makeSaveQueue(function () {});
+  assert.strictEqual(q.latest(), null);
+  assert.strictEqual(q.pending(), false);
+});
+
+// ---- the review queue's today -----------------------------------------------------
+test("reviewToday trusts the server's day only on the day it was fetched", function () {
+  var now = new Date(2026, 9, 9, 0, 5); // 00:05 on Oct 9 (local)
+  assert.strictEqual(core.reviewToday({ today: "2026-10-09" }, "2026-10-09", now), "2026-10-09");
+  // fetched yesterday, the tab stayed open past midnight
+  assert.strictEqual(core.reviewToday({ today: "2026-10-08" }, "2026-10-08", now), "2026-10-09");
+  assert.strictEqual(core.reviewToday(null, "", now), "2026-10-09");
+  assert.strictEqual(core.reviewToday({}, "2026-10-09", now), "2026-10-09");
+});
+
+// ---- give up / show solution never picks a deleted doc (SP8 fix M7) ---------------
+var REC = {
+  log: [
+    { ts: "2026-10-01T10:00:00", mode: "answer", files: ["answers/h/1.py", "answers/h/1.md"] },
+    { ts: "2026-10-03T10:00:00", mode: "learning", files: ["learning/h_learning/1.md"] },
+    { ts: "2026-10-02T10:00:00", mode: "guided", files: ["guided/h/1.md"] },
+  ],
+  runs: ["answers/h/1.py", "answers/h/1.md", "guided/h/1.md", "learning/h_learning/1.md",
+    "reviews/h/1.md"],
+};
+
+test("docCandidatesFor: solutions newest first, then other modes, then record runs", function () {
+  assert.deepStrictEqual(core.docCandidatesFor(REC), [
+    "guided/h/1.md", "answers/h/1.md", "learning/h_learning/1.md", "reviews/h/1.md",
+  ]);
+});
+
+test("docCandidatesFor skips docs missing from the library listing (map or array)", function () {
+  var listing = { "answers/h/1.md": { path: "answers/h/1.md" }, "answers/h/1.py": {} };
+  assert.deepStrictEqual(core.docCandidatesFor(REC, listing), ["answers/h/1.md"]);
+  var arr = [{ path: "learning/h_learning/1.md" }, "reviews/h/1.md"];
+  assert.deepStrictEqual(core.docCandidatesFor(REC, arr),
+    ["learning/h_learning/1.md", "reviews/h/1.md"]);
+});
+
+test("every doc deleted: no candidate (no 404 fetch)", function () {
+  assert.deepStrictEqual(core.docCandidatesFor(REC, {}), []);
+  assert.deepStrictEqual(core.docCandidatesFor(REC, []), []);
+  // a key inherited from Object.prototype is not a library file
+  assert.deepStrictEqual(core.docCandidatesFor({ runs: ["constructor.md"] }, {}), []);
+});
+
+test("docCandidatesFor: no duplicates, tolerant of junk", function () {
+  var rec = { log: [{ ts: "1", mode: "answer", files: ["a.md"] },
+    { ts: "2", mode: "answer", files: ["a.md"] }], runs: ["a.md", "a.py"] };
+  assert.deepStrictEqual(core.docCandidatesFor(rec), ["a.md"]);
+  assert.deepStrictEqual(core.docCandidatesFor(null), []);
+  assert.deepStrictEqual(core.docCandidatesFor({}), []);
 });

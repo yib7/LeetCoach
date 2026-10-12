@@ -1,6 +1,6 @@
 "use strict";
-/* SP8 front-end helpers: the D6 follow-up box - question validation, the
- * "resumed vs fallback" source label and the done message. */
+/* The follow-up box on a saved doc (D6): question validation, the "resumed vs
+ * fallback" source label and the done message. */
 var assert = require("assert");
 var path = require("path");
 var core = require(path.join(require("./paths.js").STATIC, "lib", "core.js"));

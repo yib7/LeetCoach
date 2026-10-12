@@ -11,13 +11,16 @@ Covered:
   * a syntax-error snippet -> ``error``;
   * ``parse_samples`` pulls the Input/Output pair from a Two-Sum-style problem;
   * cpp/java with no compiler on PATH -> ``not_verified`` with a clear note;
-  * the secret-free env: the child can't see a planted secret variable.
+  * the secret-free env: the child can't see a planted secret variable;
+  * per-sample progress callbacks (a failing one is ignored);
+  * a cancelled verification stops promptly, or never starts.
 """
 from __future__ import annotations
 
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -963,3 +966,71 @@ def test_run_dir_is_cleaned_up(tmp_path, monkeypatch):
     sandbox.verify_python("print('x')\n", "", "x")
     leftovers = [p for p in tmp_path.iterdir() if p.name.startswith("leetcoach_run_")]
     assert leftovers == [], f"temp run dirs were not cleaned: {leftovers}"
+
+
+# --- verification progress callbacks ---------------------------------------
+
+def test_verify_python_samples_calls_progress(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        sandbox, "verify_python",
+        lambda *a, **k: sandbox.VerifyResult(status="pass", note=""),
+    )
+    samples = [sandbox.Sample("1", "1"), sandbox.Sample("2", "2")]
+    result = sandbox._verify_python_samples(
+        "print(1)", samples, progress=lambda i, n: seen.append((i, n)))
+    assert result.status == "pass"
+    assert seen == [(1, 2), (2, 2)]
+
+
+def test_a_failing_progress_callback_is_ignored(monkeypatch):
+    monkeypatch.setattr(
+        sandbox, "verify_python",
+        lambda *a, **k: sandbox.VerifyResult(status="pass", note=""),
+    )
+
+    def boom(i, n):
+        raise RuntimeError("display only")
+
+    result = sandbox._verify_python_samples("x", [sandbox.Sample("1", "1")], progress=boom)
+    assert result.status == "pass"
+
+
+# --- SP4 fix M2: a cancelled verification stops promptly -------------------
+
+def test_verify_python_stops_promptly_when_cancelled():
+    cancel = threading.Event()
+    threading.Timer(0.5, cancel.set).start()
+    started = time.monotonic()
+    r = sandbox.verify_python("while True:\n    pass\n", "", "x", timeout=30, cancel=cancel)
+    assert time.monotonic() - started < 10
+    assert r.status == "not_verified"
+    assert "cancel" in r.note
+
+
+def test_verify_python_does_not_start_when_already_cancelled(monkeypatch):
+    cancel = threading.Event()
+    cancel.set()
+
+    def no_spawn(*a, **k):
+        raise AssertionError("must not spawn a cancelled verification")
+
+    monkeypatch.setattr(sandbox.subprocess, "Popen", no_spawn)
+    r = sandbox.verify_python("print(1)\n", "", "1", cancel=cancel)
+    assert r.status == "not_verified" and "cancel" in r.note
+
+
+def test_samples_stop_after_a_cancel(monkeypatch):
+    cancel = threading.Event()
+    calls = []
+
+    def fake_verify(code, stdin_text, expected_stdout, **kwargs):
+        calls.append(kwargs.get("cancel"))
+        cancel.set()  # cancelled while the first sample ran
+        return sandbox.VerifyResult(status="not_verified", note="verification cancelled")
+
+    monkeypatch.setattr(sandbox, "verify_python", fake_verify)
+    samples = [sandbox.Sample(stdin="", expected_stdout="1")] * 3
+    r = sandbox._verify_python_samples("print(1)\n", samples, cancel=cancel)
+    assert calls == [cancel]
+    assert r.status == "not_verified"

@@ -8,10 +8,15 @@ carries an auth marker.
 B3 - the stream-json parser crashed on odd event shapes (``text: null``,
 non-dict events) and an ``is_error`` result with exit code 0 was passed off as
 the answer. Every field is now type-guarded (fuzzed below) and an error result
-raises.
+raises. A stream that ends without its terminal ``result`` event is an
+incomplete answer, never a success.
+
+A ``claude`` that runs out its clock raises ``ClaudeTimeoutError``, a
+``ClaudeUnavailableError`` subclass callers can tell apart (SP8 fix M4).
 """
 from __future__ import annotations
 
+import io
 import json
 import random
 import sys
@@ -396,3 +401,34 @@ def test_parser_fuzz_never_raises_anything_but_a_claude_error():
         except claude_cli.ClaudeUnavailableError:
             continue
         assert all(isinstance(chunk, str) and chunk for chunk in out)
+
+
+# --- B3: no terminal `result` event -> incomplete, never a success -----------
+
+def _delta(text):
+    return json.dumps({"type": "stream_event", "event": {
+        "type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}})
+
+
+def _result(text=""):
+    return json.dumps({"type": "result", "subtype": "success", "result": text})
+
+
+def test_stream_without_result_event_raises_incomplete():
+    with pytest.raises(claude_cli.ClaudeUnavailableError, match="no final result"):
+        list(claude_cli._iter_text_deltas([_delta("half an ans")]))
+
+
+def test_stream_with_result_event_is_a_success():
+    assert list(claude_cli._iter_text_deltas([_delta("a"), _result("a")])) == ["a"]
+
+
+# --- SP8 fix M4: a timeout raises the ClaudeTimeoutError subclass ----------
+
+def test_timeout_raises_the_timeout_subclass():
+    with pytest.raises(claude_cli.ClaudeTimeoutError) as info:
+        claude_cli._raise_for_outcome(
+            cancelled=False, timed_out=True, timeout_s=5, failed=True, returncode=1,
+            stderr_file=io.BytesIO(b""))
+    assert isinstance(info.value, claude_cli.ClaudeUnavailableError)
+    assert "timed out" in str(info.value)

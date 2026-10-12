@@ -1,4 +1,5 @@
-"""A6 / C4 / C5: the real `claude` runner can never hang, and cancels cleanly.
+"""The real `claude` runner (``claude_cli._real_runner``) can never hang,
+cancels cleanly, and hands the prompt over intact (A6 / C4 / C5, SP5 fix B1).
 
 * The wall-clock watchdog is keyed on ``reading_done`` only: a `claude` that
   exits while a grandchild still holds its stdout pipe used to make the read
@@ -13,6 +14,9 @@
   iterator raises :class:`claude_cli.ClaudeCancelledError`.
 * C4: a consumer disconnect while the (large) prompt is still being written to
   stdin must not raise a spurious ``ClaudeUnavailableError`` out of ``close()``.
+* B1: the prompt reaches the child's stdin byte-for-byte (no ``\\r\\n``
+  translation), and a child that dies before reading it still reports its own
+  failure.
 
 No real `claude` is spawned: this Python interpreter stands in for it.
 """
@@ -336,3 +340,35 @@ def test_cli_lingering_after_result_is_killed_after_grace_through_run(tmp_path, 
     assert 0.9 <= elapsed < 12, f"grace not honoured / kill too slow: {elapsed:.2f}s"
     assert wait_dead(int(pid_file.read_text(encoding="utf-8"))), (
         "a CLI lingering past the grace survived")
+
+
+# --- B1: the prompt reaches the child byte-for-byte (no "\r\n") ---------------
+
+def test_real_runner_feeds_stdin_without_newline_translation():
+    script = "import sys\nsys.stdout.write(repr(sys.stdin.buffer.read()) + '\\n')\n"
+    prompt = "line one\nFAKE_CUT\n\nlast — ünïcode\n"
+    out: dict = {}
+
+    def go():
+        try:
+            out["lines"] = list(claude_cli._real_runner([sys.executable, "-c", script], prompt))
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            out["exc"] = exc
+
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(20)
+    assert not t.is_alive()
+    if "exc" in out:
+        raise out["exc"]
+    received = eval(out["lines"][0].strip())  # our own repr() of bytes
+    assert received == prompt.encode("utf-8")
+    assert b"\r\n" not in received
+
+
+def test_real_runner_broken_stdin_still_reports_the_child_failure():
+    # The child exits at once without reading stdin: the binary feed must still
+    # swallow the broken pipe and surface the nonzero exit (P2-3).
+    script = "import sys\nsys.stderr.write('boom at startup\\n')\nsys.exit(3)\n"
+    with pytest.raises(claude_cli.ClaudeUnavailableError, match="boom at startup"):
+        list(claude_cli._real_runner([sys.executable, "-c", script], "x" * (4 * 1024 * 1024)))

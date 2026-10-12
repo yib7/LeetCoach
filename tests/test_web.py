@@ -17,12 +17,17 @@ SSE protocol under test (SP4 reuses it):
   * ``event: done\ndata: <json-obj>\n\n``  — terminal success; payload carries
         ``problem_type`` and saved ``paths``
   * ``event: error\ndata: <json-string>\n\n`` — terminal failure
+
+Also here: the page and its favicon, request validation, Quick Ask, the model
+picker's ``/config/model``, and ``docs/ARCHITECTURE.md``'s route table kept in
+step with the live URL map.
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+from pathlib import Path
 
 import pytest
 from _helpers import CLASSIFY_JSON
@@ -30,6 +35,8 @@ from _helpers import parse_sse as _parse_sse
 
 from leetcoach import app as app_module
 from leetcoach import claude_cli, library
+
+REPO = Path(__file__).resolve().parent.parent
 
 # --- a fake Claude that answers both the classify and the answer prompt ---
 
@@ -949,3 +956,36 @@ def test_create_app_default_dotenv_path_is_not_the_real_project_env():
 
     after = _snapshot()
     assert after == before, "the real project .env must be untouched by create_app()"
+
+
+# --- favicon ---------------------------------------------------------------------------
+
+def test_favicon_is_served_and_linked(client):
+    c, _ = client
+    resp = c.get("/favicon.ico")
+    assert resp.status_code == 200
+    assert resp.mimetype == "image/svg+xml"
+    assert resp.get_data(as_text=True).lstrip().startswith("<svg")
+    assert "img-src 'self'" in resp.headers["Content-Security-Policy"]
+    page = c.get("/").get_data(as_text=True)
+    assert '<link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />' in page
+    assert c.get("/static/favicon.svg").status_code == 200
+
+
+# --- docs/ARCHITECTURE.md's route table matches the live URL map -----------
+
+def _shape(rule: str) -> str:
+    """``/static/<path:filename>`` and ``/static/<path>`` are the same route."""
+    return re.sub(r"<[^>]*>", "<>", rule)
+
+
+def test_architecture_route_table_matches_the_url_map():
+    application = app_module.create_app(run_fn=fake_run, auth_probe=lambda: None)
+    live = set()
+    for rule in application.url_map.iter_rules():
+        for method in rule.methods - {"HEAD", "OPTIONS"}:
+            live.add((method, _shape(rule.rule)))
+    doc = (REPO / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    table = {(m, _shape(r)) for m, r in re.findall(
+        r"^\| (GET|POST|PUT|DELETE) \| `([^`]+)` \|", doc, re.MULTILINE)}
+    assert table == live

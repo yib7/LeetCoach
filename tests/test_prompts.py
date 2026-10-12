@@ -14,6 +14,8 @@ holds:
   = best time/space) are conveyed,
 * Learning has no tier and teaches the tech stack, optionally skipping
   already-learned topics,
+* the hint ladder is followed by a fixed H3 (``### Walkthrough`` in Guided,
+  ``### Techniques`` in Learning, neither in Answer),
 * Quick Ask answers a small syntax/stdlib question briefly, embeds the pasted
   problem only as *context* behind a fence, and refuses solution-seeking
   questions with one exact redirect sentence (the one place we DO assert exact
@@ -331,3 +333,22 @@ def test_quick_ask_asks_for_a_short_bare_answer():
 def test_quick_ask_invalid_language_raises():
     with pytest.raises(ValueError):
         prompts.build_quick_ask(QUESTION, language="rust")
+
+
+# --- I1: a fixed H3 follows the hint ladder ---------------------------------------------
+
+def test_guided_requires_a_walkthrough_heading_after_the_hints():
+    p = prompts.build_guided("1. Two Sum\n", tier="normal", language="python")
+    assert "`### Walkthrough`" in p
+    assert p.index("### Hint 4") < p.index("`### Walkthrough`")
+
+
+def test_learning_requires_a_techniques_heading_after_the_hints():
+    p = prompts.build_learning("1. Two Sum\n", language="python")
+    assert "`### Techniques`" in p
+    assert "### Walkthrough" not in p
+
+
+def test_answer_has_neither_fixed_heading():
+    p = prompts.build_answer("1. Two Sum\n", tier="normal", language="python")
+    assert "### Walkthrough" not in p and "### Techniques" not in p

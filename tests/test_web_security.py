@@ -509,3 +509,22 @@ def test_an_unhandled_error_is_a_bare_500_with_the_headers(env):
     assert resp.headers.get("Referrer-Policy") == "no-referrer"
     assert resp.headers.get("X-Content-Type-Options") == "nosniff"
 
+
+# --- M11: same-site loads may not trigger the auth probe ------------------------
+
+def test_index_refuses_same_site_subresource_loads():
+    probes = []
+
+    def probe():
+        probes.append(1)
+        return _authed()
+
+    c = _client(Recorder(), auth_probe=probe)
+    resp = c.get("/", headers={"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "no-cors",
+                               "Sec-Fetch-Dest": "image"})
+    assert resp.status_code == 403
+    assert probes == []
+    for headers in ({"Sec-Fetch-Site": "same-origin"}, {"Sec-Fetch-Site": "none"},
+                    {"Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "navigate",
+                     "Sec-Fetch-Dest": "document"}):
+        assert c.get("/", headers=headers).status_code == 200, headers

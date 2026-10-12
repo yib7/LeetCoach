@@ -1,6 +1,7 @@
-"""SP7 web: ``GET /review``, ``POST /problems/<id>/grade`` and
-``PUT /problems/<id>/notes`` - input validation, the Leitner move the
-endpoint applies, and notes persistence. No Claude call is made."""
+"""The review queue through the web layer (D4 / D9): ``GET /review``,
+``POST /problems/<id>/grade`` and ``PUT /problems/<id>/notes`` - input
+validation, the Leitner move the endpoint applies, and notes persistence. The
+scheduling math itself is in ``test_review_queue``. No Claude call is made."""
 from __future__ import annotations
 
 import json

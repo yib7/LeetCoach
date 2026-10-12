@@ -15,6 +15,8 @@ Holds the pieces that were copy-pasted across several test files:
   unified here: ``test_topic_index`` asserts on ``binary_search`` and
   ``test_modes`` exercises a two-topic reply — importing this constant would
   break the first and hide the intent of the second.
+* :func:`write_problem_record` — a hand-written ``.leetcoach/problems`` record,
+  used by ``test_problem_records`` and ``test_web_problems``.
 """
 from __future__ import annotations
 
@@ -147,3 +149,22 @@ def freeze_stats_now(monkeypatch, now) -> None:
         return real(entries, files, **kwargs)
 
     monkeypatch.setattr(stats, "compute_stats", frozen)
+
+
+# --- a hand-written problem record ------------------------------------------------
+# Shared by the record-merge tests (test_problem_records) and the /problems
+# listing tests (test_web_problems): write ``.leetcoach/problems/<pid>.json``
+# directly, as a hand edit or an older version of the app would have left it.
+
+def write_problem_record(root, pid, **fields):
+    """Write problem record ``pid`` under ``root`` (an output dir): a minimal
+    un-numbered "Two Sum" record, with ``fields`` overriding any key."""
+    folder = root / ".leetcoach" / "problems"
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = {"id": pid, "number": None, "title": "Two Sum", "difficulty": None,
+           "pattern": "hash_map", "statement": "", "created": "2026-01-01T00:00:00",
+           "updated": "2026-01-01T00:00:00", "notes": "",
+           "review": {"box": 1, "due": "2026-01-02", "history": []},
+           "runs": [], "aliases": []}
+    rec.update(fields)
+    (folder / f"{pid}.json").write_text(json.dumps(rec), "utf-8")

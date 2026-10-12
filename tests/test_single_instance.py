@@ -3,7 +3,9 @@
 A second launch must not start a second server on the next free port sharing
 ``output/`` (the per-process locks don't coordinate). ``main()`` first asks the
 preferred port's ``/healthz``; if LeetCoach answers, it opens the browser there
-and exits. These tests use real loopback sockets (werkzeug's dev server on an
+and exits. LeetCoach may itself sit on a fallback port, so the probe walks the
+whole fallback span (skipping free ports) within an overall time budget (SP4
+fix M10). These tests use real loopback sockets (werkzeug's dev server on an
 ephemeral port) and fakes for the browser and the server start - no `claude`.
 """
 from __future__ import annotations
@@ -213,3 +215,94 @@ def test_main_never_lets_flask_reload_the_dotenv(monkeypatch):
     monkeypatch.setattr(app_module.app, "run", lambda *a, **k: calls.append(k))
     assert launcher.main(open_browser=lambda url: None) == 0
     assert calls and calls[0].get("load_dotenv") is False, calls
+
+
+# --- M10: probe /healthz across the fallback span -------------------------------
+
+def _fake_opener(answers, seen, clock=None, cost=0.0):
+    class Resp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self, n):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(url, timeout):
+        seen.append((url, timeout))
+        if clock is not None:
+            clock[0] += cost
+        port = int(url.rsplit(":", 1)[1].split("/")[0])
+        body = answers.get(port)
+        if body is None:
+            raise OSError("connection refused")
+        return Resp(json.dumps(body).encode())
+
+    return opener
+
+
+def test_finds_leetcoach_on_a_fallback_port():
+    seen: list = []
+    answers = {5000: {"app": "other"}, 5002: {"app": "leetcoach"}}
+    url = launcher.find_existing_instance(
+        "127.0.0.1", 5000, span=5, opener=_fake_opener(answers, seen),
+        is_free=lambda host, port: port not in (5000, 5002),
+    )
+    assert url == "http://127.0.0.1:5002/"
+    # free ports are never probed (nothing listens there)
+    assert [u for u, _ in seen] == ["http://127.0.0.1:5000/healthz",
+                                    "http://127.0.0.1:5002/healthz"]
+    assert all(t <= 1.0 for _, t in seen)
+
+
+def test_no_instance_when_nothing_in_the_span_is_leetcoach():
+    seen: list = []
+    url = launcher.find_existing_instance(
+        "127.0.0.1", 5000, span=3, opener=_fake_opener({}, seen),
+        is_free=lambda host, port: False,
+    )
+    assert url is None
+    assert len(seen) == 4
+
+
+def test_probing_is_bounded_by_an_overall_budget():
+    clock = [0.0]
+    seen: list = []
+    url = launcher.find_existing_instance(
+        "127.0.0.1", 5000, span=20, budget=2.0,
+        opener=_fake_opener({}, seen, clock=clock, cost=0.5),
+        is_free=lambda host, port: False, clock=lambda: clock[0],
+    )
+    assert url is None
+    assert len(seen) == 4  # 4 x 0.5 s spent the 2 s budget; no more probes
+    assert all(t <= 0.5 + 1e-9 or i == 0 for i, (_, t) in enumerate(seen))
+
+
+def test_port_is_free_sees_a_running_werkzeug_server():
+    from werkzeug.serving import make_server
+
+    srv = make_server("127.0.0.1", 0, lambda e, s: [], threaded=True)
+    try:
+        assert launcher.port_is_free("127.0.0.1", srv.server_port) is False
+    finally:
+        srv.server_close()
+    assert launcher.port_is_free("127.0.0.1", srv.server_port) is True
+
+
+def test_main_uses_the_span_probe(monkeypatch):
+    opened = []
+    monkeypatch.setattr(launcher, "find_existing_instance",
+                        lambda host, port, **kw: "http://127.0.0.1:5003/")
+
+    def no_choose(*a, **k):
+        raise AssertionError("must not fall back to another port")
+
+    monkeypatch.setattr(launcher, "choose_port", no_choose)
+    rc = launcher.main(open_browser=opened.append, serve=lambda port: None)
+    assert rc == 0
+    assert opened == ["http://127.0.0.1:5003/"]

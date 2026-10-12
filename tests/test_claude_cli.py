@@ -12,6 +12,9 @@ emits (observed live during SP1):
     IGNORED (they are not user-visible answer text)
   - a fallback shape (when --include-partial-messages is off) is:
       {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+
+The parser also records the concrete model id a run reports (``system/init``,
+else the assistant message) on the ``ClaudeRun`` handle.
 """
 from __future__ import annotations
 
@@ -668,3 +671,46 @@ def test_suite_default_binary_is_unresolvable_so_default_spawns_fail_closed():
     with pytest.raises(claude_cli.ClaudeUnavailableError, match="not found on PATH"):
         list(claude_cli.run("x"))
     assert claude_cli.auth_status() == claude_cli.AuthStatus(installed=False, logged_in=False)
+
+
+# --- claude_cli: the concrete model id ----------------------------------------
+
+def _lines(*objs):
+    return [json.dumps(o) for o in objs]
+
+
+def test_parser_captures_model_from_system_init():
+    handle = claude_cli.ClaudeRun()
+    lines = _lines(
+        {"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-opus-5-5"},
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+                                           "delta": {"type": "text_delta", "text": "hi"}}},
+        {"type": "assistant", "message": {"model": "other", "content": []}},
+        {"type": "result", "subtype": "success", "result": "hi"},
+    )
+    assert list(claude_cli._iter_text_deltas(lines, handle)) == ["hi"]
+    assert handle.model == "claude-opus-5-5"
+    assert handle.session_id == "s1"
+
+
+def test_parser_falls_back_to_the_assistant_message_model():
+    handle = claude_cli.ClaudeRun()
+    lines = _lines(
+        {"type": "system", "subtype": "init", "model": None},
+        {"type": "assistant", "message": {"model": "claude-sonnet-5-5",
+                                          "content": [{"type": "text", "text": "x"}]}},
+        {"type": "result", "subtype": "success", "result": "x"},
+    )
+    assert "".join(claude_cli._iter_text_deltas(lines, handle)) == "x"
+    assert handle.model == "claude-sonnet-5-5"
+
+
+def test_parser_ignores_odd_model_shapes():
+    handle = claude_cli.ClaudeRun()
+    lines = _lines(
+        {"type": "system", "subtype": "init", "model": ["x"]},
+        {"type": "system", "subtype": "other", "model": "nope"},
+        {"type": "result", "subtype": "success", "result": "y"},
+    )
+    assert "".join(claude_cli._iter_text_deltas(lines, handle)) == "y"
+    assert handle.model is None
