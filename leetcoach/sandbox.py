@@ -1379,7 +1379,7 @@ def verify_answer(
                 return VerifyResult(
                     status="not_verified",
                     note=(
-                        f"no {label} compiler ({compiler}) on PATH — "
+                        f"no {label} compiler ({compiler}) on PATH; "
                         "auto-verification skipped"
                     ),
                 )
@@ -1388,7 +1388,7 @@ def verify_answer(
                 status="not_verified",
                 note=(
                     f"{label} compiler found, but {label} auto-run is not "
-                    "supported yet — verify manually"
+                    "supported yet; verify manually"
                 ),
             )
 

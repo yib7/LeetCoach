@@ -215,7 +215,7 @@ def main(*, open_browser=webbrowser.open, serve=None) -> int:
     elif not auth.logged_in:
         print(
             "WARNING: you are signed out of the `claude` CLI. Runs will fail until "
-            "you sign in — run `claude auth login` in a terminal, then reload."
+            "you sign in: run `claude auth login` in a terminal, then reload."
         )
     url = browser_url(host, port)
     print(f"LeetCoach running at  {url}  (Ctrl-C to stop)")
