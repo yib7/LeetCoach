@@ -46,18 +46,18 @@ study material, then brings it back for spaced-repetition practice.
 ## How it works
 
 ```mermaid
-flowchart LR
+flowchart TD
     B["Browser<br/>paste a problem,<br/>pick mode + language"]
     F["Flask app<br/>validate, stream,<br/>verify, save"]
     C(["claude -p<br/>stream-json"])
     S["Sandbox<br/>sample I/O check"]
-    O[("output/<br/>doc + code,<br/>problem record,<br/>runs.jsonl")]
+    O[("output/<br/>doc + code, problem record,<br/>runs.jsonl")]
     L["Library, Stats,<br/>review queue"]
 
     B -->|"POST /run"| F
+    F -->|"SSE stream"| B
     F -->|"prompt on stdin"| C
     C -->|"text deltas"| F
-    F -->|"SSE stream"| B
     F -->|"Python solution"| S
     S -->|"PASS / FAIL"| F
     F -->|"save"| O
