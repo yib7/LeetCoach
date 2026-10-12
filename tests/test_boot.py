@@ -8,6 +8,7 @@ free).
 """
 from __future__ import annotations
 
+import pytest
 from flask import Flask
 
 from leetcoach import app as app_module
@@ -110,3 +111,34 @@ def test_maybe_load_dotenv_survives_an_undecodable_file(tmp_path, monkeypatch):
     envfile = tmp_path / ".env"
     envfile.write_bytes(b"A=\xff\xfe\xfa\n")
     app_module._maybe_load_dotenv(envfile)  # must not raise
+
+
+# --- 6.x: the documented Python floor (3.12) is enforced at import ----------
+
+def test_python_floor_message_names_both_versions():
+    import leetcoach
+
+    msg = leetcoach.python_too_old((3, 11, 9, "final", 0))
+    assert msg is not None
+    assert "3.12" in msg and "3.11" in msg
+    assert leetcoach.python_too_old((3, 12, 0, "final", 0)) is None
+    assert leetcoach.python_too_old((3, 14, 1, "final", 0)) is None
+    assert leetcoach.python_too_old((4, 0, 0, "final", 0)) is None
+
+
+def test_importing_the_package_on_an_old_python_exits_with_that_message(monkeypatch):
+    """`python app.py` on Python 3.11 must stop with one clear line instead of
+    failing somewhere deep in a run (the README's floor is 3.12)."""
+    import importlib
+    import sys
+
+    import leetcoach
+
+    monkeypatch.setattr(sys, "version_info", (3, 11, 9, "final", 0))
+    try:
+        with pytest.raises(SystemExit) as exc:
+            importlib.reload(leetcoach)
+        assert "3.12" in str(exc.value.code)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(leetcoach)
