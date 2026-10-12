@@ -1,6 +1,6 @@
 """Pull the primary code block out of a Claude markdown answer.
 
-The web layer (and SP5's sandbox) needs the *runnable* code separated from the
+The web layer (and the sandbox) needs the *runnable* code separated from the
 surrounding prose so it can be saved to a ``.py`` / ``.cpp`` / ``.java`` file and
 later fed to a verifier, while the prose becomes the sibling reasoning ``.md``.
 
@@ -23,17 +23,17 @@ import re
 # indentation as the opening one (the ``\1`` backreference to the captured
 # indent). This is what makes the match indentation-aware in both directions:
 #
-# * a top-level fence (indent = "") only closes on a column-0 ``` — a nested
+# * a top-level fence (indent = "") only closes on a column-0 ```. A nested
 #   triple-backtick *inside* the code (e.g. a fenced example in a docstring)
 #   is indented, so it's skipped and the non-greedy body runs on to the true
-#   closing fence (P2-5) instead of truncating early;
+#   closing fence instead of truncating early;
 # * a fence NESTED inside a markdown list item (indent = "   ") closes on the
 #   next ``` at that SAME indentation, so indented list fences are matched at
 #   all (A2) rather than either mis-closing early or never closing.
 #
 # Residual known limitation: a nested fence at exactly the SAME indentation as
-# its enclosing fence would still close it early — vanishingly rare in
-# practice (nested examples are conventionally indented one level deeper).
+# its enclosing fence would still close it early. That is rare in practice
+# (nested examples are conventionally indented one level deeper).
 _FENCE = re.compile(
     r"^([ \t]*)```[ \t]*([A-Za-z0-9_+#-]*)[ \t]*([^\n]*)\r?\n(.*?)^\1```",
     re.DOTALL | re.MULTILINE,
@@ -48,10 +48,10 @@ _LANG_ALIASES = {
 }
 
 # Substrings/patterns that mark a block as the REAL runnable answer rather
-# than an earlier teaching/illustrative snippet (A2) — a `__main__` driver, a
+# than an earlier teaching/illustrative snippet (A2): a `__main__` driver, a
 # LeetCode-style `class Solution`, or any function definition. These are
-# checked as separate, RANKED tiers (not lumped into one "has some marker"
-# test, #3): a block with a `__main__` driver outranks one that merely has a
+# checked as separate, RANKED tiers, not lumped into one "has some marker"
+# test: a block with a `__main__` driver outranks one that merely has a
 # `def` (e.g. a later "Common mistakes" section defining a buggy snippet),
 # which would otherwise win just for appearing further down the document.
 _MAIN_MARKER = "__main__"
@@ -74,7 +74,7 @@ def _has_def(body: str) -> bool:
 def _dedent(indent: str, body: str) -> str:
     """Strip a fence's own leading ``indent`` from each line of its body.
 
-    Only the fence's list/quote indentation is removed — the code's OWN
+    Only the fence's list/quote indentation is removed; the code's OWN
     internal indentation (e.g. a function body) is preserved relative to its
     first line, so the extracted code stays syntactically valid.
     """
@@ -94,26 +94,27 @@ def _dedent(indent: str, body: str) -> str:
 def extract_code(markdown: str, language: str) -> str:
     """Return the primary fenced code block from ``markdown``.
 
-    Selection order (A2/#3 — Guided/Answer docs often lead with a teaching
-    snippet, and sometimes TRAIL with an illustrative "Common mistakes" `def`,
-    so neither "first" nor "any marker, last wins" is the right default):
+    Selection order (A2). Guided Learning and Answer study docs often lead
+    with a teaching snippet, and sometimes TRAIL with an illustrative "Common
+    mistakes" `def`, so neither "first" nor "any marker, last wins" is the
+    right default:
 
     1. The (first) block tagged with the requested language AND the word
        ``solution`` in its fence line (the doc contract's
        ```` ```<lang> solution```` ), e.g. ```python solution```.
     2. Otherwise (Python only) the LAST language-tagged block containing a
-       ``__main__`` guard — the strongest "this is the real runnable answer"
+       ``__main__`` guard: the strongest "this is the real runnable answer"
        signal, and one a later teaching snippet's bare `def` must not outrank.
     3. Otherwise the LAST language-tagged block containing ``class Solution``.
     4. Otherwise the LAST language-tagged block containing a ``def``.
     5. Otherwise the LAST block tagged with the requested language.
     6. Otherwise the first fenced block of any language (Claude sometimes
        omits or mis-tags the tag).
-    7. Otherwise the empty string — the caller treats the whole document as
+    7. Otherwise the empty string; the caller treats the whole document as
        reasoning when there is no extractable code.
 
     The returned code is stripped of a single trailing newline only; internal
-    formatting is preserved verbatim (fence-level indentation aside — see
+    formatting is preserved verbatim (fence-level indentation aside; see
     :func:`_dedent`) so it stays runnable.
     """
     if not markdown:
@@ -141,7 +142,7 @@ def extract_code(markdown: str, language: str) -> str:
             for tag, trailing, body in lang_blocks:
                 if "solution" in trailing.lower():
                     return body
-            # 2) (Python only) the LAST block with a __main__ guard — outranks
+            # 2) (Python only) the LAST block with a __main__ guard. It outranks
             #    a bare `def` even if that `def` block comes later in the doc.
             if is_python:
                 main_blocks = [b for b in lang_blocks if _has_main_guard(b[2])]
@@ -156,8 +157,8 @@ def extract_code(markdown: str, language: str) -> str:
             if def_blocks:
                 return def_blocks[-1][2]
             # 5) no signal either way: the LAST language-tagged block (Guided
-            #    pipes restate -> teach -> reason -> answer, so the real
-            #    solution is the one furthest down, not the first).
+            #    Learning docs restate -> teach -> reason -> answer, so the
+            #    real solution is the one furthest down, not the first).
             return lang_blocks[-1][2]
 
     # 6) no block matched the requested language at all: first fence of any kind.

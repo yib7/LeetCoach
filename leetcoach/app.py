@@ -18,35 +18,34 @@ Design mirrors the Xeno RAG pattern, in Flask flavour:
 * ``/run`` returns ``Response(stream_with_context(event_stream()),
   mimetype="text/event-stream")``. The generator yields ``data:`` text events
   for each delta and a terminal ``event: done`` (or ``error`` / ``cancelled``) so the
-  stream always closes cleanly — a last-resort ``except`` guarantees it.
+  stream always closes cleanly; a last-resort ``except`` guarantees it.
 
-All four modes (Answer / Learning / Guided / Code Review) are wired here. They share one
-shape — classify -> build a mode-specific prompt -> stream + accumulate the
-deltas -> save the result -> emit a terminal ``done`` — so the streaming and the
-``done``/``error`` plumbing live in one place (``event_stream`` +
-``_stream_and_accumulate``); only the per-mode prompt-builder and save call
-differ.
+All four modes (Answer / Learning / Guided Learning / Code Review) are wired here.
+They share one shape (classify -> build a mode-specific prompt -> stream +
+accumulate the deltas -> save the result -> emit a terminal ``done``), so the
+streaming and the ``done``/``error`` plumbing live in one place (``event_stream`` +
+``_stream_and_accumulate``); only the per-mode prompt-builder and save call differ.
 
 SSE event protocol (shared by every mode):
     data: "<text delta>"\n\n                 # incremental answer text (json string)
-    event: phase\ndata: {json}\n\n            # progress (SP5 D11), any number:
+    event: phase\ndata: {json}\n\n            # progress (D11), any number:
         {"phase": "streaming"} | {"phase": "verifying"[, "i": int, "n": int]}
         | {"phase": "saving"}
     event: meta\ndata: {"model": str}\n\n    # the concrete model id from the
-                                              # CLI's system/init (SP5), once
+                                              # CLI's system/init, once
     event: done\ndata: {json}\n\n             # terminal success:
         { "problem_type": str, "topics": [str], "paths": [str], "mode": str,
-          "verification": str (Answer/Guided only — the sandbox verdict line),
+          "verification": str (Answer/Guided only: the sandbox verdict line),
           "model": str (when the CLI reported one) }
     event: error\ndata: "<message>"\n\n        # terminal failure (json string)
     event: cancelled\ndata: "<message>"\n\n    # terminal: stopped via POST
-                                              # /run/cancel (SP5 fix B2) -
-                                              # not a failure, nothing saved
+                                              # /run/cancel (B14); not a
+                                              # failure, nothing saved
     : ping\n\n                                # heartbeat comment (C3)
 
 Clients must ignore event names they do not know (phase/meta are additive).
 
-``POST /followup`` (SP8 D6) uses the same framing: text deltas, ``meta``,
+``POST /followup`` (D6) uses the same framing: text deltas, ``meta``,
 ``phase`` ({"phase": "streaming", "source": "resume"|"fallback"[, "reason"]}
 then {"phase": "saving"}), a terminal ``done`` {"path", "source", "resumed",
 "heading"[, "reason", "model"]} / ``error`` / ``cancelled`` (via
@@ -105,8 +104,8 @@ def _maybe_load_dotenv(path: Path) -> None:
     if os.environ.get("LEETCOACH_NO_DOTENV", "").strip().lower() in {"1", "true", "yes"}:
         return
     # B12: decode it ourselves (UTF-8 with/without BOM, UTF-16 as written by
-    # Windows PowerShell) - python-dotenv assumes plain UTF-8, so a UTF-16
-    # .env crashed the boot and a BOM corrupted the first key. A file that
+    # Windows PowerShell). python-dotenv assumes plain UTF-8, so it would crash
+    # on a UTF-16 .env and corrupt the first key after a BOM. A file that
     # still can't be read is skipped with a warning, never a crash.
     try:
         text = config.read_env_text(path)
@@ -135,7 +134,7 @@ VERSION = "1.5.0"
 
 
 # Cap on how many already-learned topics get interpolated into the Learning
-# prompt (audit6 P2-12): the index grows forever, the prompt must not. The
+# prompt: the index grows forever, the prompt must not. The
 # stored list is insertion-ordered, so "the most recent N" is its tail.
 LEARNED_TOPICS_CAP = 50
 
@@ -160,23 +159,23 @@ RUN_SIBLING_EXTENSIONS = (".md", ".py", ".cpp", ".java", ".txt")
 QUICK_ASK_MAX_QUESTION = 500
 QUICK_ASK_PROBLEM_CONTEXT_CAP = 6000
 
-# Phase 4 abuse cap: every /run and Quick Ask spends the user's Claude
+# Abuse cap: every /run and Quick Ask spends the user's Claude
 # subscription. A tab streams one run at a time, so a handful of tabs fit
 # under these; a runaway script or retry loop does not. Past the cap the
 # request is a 429 and nothing is started. Read at call time (tests lower it).
 MAX_CONCURRENT_RUNS = 4
 MAX_CONCURRENT_ASKS = 4
 
-# Phase 4: the longest problem /run accepts. The 2 MiB body cap alone let
+# The longest problem /run accepts. The 2 MiB body cap alone would let
 # ~2 MB of text reach the prompt; a LeetCode statement is a few KB. Same as
 # what the problem record stores, so nothing accepted is later truncated.
 PROBLEM_MAX_CHARS = problem_store.STATEMENT_CAP
 
-# SP8 / D6: a follow-up question on a saved doc. Longer than a Quick Ask (it
+# D6: a follow-up question on a saved doc. Longer than a Quick Ask (it
 # can quote a line of the doc or some code) but still a question, not a paste.
 FOLLOWUP_MAX_QUESTION = 2000
 
-# SP7 fix 6: how long a new "Test my code" waits for a CANCELLED test to
+# How long a new "Test my code" waits for a CANCELLED test to
 # release the one-at-a-time slot (the sandbox kills its child within a poll
 # tick; this only bounds a pathological cleanup).
 ATTEMPT_CANCEL_GRACE_S = 10.0
@@ -188,7 +187,7 @@ ATTEMPT_CANCEL_GRACE_S = 10.0
 PROBLEM_SUMMARY_FIELDS = ("id", "number", "title", "difficulty", "pattern",
                           "created", "updated", "review", "runs", "aliases")
 
-# Allowlists — never pass an arbitrary string downstream to prompts/storage.
+# Allowlists: never pass an arbitrary string downstream to prompts/storage.
 MODES = ("answer", "learning", "guided", "review")
 # Modes without a code-quality tier (Learning teaches; a Code Review critiques
 # the learner's own code).
@@ -201,15 +200,15 @@ def _json_object() -> tuple[dict, Response | None]:
     """Parse the request body as JSON and return ``(data, None)``, or
     ``(_, error_response)`` if the body isn't a JSON OBJECT (B23).
 
-    ``request.get_json(silent=True)`` happily returns a list/string/number for
-    a JSON array/string/number body, and every route below immediately calls
-    ``.get()`` on the result — an ``AttributeError`` -> bare 500 for any
-    script/curl that posts a non-object body. A missing/empty body still
-    parses to ``None`` and is treated as ``{}`` (unchanged: every field is then
+    ``request.get_json(silent=True)`` returns a list/string/number for a JSON
+    array/string/number body, and every route below immediately calls
+    ``.get()`` on the result, which would be an ``AttributeError`` (a bare 500)
+    for any script/curl that posts a non-object body. A missing/empty body
+    parses to ``None`` and is treated as ``{}`` (every field is then
     "missing", handled by each route's own validation) since it's
     indistinguishable from an explicit JSON ``null``.
 
-    3A W2: ``silent=True`` only swallows ``ValueError``; a body of a few hundred
+    ``silent=True`` only swallows ``ValueError``; a body of a few hundred
     thousand nested ``[`` makes the decoder raise ``RecursionError``, which
     would otherwise be an HTML 500 from every JSON route.
     """
@@ -219,8 +218,8 @@ def _json_object() -> tuple[dict, Response | None]:
     except RecursionError:
         return {}, not_object
     if data is None:
-        # 3A G3: a body that is there but is not JSON at all is said to be so,
-        # not answered "Problem text is required." as if it were empty.
+        # A body that is present but is not JSON at all gets the not-an-object
+        # error, not "Problem text is required." as if it were empty.
         if request.get_data(cache=True).strip():
             return {}, not_object
         return {}, None
@@ -233,8 +232,8 @@ def _log_failure(logger, exc: BaseException, msg: str, *args) -> None:
     """Log a failed run / ask / follow-up. An expected CLI failure (not
     installed, signed out, offline: :class:`claude_cli.ClaudeUnavailableError`
     already says what is wrong, and the page shows it) is one warning line,
-    not a traceback in the console window the launcher keeps open (3A G2);
-    anything else keeps its full traceback (audit P2-8)."""
+    not a traceback in the console window the launcher keeps open;
+    anything else keeps its full traceback."""
     if isinstance(exc, claude_cli.ClaudeUnavailableError):
         logger.warning(msg + ": %s", *args, exc)
     else:
@@ -246,10 +245,10 @@ def _non_string_field_error(data: dict, fields) -> str | None:
     string, else ``None``. ``fields`` is an iterable of ``(key, Label)`` pairs.
 
     These endpoints are unauthenticated local routes any script/curl can hit,
-    so a JSON number/list/object in a text field must yield a clean 400 — not an
-    ``AttributeError``/``TypeError`` 500 from a downstream ``.strip()`` or slice
-    (checklist 3.12). A missing field (``None``) and a real string both pass, so
-    the existing missing/string handling downstream is untouched."""
+    so a JSON number/list/object in a text field must yield a clean 400, not an
+    ``AttributeError``/``TypeError`` 500 from a downstream ``.strip()`` or slice.
+    A missing field (``None``) and a string both pass, so each route's own
+    missing/empty handling still applies."""
     for key, label in fields:
         value = data.get(key)
         if value is not None and not isinstance(value, str):
@@ -258,7 +257,7 @@ def _non_string_field_error(data: dict, fields) -> str | None:
 
 
 def _attempt_summary(value) -> tuple[dict | None, str | None]:
-    """SP7: the optional ``attempt`` summary a grade carries (what the last
+    """The optional ``attempt`` summary a grade carries (what the last
     "Test my code" run showed) -> ``(clean dict or None, error or None)``.
     Only ``language`` (allowlisted) and small non-negative ``passed`` /
     ``total`` counts are kept - nothing free-form reaches the record."""
@@ -315,11 +314,11 @@ def _accepts_kwarg(fn, name: str) -> bool:
 
 def _verify_code(code: str, problem: str, language: str, *, cancel=None, progress=None):
     """Best-effort sandbox verification of pre-extracted ``code`` (the caller
-    extracts exactly once — audit6 P2-13). Returns ``(result, verdict_line)``;
+    extracts it exactly once). Returns ``(result, verdict_line)``;
     never raises (a verifier hiccup must not break a run). ``result`` may be
     ``None`` if verification couldn't even start. ``cancel`` (a
-    ``threading.Event``) stops the sandbox early (SP4 review M2); ``progress``
-    (SP5 D11) is passed on when the verifier accepts it."""
+    ``threading.Event``) stops the sandbox early; ``progress`` (D11) is passed
+    on when the verifier accepts it."""
     try:
         extra = {}
         if progress is not None and _accepts_kwarg(sandbox.verify_answer, "progress"):
@@ -331,13 +330,13 @@ def _verify_code(code: str, problem: str, language: str, *, cancel=None, progres
 
 
 def _verification_detail(result) -> str:
-    """A compact markdown block describing each NON-passing sample (audit6
-    P2-9), appended to the SAVED reasoning ``.md`` only — the stream keeps the
-    one-line verdict (which already carries the pass/fail counts).
+    """A compact markdown block describing each NON-passing sample, appended
+    to the SAVED reasoning ``.md`` only; the stream keeps the one-line verdict
+    (which already carries the pass/fail counts).
 
     Empty string unless ``result`` is a fail/error with per-sample detail.
     Input/expected/got/stderr are rendered in fenced blocks so multi-line
-    sample bodies (P1-1) stay readable; the sandbox has already truncated and
+    sample bodies stay readable; the sandbox has already truncated and
     capped every captured field.
     """
     if result is None or getattr(result, "status", None) not in ("fail", "error"):
@@ -352,17 +351,17 @@ def _verification_detail(result) -> str:
         if rc is not None:
             header = header[:-2] + f" (exit code {rc})**"
         lines = [header, ""]
-        # B4: the verifier's own reason (e.g. "timed out after 10s") — some
+        # B4: the verifier's own reason (e.g. "timed out after 10s"). Some
         # error paths (timeout, couldn't launch) have a note but no captured
-        # stdout at all, and it used to be dropped entirely, leaving the user
-        # with "errored 1/1" and no explanation.
+        # stdout at all; without the note the user sees "errored 1/1" and no
+        # explanation.
         note = practice.strip_run_dir(str(entry.get("note") or "")).strip()
         if note:
             lines += [note, ""]
         for label, key in (("Input", "stdin"), ("Expected", "expected"), ("Got", "stdout")):
             value = str(entry.get(key, "")).rstrip("\n")
             lines += [f"{label}:", "```", value, "```"]
-        # Phase 4: the saved doc is the user's to share, so a traceback names
+        # The saved doc is the user's to share, so a traceback names
         # `solution.py`, not the temp run dir (and the OS user name in it).
         stderr = practice.strip_run_dir(str(entry.get("stderr") or "")).rstrip("\n")
         if stderr:
@@ -378,21 +377,21 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     ``run_fn`` is the injectable Claude runner used by BOTH the classifier and
     the answer stream (tests pass a fake). ``auth_probe`` is the injectable
-    sign-in probe the page uses to decide which (if any) CLI banner to show —
+    sign-in probe the page uses to decide which (if any) CLI banner to show;
     injectable so tests never spawn the real ``claude auth status``. The
-    default is the cached probe (B1): ``GET /`` no longer runs the CLI
+    default is the cached probe (B1), so ``GET /`` does not run the CLI
     synchronously on every page load.
     """
     app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
 
     # Reject oversized request bodies with a clean 413 instead of buffering an
-    # unbounded POST into memory (P2-3). A LeetCode problem is a few KB; 2 MiB is
+    # unbounded POST into memory. A LeetCode problem is a few KB; 2 MiB is
     # generous headroom while still capping a hostile/accidental flood.
     app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
 
     @app.errorhandler(413)
     def _too_large(_exc):
-        # 3A W8: Flask's own 413 is an HTML page the front end can only show
+        # Flask's own 413 is an HTML page the front end can only show
         # as "Request rejected (413)"; every page fetch reads a JSON `error`.
         limit_mb = app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024)
         return jsonify({"error": (
@@ -401,7 +400,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     # Where the model picker persists its choice. A config value (not a bare
     # constant) so tests can redirect it to a temp file instead of the real
-    # project `.env`. #7: honours LEETCOACH_DOTENV_PATH (set by the test
+    # project `.env`. It honours LEETCOACH_DOTENV_PATH (set by the test
     # suite's autouse fixture, tests/conftest.py) so EVERY create_app() call
     # across the whole suite is redirected away from the real `.env` by
     # default, not just the couple of tests that override app.config by hand.
@@ -409,25 +408,25 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         "LEETCOACH_DOTENV_PATH", str(config.DOTENV_FILE)
     )
 
-    # In-flight /run de-duplication (P2-12): a single-user local tool should not
+    # In-flight /run de-duplication: a single-user local tool should not
     # fan the same (problem, mode, language, tier, model) into N concurrent
     # Claude runs (double-click, impatient re-submit). ``_inflight_runs`` maps
     # each key to the run_id that owns it, ``_runs`` maps run_id -> RunState;
     # both guarded by one lock. The key is registered after validation and
-    # released when the stream ends — on normal completion, client disconnect
-    # (GeneratorExit), or error — or right away by POST /run/cancel (B14), and
+    # released when the stream ends (normal completion, client disconnect via
+    # GeneratorExit, or error) or right away by POST /run/cancel (B14), and
     # only ever by its owner, so a finishing old run can't free a new one's key.
     _inflight_runs: dict = {}
     _runs: dict = {}
     _asks: dict = {}  # B20: ask_id -> [call or None, cancelled Event] for /ask/cancel
-    _asks_running = [0]  # Phase 4: Quick Asks in flight, for MAX_CONCURRENT_ASKS
-    _attempts: dict = {}  # SP7: test_id -> cancel Event for /attempt/cancel
-    _attempt_slot = threading.Lock()  # SP7: one "Test my code" run at a time
-    # SP7 fix 6: the running test's cancel Event. A test cancelled (e.g. the
+    _asks_running = [0]  # Quick Asks in flight, for MAX_CONCURRENT_ASKS
+    _attempts: dict = {}  # test_id -> cancel Event for /attempt/cancel
+    _attempt_slot = threading.Lock()  # one "Test my code" run at a time
+    # The running test's cancel Event. A test cancelled (e.g. the
     # learner opened another problem) still holds the slot while the sandbox
     # kills its child, so the next test waits briefly for it instead of 409.
     _attempt_running: dict = {"cancel": None}
-    # SP8 / D6: follow-ups have their own slot - one at a time per app,
+    # D6: follow-ups have their own slot - one at a time per app,
     # independent of /run (a follow-up may stream while a study run does).
     _followups: dict = {}  # followup_id -> RunState, for /followup/cancel
     _inflight_lock = threading.Lock()
@@ -447,12 +446,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             if _runs.get(run_id) is state:
                 del _runs[run_id]
 
-    # Library-listing cache (P2-6): the /library listing walk (rglob + a stat
-    # per file) reran on every tab-open and post-run refresh. Cache the result
-    # behind a cheap freshness signature — an app-owned version counter (bumped
+    # Library-listing cache: without it the /library walk (rglob + a stat per
+    # file) would rerun on every tab-open and post-run refresh. The result is
+    # keyed on a cheap freshness signature: an app-owned version counter (bumped
     # whenever the app itself saves or deletes a library file) combined with the
     # mtime of every directory in the tree (B10: catches a nested change made
-    # outside the app, not just a top-level one) — plus a short TTL so an
+    # outside the app, not just a top-level one). A short TTL on top means an
     # in-place edit (which changes no directory mtime) still shows up.
     _lib_cache: dict = {"sig": None, "files": None, "at": 0.0}
     _lib_version = [0]
@@ -480,12 +479,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.before_request
     def _reject_foreign_hosts():
-        # DNS-rebinding defense (audit P1-3): a malicious page can point its own
+        # DNS-rebinding defense: a malicious page can point its own
         # hostname at 127.0.0.1 and drive /run (spending subscription budget and
         # executing generated code in the sandbox). The browser still sends the
         # attacker's hostname in Host, so rejecting non-loopback hostnames
         # blocks the attack for every route.
-        # Phase 4: and the peer itself must be this machine. `python app.py`
+        # The peer itself must also be this machine. `python app.py`
         # binds 127.0.0.1, but `flask run --host 0.0.0.0` or a WSGI server on
         # a LAN address would expose every route, and a LAN client can send
         # `Host: 127.0.0.1` itself - the Host check alone does not stop it.
@@ -522,7 +521,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # and the model picker). X-Frame-Options covers older browsers.
         resp.headers["X-Frame-Options"] = "DENY"
         resp.headers["X-Content-Type-Options"] = "nosniff"
-        # Phase 4: a link in a study doc (model output) opens another site;
+        # A link in a study doc (model output) opens another site;
         # it must not learn the local URL, port or doc path from Referer.
         resp.headers["Referrer-Policy"] = "no-referrer"
         return resp
@@ -531,7 +530,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     def index():
         # The auth state is probed at request time (not import) so the app
         # constructs without a live claude (tests / CI). The page surfaces the
-        # state — installed? signed in? which model? — and never crashes here.
+        # state (installed? signed in? which model?) and never crashes here.
         try:
             status = auth_probe()
             installed, logged_in = status.installed, status.logged_in
@@ -543,11 +542,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         html = html.replace("__CLAUDE_AVAILABLE__", "true" if installed else "false")
         html = html.replace("__CLAUDE_LOGGED_IN__", "true" if logged_in else "false")
         html = html.replace("__CLAUDE_MODEL__", config.model_alias())
-        # C13: the Quick Ask tag names the model /ask really uses (escaped:
-        # it comes from LEETCOACH_QUICK_ASK_MODEL), not a hardcoded "haiku".
+        # C13: the Quick Ask tag names the model /ask uses (escaped: it
+        # comes from LEETCOACH_QUICK_ASK_MODEL).
         html = html.replace("__QUICK_ASK_MODEL__", html_escape(config.quick_ask_model()))
         html = html.replace("__FOLLOWUP_MAX_QUESTION__", str(FOLLOWUP_MAX_QUESTION))
-        # 3A W8: Quick Ask trims its problem context to what /ask uses.
+        # Quick Ask trims its problem context to what /ask uses.
         html = html.replace("__QUICK_ASK_PROBLEM_CONTEXT_CAP__",
                             str(QUICK_ASK_PROBLEM_CONTEXT_CAP))
         # Display-only version labels for the picker tooltips (the alias, not
@@ -568,8 +567,8 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
     def favicon():
         # The page links /static/favicon.svg, but a browser still asks for
         # /favicon.ico on pages without that <link> (a JSON route, a text/plain
-        # library file), which used to 404 in the console. Same-origin, so the
-        # CSP's img-src 'self' allows it.
+        # library file); this route answers it instead of a console 404.
+        # Same-origin, so the CSP's img-src 'self' allows it.
         return app.send_static_file("favicon.svg")
 
     @app.post("/config/model")
@@ -596,9 +595,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.get("/library")
     def library_listing():
-        # Listing of the study library (SP10). Missing/empty output
-        # dir is an empty listing — the library just hasn't accumulated yet.
-        # Served from the freshness-keyed cache (P2-6).
+        # Listing of the study library. A missing/empty output dir is an
+        # empty listing: the library just hasn't accumulated yet.
+        # Served from the freshness-keyed cache.
         return jsonify({"files": _cached_library_files()})
 
     @app.get("/library/file")
@@ -606,7 +605,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         # One library file's raw text. Served as text/plain (never HTML) so
         # nothing in the library can execute in the browser; rendering happens
         # client-side through the same hardened pipeline as run output. Every
-        # rejection is the same 404 — don't leak which check failed or what
+        # rejection is the same 404, so it doesn't leak which check failed or what
         # exists outside the root.
         resolved = library.resolve_file(request.args.get("path", ""))
         if resolved is None:
@@ -619,9 +618,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.delete("/library/file")
     def delete_library_file():
-        # Delete ONE library file (P2-11). Reuses the exact containment gate as
+        # Delete ONE library file. Reuses the exact containment gate as
         # the read path, so a traversal / escape / absolute path / non-library
-        # suffix / missing file is the SAME uniform 404 — a rejection never
+        # suffix / missing file is the SAME uniform 404: a rejection never
         # leaks whether a target exists or where the root sits, matching the
         # GET /library/file no-leak design. There is deliberately no mass-delete.
         #
@@ -646,7 +645,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     targets.append(sibling)
         root = config.output_dir().resolve()
         deleted = []
-        # SP8 fix M5: under the library write lock, so a delete never lands
+        # Under the library write lock, so a delete never lands
         # between a follow-up append's read and its atomic write (which would
         # resurrect the doc) - the append then sees the doc gone and saves nothing.
         with storage.WRITE_LOCK:
@@ -655,7 +654,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     target.unlink()
                 except OSError:
                     # Vanished between the resolve and the unlink, or a
-                    # permission/lock issue — never 500 the caller.
+                    # permission/lock issue. Never 500 the caller.
                     continue
                 deleted.append(target.relative_to(root).as_posix())
         _invalidate_library_cache()  # next /library reflects the removal
@@ -665,11 +664,11 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.get("/problems")
     def problems():
-        # SP6 / D1: every problem record, without the (possibly long)
+        # D1: every problem record, without the (possibly long)
         # statement; GET /problems/<id> has the full record.
-        # SP6 fix O1: ``runs`` (the record's library paths) is included;
+        # ``runs`` (the record's library paths) is included;
         # ``run_count`` counts saved runs from the log, ``file_count`` files.
-        # SP8 fix M7: ``runs`` / ``file_count`` list only files that still
+        # ``runs`` / ``file_count`` list only files that still
         # exist; ``run_count`` keeps counting the append-only log (A8).
         counts: dict = {}
         for entry in problem_store.read_runs():
@@ -681,7 +680,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         for rec in problem_store.list_problems():
             item = {k: rec.get(k) for k in PROBLEM_SUMMARY_FIELDS}
             runs = library.existing_runs(rec.get("runs"), listed)
-            # 3A W3: a hand-edited record may hold non-string aliases; an
+            # A hand-edited record may hold non-string aliases; an
             # unhashable one would crash the set below, so keep strings only.
             raw_aliases = rec.get("aliases")
             aliases = ([a for a in raw_aliases if isinstance(a, str)]
@@ -700,17 +699,17 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"error": "Not found."}), 404
         # An alias (an id merged into this record) resolves to the record.
         log = problem_store.runs_for(pid)
-        # SP8 fix M7: a deleted doc drops out of ``runs`` (the log keeps it).
+        # A deleted doc drops out of ``runs`` (the log keeps it).
         return jsonify({**rec, "runs": library.existing_runs(rec.get("runs")), "log": log})
 
     @app.get("/review")
     def review_queue():
-        # SP7 / D4: the Console "Due today" panel and the Stats review counts.
+        # D4: the Console "Due today" panel and the Stats review counts.
         return jsonify(problem_store.review_summary())
 
     @app.post("/problems/<pid>/grade")
     def grade_problem(pid):
-        # SP7 / D4: a self-grade after a re-attempt moves the problem's
+        # D4: a self-grade after a re-attempt moves the problem's
         # Leitner box and due date (solo -> next box, hints -> same box,
         # peeked -> box 1).
         if not problem_store.valid_problem_id(pid):
@@ -733,7 +732,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.put("/problems/<pid>/notes")
     def problem_notes(pid):
-        # SP7 / D9: the notes editor in the library viewer (debounced saves).
+        # D9: the notes editor in the library viewer (debounced saves).
         if not problem_store.valid_problem_id(pid):
             return jsonify({"error": "Not found."}), 404
         data, err = _json_object()
@@ -754,7 +753,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.post("/attempt/test")
     def attempt_test():
-        # SP7 / D3: "Test my code" in the re-attempt view. Python only, run
+        # D3: "Test my code" in the re-attempt view. Python only, run
         # through the hardened sandbox against the saved statement's samples
         # plus the learner's own cases. Plain JSON; one test run at a time
         # (the sandbox is CPU-heavy); POST /attempt/cancel {test_id} stops it.
@@ -815,7 +814,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     _attempts[test_id] = cancel
             try:
                 result = practice.run_cases(code, cases, problem_text=statement, cancel=cancel)
-            except Exception as exc:  # 3A W5: answer in JSON, never an HTML 500
+            except Exception as exc:  # answer in JSON, never an HTML 500
                 # Like /run's _verify_code: a sandbox that cannot even start
                 # (most often a full / unwritable temp dir) is reported, not raised.
                 app.logger.exception("test run failed (problem=%s)", pid)
@@ -868,7 +867,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.get("/flashcards")
     def flashcards_list():
-        # SP7 / D10: the cards of every doc's ## Flashcards section (newest
+        # D10: the cards of every doc's ## Flashcards section (newest
         # doc first) for the in-app flip review; ?problem_id= / ?path= narrow.
         pid, path, err = _flashcard_scope()
         if err:
@@ -879,7 +878,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.get("/flashcards.tsv")
     def flashcards_tsv():
-        # SP7 / D10: the same cards as an Anki-importable TSV download.
+        # D10: the same cards as an Anki-importable TSV download.
         pid, path, err = _flashcard_scope()
         if err:
             return err
@@ -896,7 +895,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.get("/stats")
     def stats_route():
-        # SP6 / A8: computed from the run log, legacy files (no log entry)
+        # A8: computed from the run log, legacy files (no log entry)
         # counted per saved run by their own mtime.
         return jsonify(stats.compute_stats(
             problem_store.read_runs(), _cached_library_files()))
@@ -908,7 +907,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return err
 
         # Type-check before any .strip()/.lower(): a non-string field (a script
-        # posting a JSON number/list) must be a clean 400, not a 500 (3.12).
+        # posting a JSON number/list) must be a clean 400, not a 500.
         type_err = _non_string_field_error(
             data,
             (("problem", "Problem"), ("mode", "Mode"),
@@ -923,12 +922,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         language = (data.get("language") or "").strip().lower()
         tier = (data.get("tier") or "").strip().lower()
         # B12: an optional per-run model (the picker sends it with every run,
-        # so two tabs no longer share one global choice). Allowlisted because
+        # so two tabs never share one global choice). Allowlisted because
         # it becomes a `--model` argv token; absent/empty -> config default.
         model = (data.get("model") or "").strip().lower()
         if model and model not in config.ALLOWED_MODEL_ALIASES:
             return jsonify({"error": f"Unknown model {model!r}."}), 400
-        # SP4 review I1: the picker's highlighted button for a pinned id in
+        # The picker's highlighted button for a pinned id in
         # .env (claude-sonnet-4-5 -> "sonnet") runs the pinned id, not the
         # generic alias.
         model = config.resolve_run_model(model)
@@ -956,7 +955,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return jsonify({"error": f"Unknown tier {tier!r}."}), 400
         if mode in UNTIERED_MODES:
             tier = ""
-        # SP7 / D5: Code Review reviews the learner's own attempt ("code").
+        # D5: Code Review reviews the learner's own attempt ("code").
         attempt_code = ""
         if mode == "review":
             attempt_code = (data.get("code") or "").replace("\r\n", "\n")
@@ -966,7 +965,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 return jsonify({"error": f"Code is too long (max {practice.CODE_CAP} "
                                 "characters)."}), 400
 
-        # De-dup identical in-flight runs (P2-12). Register atomically after
+        # De-dup identical in-flight runs. Register atomically after
         # validation; an exact duplicate that's still streaming gets a 409.
         run_key = (problem, mode, language, tier, model, attempt_code)
         study_kwargs = {"model": model} if model else {}
@@ -986,12 +985,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         def _stream_and_accumulate(prompt):
             """Stream ``run_fn(prompt)`` deltas to the client (yielding SSE text
             events) while accumulating the full text. Returns the joined text via
-            a one-element list trick — generators can't ``return`` a value the
+            a one-element list trick: generators can't ``return`` a value the
             caller easily reads while also yielding, so we stash it on ``out[0]``.
 
             If iterating ``run_fn`` fails mid-stream (e.g. the `claude` subprocess
             dies part-way through a response), the exception is caught HERE and
-            re-raised only after the accumulator is left in a defined state — so
+            re-raised only after the accumulator is left in a defined state, so
             the outer ``event_stream`` handler converts it into a terminal SSE
             ``error`` event instead of the stream cutting off silently. Whatever
             text arrived before the failure has already been yielded to the
@@ -1023,15 +1022,15 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         full.append(delta)
                         yield sse_text(delta)
                 yield from _announce_model(call)
-                # SP6: the session id (from system/init or result) goes into
-                # the run log - D6's follow-up resumes it.
+                # The session id (from system/init or result) goes into
+                # the run log; D6's follow-up resumes it.
                 session_id = getattr(call, "session_id", None)
                 if isinstance(session_id, str) and session_id:
                     run_meta["session_id"] = session_id
                 state.check()
                 # A stream that ends without producing any text is a failure,
-                # not an empty success (audit P2-1): raising here — one place
-                # covering all three modes — aborts before any save, and the
+                # not an empty success: raising here (one place covering
+                # every mode) aborts before any save, and the
                 # last-resort handler turns it into the terminal SSE error.
                 # A client disconnect instead raises GeneratorExit at the yield
                 # above, so it can never reach (or be misreported by) this line.
@@ -1044,10 +1043,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 out[0] = "".join(full)
 
         out = [""]  # accumulator shared with the helper above
-        run_meta: dict = {}  # SP5: what the client is told about the run
+        run_meta: dict = {}  # what the client is told about the run
 
         def _announce_model(call):
-            """SP5 model chip: once the CLI has named the concrete model it
+            """Model chip: once the CLI has named the concrete model it
             runs (``ClaudeRun.model``, from system/init), send it to the
             client - the picker only knows the alias. Once per run."""
             model_id = getattr(call, "model", None)
@@ -1091,7 +1090,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         def _learned_topics() -> list:
             """Topics already studied in THIS language (plus legacy,
             language-agnostic ones), capped to the most recent
-            LEARNED_TOPICS_CAP so the prompt stays bounded (audit6 P2-12)."""
+            LEARNED_TOPICS_CAP so the prompt stays bounded."""
             try:
                 return topic_index.known_topics(limit=LEARNED_TOPICS_CAP, language=language)
             except Exception:  # noqa: BLE001 - index is best-effort
@@ -1127,13 +1126,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 )
 
         def _verify(code):
-            """Sandbox-verify ``code`` with heartbeats (C3). SP4 review M2: a
-            Stop (POST /run/cancel) or a client disconnect sets ``stop``, and
+            """Sandbox-verify ``code`` with heartbeats (C3). A Stop
+            (POST /run/cancel) or a client disconnect sets ``stop``, and
             the sandbox kills the running solution at once instead of letting
             it run out its timeout unobserved."""
             stop = threading.Event()
             state.add_cancel_hook(stop.set)
-            # SP5 D11: "verifying i/n" progress frames ride the heartbeat loop.
+            # D11: "verifying i/n" progress frames ride the heartbeat loop.
             updates: queue.Queue = queue.Queue()
 
             def progress(i, n):
@@ -1151,7 +1150,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             return verified
 
         def _record_run(paths, verification, cls, doc):
-            """SP6 / D1: upsert the problem record and append the run-log
+            """D1: upsert the problem record and append the run-log
             line. Best-effort: a metadata failure is logged, never fails a
             run whose files are already saved. Returns the problem id."""
             try:
@@ -1159,7 +1158,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     problem,
                     mode=mode,
                     language=language,
-                    tier=tier if mode == "answer" else None,  # O2: Answer only
+                    tier=tier if mode == "answer" else None,  # Answer only
                     model=run_meta.get("model") or model or config.model(),
                     verdict=library.verdict_from_line(verification),
                     paths=paths,
@@ -1179,14 +1178,13 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             try:
                 state.check()  # B14: cancelled before the stream even started
                 state.add_cancel_hook(_cancel_classifier)
-                # 1) classify on a background thread (audit6 P2-4). The short
-                #    classification round-trip used to complete BEFORE the first
-                #    answer delta streamed, delaying every run by a full Claude
-                #    call; its result is only needed at save time, so it now
-                #    runs concurrently with the answer stream (same injected
-                #    run_fn -> tests still cover it) on the cheap classifier
-                #    model. The pre-seeded fallback in ``cls_holder`` keeps the
-                #    run alive even if the thread dies: classify never raises by
+                # 1) classify on a background thread. Its result is only
+                #    needed at save time, so it runs concurrently with the
+                #    answer stream (same injected run_fn -> tests still cover
+                #    it) on the cheap classifier model instead of holding the
+                #    first answer delta behind a full Claude call. The
+                #    pre-seeded fallback in ``cls_holder`` keeps the run alive
+                #    even if the thread dies: classify never raises by
                 #    contract, but a crash here must degrade to "uncategorized",
                 #    never abort the run.
                 cls_holder = [classifier.Classification(classifier.FALLBACK_TYPE, [])]
@@ -1237,12 +1235,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
                 # 2) build the mode-specific prompt; 3) stream + accumulate;
                 #    4) save with the mode's own storage call. Only these two
-                #    bits differ between modes — the stream/accumulate/done
+                #    bits differ between modes; the stream/accumulate/done
                 #    plumbing is shared. ``verification`` (Answer/Guided) is the
                 #    sandbox verdict reported in the stream, saved .md and done
                 #    payload; it stays None when a mode doesn't verify.
                 verification = None
-                # SP6 / D2: the number + difficulty parsed from the paste
+                # D2: the number + difficulty parsed from the paste
                 # (locally) feed the doc contract's header lines.
                 paste_meta = problem_store.parse_problem(problem)
                 if mode == "answer":
@@ -1253,9 +1251,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     body = out[0]
                     code = code_blocks.extract_code(body, language)
 
-                    # SP5: best-effort sample-I/O verification. Stream a short
+                    # Best-effort sample-I/O verification. Stream a short
                     # verdict line; the saved reasoning .md gets the verdict
-                    # PLUS the per-sample failure detail (audit6 P2-9).
+                    # PLUS the per-sample failure detail.
                     result, verdict = yield from _verify(code)
                     verification = verdict
                     yield sse_text("\n\n" + verdict + "\n")
@@ -1264,9 +1262,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         + _verification_detail(result)
                     )
 
-                    yield sse_event("phase", {"phase": "saving"})  # SP5 D11
+                    yield sse_event("phase", {"phase": "saving"})  # D11
                     cls = yield from _classification()  # join before the save
-                    state.commit()  # B14 / M1: cancel wins only before this point
+                    state.commit()  # B14: cancel wins only before this point
 
                     def _save_answer():
                         code_path, reasoning_path = storage.save_answer(
@@ -1286,10 +1284,10 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     # alone is the fallback copy.
                     paths, save_warning = _save_with_fallback(_save_answer, reasoning)
                 elif mode == "learning":
-                    # SP5: feed already-learned topics so Claude skips/cross-links
+                    # Feed already-learned topics so Claude skips/cross-links
                     # covered tech, then record this run's topics afterward.
                     # Capped to the most recent LEARNED_TOPICS_CAP so the
-                    # prompt stays bounded as the index grows (audit6 P2-12).
+                    # prompt stays bounded as the index grows.
                     learned = _learned_topics()
                     prompt = prompts.build_learning(
                         problem,
@@ -1298,9 +1296,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         meta=paste_meta,
                     )
                     yield from _stream_and_accumulate(prompt)
-                    yield sse_event("phase", {"phase": "saving"})  # SP5 D11
+                    yield sse_event("phase", {"phase": "saving"})  # D11
                     cls = yield from _classification()  # join before the save
-                    state.commit()  # B14 / M1: cancel wins only before this point
+                    state.commit()  # B14: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
                         lambda: [storage.save_learning(problem, cls.problem_type, out[0])],
                         out[0],
@@ -1320,9 +1318,9 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     yield from _stream_and_accumulate(prompt)
                     body = out[0]
 
-                    # SP5: verify Guided's answer step the same way as Answer —
+                    # Verify Guided's answer step the same way as Answer:
                     # extract the code from the full piped doc exactly once
-                    # (P2-13), and save verdict + failure detail (P2-9).
+                    # and save verdict + failure detail.
                     code = code_blocks.extract_code(body, language)
                     result, verdict = yield from _verify(code)
                     verification = verdict
@@ -1331,16 +1329,16 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         body + "\n\n---\n\n**Verification:** " + verdict + "\n"
                         + _verification_detail(result)
                     )
-                    yield sse_event("phase", {"phase": "saving"})  # SP5 D11
+                    yield sse_event("phase", {"phase": "saving"})  # D11
                     cls = yield from _classification()  # join before the save
-                    state.commit()  # B14 / M1: cancel wins only before this point
+                    state.commit()  # B14: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
                         lambda: [storage.save_guided(problem, cls.problem_type, saved)],
                         saved,
                     )
                     _record_topics(cls)
                 elif mode == "review":
-                    # SP7 / D5: critique the learner's attempt (fenced as
+                    # D5: critique the learner's attempt (fenced as
                     # untrusted data like the problem); nothing is verified.
                     prompt = prompts.build_review(
                         problem, attempt_code, language=language, meta=paste_meta
@@ -1353,7 +1351,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                     )
                     yield sse_event("phase", {"phase": "saving"})
                     cls = yield from _classification()  # join before the save
-                    state.commit()  # B14 / M1: cancel wins only before this point
+                    state.commit()  # B14: cancel wins only before this point
                     paths, save_warning = _save_with_fallback(
                         lambda: [storage.save_review(problem, cls.problem_type, saved)],
                         saved,
@@ -1361,7 +1359,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
                 problem_id = _record_run(paths, verification, cls, out[0])
 
-                # A new artifact just landed under output/ — drop the library
+                # A new artifact just landed under output/, so drop the library
                 # cache so the next /library (the frontend refreshes right after
                 # a run) reflects it even for a nested save the root mtime misses.
                 _invalidate_library_cache()
@@ -1386,12 +1384,12 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 if state.cancelled:
                     # B14: Stop -> POST /run/cancel. Whatever the killed call
                     # raised (ClaudeCancelledError, RunCancelled), say so -
-                    # as its own terminal `cancelled` event (SP5 fix B2): a
+                    # as its own terminal `cancelled` event: a
                     # user Stop is not a failure, and the page shows it as
                     # the neutral "Stopped" state, not "Run failed".
                     yield sse_event("cancelled", "Run cancelled.")
                 else:
-                    # Keep the full traceback in the server log (audit P2-8);
+                    # Keep the full traceback in the server log;
                     # the client still gets only the short message below.
                     _log_failure(app.logger, exc, "run failed (mode=%s)", mode)
                     yield sse_event("error", f"Run failed: {exc}")
@@ -1401,7 +1399,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                 # save is done - so stop its `claude` process. A no-op for a
                 # call that already finished.
                 _cancel_classifier()
-                # Release the in-flight key no matter how the stream ends —
+                # Release the in-flight key no matter how the stream ends:
                 # normal completion, error, or a client disconnect (which raises
                 # GeneratorExit here, bypassing the except above). Frees an
                 # identical run to start again.
@@ -1438,7 +1436,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
         if state is None:
             return jsonify({"cancelled": False}), 404
         if not state.cancel():
-            # M1: too late - the run already committed to saving. It finishes
+            # Too late: the run already committed to saving. It finishes
             # (and frees its own slot); the client keeps reading for `done`.
             return jsonify({"cancelled": False})
         _release_run(run_id, state)
@@ -1446,16 +1444,16 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.post("/ask")
     def ask():
-        # Quick Ask (SP2): a small syntax/stdlib question answered by the cheap
+        # Quick Ask: a small syntax/stdlib question answered by the cheap
         # quick-ask model via the SAME injected run_fn as /run. The answer is
-        # ephemeral — plain JSON, no SSE, nothing saved to the library.
+        # ephemeral: plain JSON, no SSE, nothing saved to the library.
         data, err = _json_object()
         if err:
             return err
 
         # Type-check before any .strip()/.lower() OR the problem-context slice
         # below (which sits outside the try/except): a non-string field must be
-        # a clean 400, not a 500 (3.12), mirroring /run.
+        # a clean 400, not a 500, mirroring /run.
         type_err = _non_string_field_error(
             data,
             (("question", "Question"), ("language", "Language"),
@@ -1489,7 +1487,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             problem=problem[:QUICK_ASK_PROBLEM_CONTEXT_CAP],
         )
         cancelled = threading.Event()
-        # SP5 fix R1: register the ask BEFORE run_fn, so a Cancel (or the
+        # Register the ask BEFORE run_fn, so a Cancel (or the
         # client timeout) that lands while the call is still starting finds
         # it and sets the flag instead of 404-ing; the call itself is filled
         # in (and cancelled, if the flag is already set) once run_fn returns.
@@ -1549,7 +1547,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             if entry is None:
                 return jsonify({"cancelled": False}), 404
             entry[1].set()
-            call = entry[0]  # None while run_fn is still starting (R1)
+            call = entry[0]  # None while run_fn is still starting
         if call is not None:
             _cancel_ask_call(call)
         return jsonify({"cancelled": True})
@@ -1561,7 +1559,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.post("/followup")
     def followup():
-        # SP8 / D6: a follow-up question on a saved doc, streamed as SSE. The
+        # D6: a follow-up question on a saved doc, streamed as SSE. The
         # study run's own session is resumed (`claude -p --resume <id>`, same
         # isolation + neutral cwd) so Claude still has the whole conversation;
         # without a usable session it falls back to a fresh isolated call with
@@ -1604,7 +1602,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
             raw_doc = resolved.read_bytes()
         except OSError:
             return jsonify({"error": "Not found."}), 404
-        # SP8 fix M2: the append reads the doc strictly (re-encoding replaced
+        # The append reads the doc strictly (re-encoding replaced
         # bytes would corrupt it), so a doc that is not UTF-8 is refused HERE,
         # before a Claude call is spent on an answer that could not be saved.
         try:
@@ -1685,7 +1683,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
                         # (session not found, a nonzero exit, a CLI without
                         # --resume). A sign-in / usage-limit failure would hit
                         # the fresh call too, so it is reported as is - and so
-                        # is a watchdog timeout (SP8 fix M4): a second full call
+                        # is a watchdog timeout: a second full call
                         # would double an already maximal wait.
                         if (acc or state.cancelled
                                 or isinstance(exc, claude_cli.ClaudeTimeoutError)
@@ -1765,7 +1763,7 @@ def create_app(*, run_fn=claude_cli.run, auth_probe=claude_cli.cached_auth_statu
 
     @app.post("/followup/cancel")
     def cancel_followup():
-        # SP8 / D6: Stop / Esc on the follow-up box. Same contract as
+        # D6: Stop / Esc on the follow-up box. Same contract as
         # /run/cancel: 200 {"cancelled": true}; 200 {"cancelled": false} once
         # the answer is being appended (too late); 404 unknown; 400 invalid.
         data, err = _json_object()

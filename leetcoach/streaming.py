@@ -13,8 +13,8 @@ import time
 
 # C3: an SSE comment frame sent while the stream is otherwise silent (Claude
 # thinking, the sandbox verifying, the classifier join). It keeps proxies and
-# the browser from timing the stream out, and - the B14 point - a write to a
-# client that has gone away fails, so the server notices the disconnect and
+# the browser from timing the stream out, and (B14) a write to a client that
+# has gone away fails, so the server notices the disconnect and
 # frees the run instead of waiting for Claude to finish. Ignored by EventSource
 # and by app.js's parser. The interval is read at call time (tests shorten it).
 SSE_PING = ": ping\n\n"
@@ -84,9 +84,9 @@ def call_with_heartbeat(fn, *, on_abandon=None, updates=None):
 
     If the consumer stops early (the client went away: ``GeneratorExit`` at a
     ping), ``on_abandon()`` is called so the work can be stopped instead of
-    running out its clock unobserved (SP4 review M2: the sandbox).
+    running out its clock unobserved (the sandbox verifier uses this).
 
-    ``updates`` (SP5 D11): an optional ``queue.Queue`` of ready-made SSE
+    ``updates`` (D11): an optional ``queue.Queue`` of ready-made SSE
     frames the work posts while it runs (verification progress); they are
     yielded as they arrive, and each one also counts as keep-alive."""
     box: dict = {}
@@ -145,7 +145,7 @@ class RunState:
     """One in-flight /run (B14): its dedup key and the cancel hooks of every
     Claude call it started, so ``POST /run/cancel`` can kill them all.
 
-    SP4 review M1: :meth:`commit` is the point of no return (the save). It and
+    :meth:`commit` is the point of no return (the save). It and
     :meth:`cancel` decide under one lock, so exactly one of them wins: a run
     cancelled first saves nothing, and a cancel that arrives after the commit
     is refused (the run finishes and reports ``done``)."""

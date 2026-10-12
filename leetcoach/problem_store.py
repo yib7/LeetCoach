@@ -1,4 +1,4 @@
-"""Problem records and the append-only run log (SP6 / D1).
+"""Problem records and the append-only run log (D1).
 
 Hidden app metadata under the library root (``output/.leetcoach/``, which the
 library listing / read / delete routes never expose - any dot-prefixed path
@@ -15,7 +15,7 @@ older ids merged into it (an un-numbered ``two_sum`` record folds into
 ``1-two_sum`` once a paste gives the number) and ``difficulty_source`` is
 ``"paste"`` or ``"doc"`` (a doc-header guess; a later pasted difficulty
 replaces it). Records are rewritten through :func:`atomic_files.atomic_write_text`.
-SP7: :func:`grade_problem` moves ``review`` along the Leitner boxes (D4) and
+:func:`grade_problem` moves ``review`` along the Leitner boxes (D4) and
 :func:`set_notes` replaces ``notes`` (D9), both under the same store lock as
 a run's upsert; :func:`review_summary` is the due queue.
 
@@ -29,7 +29,7 @@ source of truth: a run's line is appended BEFORE its record is updated, and a
 failing record write never loses the line. A run that saved no files is not
 logged. ``tier`` is only kept for Answer runs (``null`` otherwise).
 
-SP8 / D6: a follow-up question answered on a saved doc is logged too, as
+A follow-up question answered on a saved doc (D6) is logged too, as
 ``{ts, mode: "followup", problem_id, doc, resumed, session_id, model,
 duration_s}`` - it names the doc in ``doc`` (never ``files``) and is NOT a
 study run: :func:`read_runs` leaves follow-ups out unless asked, so Stats, run
@@ -68,7 +68,7 @@ from leetcoach import atomic_files, config, patterns, storage
 META_DIR = ".leetcoach"
 PROBLEMS_DIR = "problems"
 RUNS_FILE = "runs.jsonl"
-FOLLOWUP_MODE = "followup"  # SP8 / D6: a follow-up log line, not a study run
+FOLLOWUP_MODE = "followup"  # D6: a follow-up log line, not a study run
 LOCK_FILE = ".lock"
 
 DIFFICULTIES = ("Easy", "Medium", "Hard")
@@ -91,8 +91,8 @@ _DIFFICULTY_LINE = re.compile(
 _DOC_TITLE = re.compile(r"^#\s+(\d{1,5})\.\s+\S")
 _DOC_DIFFICULTY = re.compile(r"\bDifficulty:\s*(easy|medium|hard)\b", re.IGNORECASE)
 _ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,99}")
-# M2: first lines that name no problem are skipped when looking for the
-# title - :func:`storage.title_line`, shared with the saved file's name (3A S6).
+# First lines that name no problem are skipped when looking for the title:
+# :func:`storage.title_line`, which also picks the saved file's name.
 _HASH_LEN = 6
 
 _LOCK = threading.Lock()
@@ -104,7 +104,7 @@ class ParsedProblem:
     number: int | None
     title: str
     difficulty: str | None
-    # M2: no usable title line - the id gets ``digest`` (a statement hash).
+    # No usable title line: the id gets ``digest`` (a statement hash).
     generic: bool = False
     digest: str = ""
 
@@ -239,10 +239,10 @@ def _try_os_lock(fh) -> None:
 def _os_lock(fh) -> None:
     """Take the exclusive OS lock, waiting at most :data:`_LOCK_TIMEOUT`.
 
-    3A S14c: POSIX polls ``LOCK_EX | LOCK_NB`` to the same deadline as
-    Windows - a plain blocking ``flock`` used to wait FOREVER behind a hung
-    second LeetCoach process, while Windows gave up after 10 s. Either way
-    the last attempt's ``OSError`` is raised at the deadline."""
+    POSIX polls ``LOCK_EX | LOCK_NB`` to the same deadline as Windows
+    instead of a blocking ``flock``, which would wait FOREVER behind a hung
+    second LeetCoach process. On both, the last attempt's ``OSError`` is
+    raised at the deadline."""
     deadline = time.monotonic() + _LOCK_TIMEOUT
     while True:
         try:
@@ -293,7 +293,7 @@ def append_run(entry: dict, *, root=None) -> None:
         _append_locked(meta, entry)
 
 
-# --- caches (M4) ------------------------------------------------------------------
+# --- caches -----------------------------------------------------------------------
 # Keyed on the files' (mtime_ns, size): an append or a record rewrite made by
 # another process (or by hand) changes the key, so nothing stale is served.
 
@@ -375,7 +375,7 @@ def read_runs(*, root=None, include_followups: bool = False) -> list[dict]:
     non-object lines are skipped; a missing log is an empty list. Cached on
     the log's ``(mtime, size)`` - treat the returned dicts as read-only.
 
-    SP8 / D6: follow-up lines are left out unless ``include_followups`` - they
+    Follow-up lines (D6) are left out unless ``include_followups``: they
     are not runs (Stats, run counts and the path index count study runs)."""
     path = meta_dir(root) / RUNS_FILE
     sig = _file_sig(path)
@@ -397,7 +397,7 @@ def read_runs(*, root=None, include_followups: bool = False) -> list[dict]:
 
 
 def session_for_doc(rel_path: str, *, root=None) -> dict | None:
-    """SP8 / D6: the most recent study-run log entry whose ``files`` include
+    """D6: the most recent study-run log entry whose ``files`` include
     the library-relative ``rel_path`` (forward slashes), or ``None`` (a legacy
     doc the log never saw). Its ``session_id`` may be missing or ``None``."""
     found = None
@@ -419,7 +419,7 @@ def record_followup(
     now: datetime | None = None,
     root=None,
 ) -> None:
-    """SP8 / D6: append one follow-up line to the run log (locked, fsynced).
+    """D6: append one follow-up line to the run log (locked, fsynced).
     The doc goes in ``doc``, never ``files``, so the path index and Stats'
     legacy-file grouping are unaffected."""
     now = now or datetime.now().astimezone()
@@ -444,10 +444,10 @@ def _record_path(pid: str, root=None) -> Path:
     return meta_dir(root) / PROBLEMS_DIR / f"{pid}.json"
 
 
-# 3A S3: the type each known record field must have when present (``None`` is
+# The type each known record field must have when present (``None`` is
 # always allowed - a record written by this module only ever stores these
 # types or ``None``). A hand-edited / foreign value of any other type is
-# dropped on read, so ONE bad field can no longer crash /review, /stats, a
+# dropped on read, so ONE bad field cannot crash /review, /stats, a
 # grade, or every later upsert of that problem; the code reading the field
 # already treats a missing one as its default. ``bool`` never counts as a
 # number. Unknown extra fields are kept as they are.
@@ -504,7 +504,7 @@ def _load_record(path: Path) -> tuple[dict | None, str]:
     an object, or no valid ``id`` - the record is ``None``), ``"repaired"``
     (badly-typed fields were dropped, see :data:`_FIELD_TYPES`) or ``"ok"``.
 
-    3A S4: any OTHER ``OSError`` (a Windows sharing violation while antivirus
+    Any OTHER ``OSError`` (a Windows sharing violation while antivirus
     or OneDrive holds the file, a permissions hiccup) is RAISED: the file is
     there and may be perfectly good, so it must never be treated as corrupt
     and replaced."""
@@ -590,7 +590,7 @@ def runs_for(pid: str, *, root=None) -> list[dict]:
     if rec is not None:
         ids.add(rec.get("id"))
         ids.update(a for a in rec.get("aliases") or () if isinstance(a, str))
-    # 3A S3: a hand-edited log line's problem_id may be any JSON value - a
+    # A hand-edited log line's problem_id may be any JSON value - a
     # list / object is unhashable and must not fail the whole lookup.
     return [e for e in read_runs(root=root)
             if isinstance(e.get("problem_id"), str) and e["problem_id"] in ids]
@@ -610,7 +610,7 @@ def _preserve_corrupt(path: Path) -> None:
 
 
 def _preserve_original(path: Path) -> None:
-    """3A S3: keep a COPY of a record whose badly-typed fields were dropped
+    """Keep a COPY of a record whose badly-typed fields were dropped
     (``<name>.corrupt-<ts>``, like a corrupt one) before the repaired record
     is written over it - the file stays in place until that write lands."""
     try:
@@ -620,7 +620,7 @@ def _preserve_original(path: Path) -> None:
 
 
 def _resolve(meta: Path, pasted: ParsedProblem) -> tuple[str, str | None]:
-    """``(problem_id, id to merge into it or None)`` for a paste (M1).
+    """``(problem_id, id to merge into it or None)`` for a paste.
 
     A numbered paste (``1. Two Sum``) adopts an earlier un-numbered record of
     the same slug (``two_sum``) - unless that one already carries a different
@@ -661,7 +661,7 @@ def _source(rec: dict) -> str | None:
 
 
 def _cap_notes(notes: str) -> str:
-    """Merged notes within :data:`NOTES_CAP` (SP7 fix 7): the joined text is
+    """Merged notes within :data:`NOTES_CAP`: the joined text is
     cut with a visible marker, so a later notes save does not fail the cap."""
     if len(notes) <= NOTES_CAP:
         return notes
@@ -669,7 +669,7 @@ def _cap_notes(notes: str) -> str:
 
 
 def _merged_review(target: dict, old: dict) -> dict:
-    """The review schedule of a merged record (SP7 fix 7): the box and due
+    """The review schedule of a merged record: the box and due
     day of whichever side was graded last (the target's on a tie or when
     neither was), with both histories joined in time order, de-duplicated
     and capped."""
@@ -731,7 +731,7 @@ def _upsert(meta: Path, pid: str, parsed: ParsedProblem, *, merge_from: str | No
     folder = meta / PROBLEMS_DIR
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{pid}.json"
-    # 3A S4: a record that exists but can't be read right now raises here
+    # A record that exists but can't be read right now raises here
     # (record_run logs it; the run's log line is already written), so a
     # momentarily locked GOOD record is never renamed away and replaced by a
     # fresh one (box 1, no notes, no history).
@@ -818,11 +818,11 @@ def record_run(
 ) -> str | None:
     """Append one run-log line for a saved run, then upsert its problem
     record. Returns the ``problem_id`` - or ``None`` when the run saved no
-    files (nothing is logged then, M8).
+    files (nothing is logged then).
 
-    The log line goes first (M3): it is the source of truth, so a failing
+    The log line goes first: it is the source of truth, so a failing
     record write is logged and swallowed rather than losing the run. ``tier``
-    is recorded for Answer runs only (O2)."""
+    is recorded for Answer runs only."""
     base = _root(root)
     files = [_rel(p, base) for p in paths or ()]
     if not files:
@@ -907,7 +907,7 @@ def path_index(*, root=None) -> dict[str, dict]:
     return out
 
 
-# --- review queue (SP7 / D4) ------------------------------------------------------
+# --- review queue (D4) ------------------------------------------------------------
 # Leitner boxes 1..5 with intervals [1, 3, 7, 14, 30] days. A self-grade after
 # a re-attempt moves the problem: ``solo`` (solved without help) -> next box
 # (capped at the last), ``hints`` -> same box, ``peeked`` (looked at the
@@ -920,7 +920,7 @@ REVIEW_MAX_BOX = len(REVIEW_INTERVALS)
 GRADES = ("solo", "hints", "peeked")
 REVIEW_HISTORY_CAP = 200
 NOTES_CAP = 20_000
-# Ends notes cut to NOTES_CAP when two records merge (SP7 fix 7).
+# Ends notes cut to NOTES_CAP when two records merge.
 MERGED_NOTES_MARKER = "\n\n[... notes truncated at 20,000 characters when two records merged]"
 
 
@@ -986,7 +986,7 @@ def _update_record(pid: str, mutate, *, root=None) -> dict | None:
         try:
             rec, state = _load_record(path)
         except OSError:
-            return None  # 3A S4: unreadable right now - never written over
+            return None  # unreadable right now, so never written over
         if rec is None:
             return None
         if state == _REPAIRED:

@@ -2,7 +2,7 @@
 :func:`main`.
 
 It reuses a LeetCoach already running in the port span instead of starting a
-second server on the same ``output/`` (D16/B11, SP4 M10), otherwise picks a
+second server on the same ``output/`` (D16), otherwise picks a
 free port near :data:`PORT`, does the startup housekeeping (old tier file
 names, stale sandbox temp dirs), reports the ``claude`` sign-in state, opens the
 browser and serves the Flask app from :mod:`leetcoach.app`.
@@ -29,7 +29,7 @@ PORT = 5000
 
 
 def sweep_sandbox_temp() -> int:
-    """Startup housekeeping (SP3 B6): remove ``leetcoach_run_*`` sandbox dirs
+    """Startup housekeeping (B6): remove ``leetcoach_run_*`` sandbox dirs
     older than a day that a crashed or killed run left in the temp dir.
     Returns how many were removed; never raises, so a hiccup can't block
     launch."""
@@ -57,16 +57,16 @@ def port_is_free(host: str, port: int) -> bool:
 
 
 def choose_port(preferred: int, host: str, *, span: int = PORT_SPAN) -> int:
-    """Pick a bindable TCP port on ``host``, preferring ``preferred`` (SP-A).
+    """Pick a bindable TCP port on ``host``, preferring ``preferred``.
 
     Probe-bind a fresh ``SOCK_STREAM`` socket (address family derived from ``host``,
     so an IPv6 ``HOST`` such as ``::1`` works as well as IPv4) with NO
-    ``SO_REUSEADDR`` (so probing an in-use port genuinely fails); if ``preferred``
-    binds, return it. Otherwise scan ``preferred+1 … preferred+span`` (clamped to the
+    ``SO_REUSEADDR`` (so probing an in-use port fails); if ``preferred``
+    binds, return it. Otherwise scan ``preferred+1 .. preferred+span`` (clamped to the
     valid ``<= 65535`` range) and return the first port that binds. If the whole span
     is busy, bind to port ``0`` and return the OS-assigned ephemeral port. Every probe
     socket is closed before returning. A tiny TOCTOU window between the probe and
-    ``app.run`` is acceptable for a single-user localhost tool — this only turns a
+    ``app.run`` is acceptable for a single-user localhost tool: this only turns a
     hard crash on an occupied port into a graceful fallback."""
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
 
@@ -75,7 +75,7 @@ def choose_port(preferred: int, host: str, *, span: int = PORT_SPAN) -> int:
     for candidate in range(preferred, min(preferred + span, 65535) + 1):
         if port_is_free(host, candidate):
             return candidate
-    # Whole span occupied (or preferred out of range) — OS-assigned ephemeral port.
+    # Whole span occupied (or preferred out of range): take an OS-assigned ephemeral port.
     sock = socket.socket(family, socket.SOCK_STREAM)
     try:
         sock.bind((host, 0))
@@ -102,7 +102,7 @@ def _default_opener(url: str, timeout: float):
 
 
 def existing_instance_url(host: str, port: int, *, timeout: float = 1.0, opener=None):
-    """D16/B11: the URL of a LeetCoach already serving on ``host:port``, or
+    """D16: the URL of a LeetCoach already serving on ``host:port``, or
     ``None``. Asks ``/healthz`` and accepts only LeetCoach's own answer, so a
     different app on that port is never mistaken for it."""
     url = browser_url(host, port)
@@ -111,7 +111,7 @@ def existing_instance_url(host: str, port: int, *, timeout: float = 1.0, opener=
         with opener(url + "healthz", timeout=timeout) as resp:
             data = json.loads(resp.read(4096).decode("utf-8"))
     except (OSError, ValueError, http.client.HTTPException):
-        # 3A W1: a non-HTTP listener (say Redis) in the probe span makes
+        # A non-HTTP listener (say Redis) in the probe span makes
         # urllib raise BadStatusLine, an HTTPException rather than OSError.
         return None
     if isinstance(data, dict) and data.get("app") == "leetcoach":
@@ -131,7 +131,7 @@ def find_existing_instance(
     is_free=None,
     clock=time.monotonic,
 ):
-    """SP4 review M10: the URL of a LeetCoach already serving anywhere in the
+    """The URL of a LeetCoach already serving anywhere in the
     port span :func:`choose_port` would fall back across, or ``None``.
 
     An earlier instance that found ``preferred`` taken by another app is on a
@@ -166,12 +166,11 @@ def browser_enabled() -> bool:
 def main(*, open_browser=webbrowser.open, serve=None) -> int:
     """Launch LeetCoach (``python app.py`` / the desktop launcher).
 
-    D16/B11: if LeetCoach is already running on the preferred port - or on a
-    fallback port in the span (M10) - open the browser there and exit - a
-    second double-click must not start a second server on the next free port
-    sharing ``output/`` (the per-process locks don't coordinate across
-    processes). Only when no LeetCoach answers does it fall back to a nearby
-    free port.
+    D16: if LeetCoach is already running on the preferred port, or on a
+    fallback port in the span, open the browser there and exit. A second
+    double-click must not start a second server on the next free port sharing
+    ``output/`` (the per-process locks don't coordinate across processes).
+    Only when no LeetCoach answers does it fall back to a nearby free port.
     ``open_browser`` / ``serve`` are injectable for tests.
     """
     host = HOST
@@ -182,7 +181,7 @@ def main(*, open_browser=webbrowser.open, serve=None) -> int:
             open_browser(existing)
         return 0
     # Fall back to a nearby free port instead of crashing when PORT is occupied
-    # (another app on 5000) — a double-click launch must never die on "address
+    # (another app on 5000). A double-click launch must never die on "address
     # already in use".
     port = choose_port(PORT, host)
     # Migrate any pre-rename answer files (simple/complex -> basic/optimal) so an
@@ -225,7 +224,7 @@ def main(*, open_browser=webbrowser.open, serve=None) -> int:
     if browser_enabled():
         threading.Timer(1.0, lambda: open_browser(url)).start()
     if serve is None:
-        # load_dotenv=False (3A G1): Flask would re-read .env from the cwd as
+        # load_dotenv=False: Flask would re-read .env from the cwd as
         # strict UTF-8, crashing on a UTF-16 one that app._maybe_load_dotenv
         # handles, and ignoring LEETCOACH_NO_DOTENV.
         webapp.app.run(host=host, port=port, debug=False, threaded=True, load_dotenv=False)

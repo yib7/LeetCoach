@@ -1,4 +1,4 @@
-"""Flashcards from study docs (SP7 / D10).
+"""Flashcards from study docs (D10).
 
 Every study doc ends with a ``## Flashcards`` section (the D2 contract). The
 prompt asks for one bullet per card, on one line::

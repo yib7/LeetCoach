@@ -20,7 +20,7 @@ from pathlib import Path
 
 from leetcoach import config, problem_store
 
-# Extensions the library browser (SP10) will list and serve. Everything the
+# Extensions the library browser will list and serve. Everything the
 # app itself writes (storage._LANG_EXT + .md, .txt fallback, topic_index.json)
 # is covered; anything else in the output dir is invisible to the read path.
 EXTENSIONS = frozenset({".md", ".py", ".cpp", ".java", ".txt", ".json"})
@@ -70,7 +70,7 @@ def signature(root: Path) -> tuple:
         except OSError:
             sig.append((str(folder), None))
     out = tuple(sorted(sig, key=lambda item: item[0]))
-    # SP6 fix M4: the hidden metadata store (run log + problem records) feeds
+    # The hidden metadata store (run log + problem records) feeds
     # each file's verdict / difficulty, so an append made outside the app
     # (another instance, a hand edit) must invalidate the listing too.
     try:
@@ -80,10 +80,10 @@ def signature(root: Path) -> tuple:
     return out + (("<meta>", meta),)
 
 
-# SP5 B18: the sandbox verdict a saved doc recorded in its trailing
+# B18: the sandbox verdict a saved doc recorded in its trailing
 # "**Verification:** <line>" (written by /run for Answer and Guided). Keyed by
 # path + (mtime_ns, size) so an unchanged file is read once per process.
-# SP5 fix R2: only the block /run itself appends ("---", blank line,
+# Only the block /run itself appends ("---", blank line,
 # "**Verification:** <line>") counts - a "**Verification:**" line the MODEL
 # wrote inside a doc (e.g. a Learning doc quoting the format) is not a verdict.
 _VERIFICATION_LINE_RE = re.compile(
@@ -102,7 +102,7 @@ def verdict_from_text(text: str) -> str | None:
     none (Learning docs, legacy files). Mirrors
     :func:`leetcoach.app._verification_line`.
 
-    SP5 fix R2: anything under a ``## Follow-up`` heading that comes AFTER the
+    Anything under a ``## Follow-up`` heading that comes AFTER the
     first verification block is a later addition to the saved run and never
     changes its verdict; the last block before that point wins."""
     text = (text or "").replace("\r\n", "\n")
@@ -130,7 +130,7 @@ def verdict_from_line(line: str | None) -> str | None:
 
 
 def _log_index(root: Path) -> dict:
-    """SP6: path -> {verdict, problem_id, difficulty} from the run log;
+    """Path -> {verdict, problem_id, difficulty} from the run log;
     empty (doc fallback everywhere) if the log can't be read."""
     try:
         return problem_store.path_index(root=root)
@@ -157,7 +157,7 @@ def _md_verdict(path: Path, stat) -> str | None:
 
 
 def inside_root(path: Path, resolved_root: Path) -> bool:
-    """3A W4: whether ``path`` - with every symlink / junction on the way
+    """Whether ``path`` - with every symlink / junction on the way
     followed - still lies inside ``resolved_root`` (an already-resolved
     library root). ``rglob`` descends into a junction and ``is_file()``
     follows a symlink, so without this a link inside ``output/`` would list,
@@ -173,8 +173,8 @@ def list_files(root: Path) -> list[dict]:
     """The library listing: every allowlisted file under ``root``, as
     ``{"path": <relative, forward slashes>, "size": <bytes>, "mtime": <epoch
     seconds>}`` dicts, sorted by path. ``mtime`` lets the frontend show real
-    saved dates and derive the recent-runs list; it is an additive field, so
-    older callers that read only ``path``/``size`` are unaffected. A
+    saved dates and derive the recent-runs list; callers that read only
+    ``path``/``size`` can ignore it. A
     missing/empty root is an empty list, never an error. App metadata
     (``.leetcoach/``, the topic index) is left out (B19)."""
     if not root.is_dir():
@@ -192,11 +192,11 @@ def list_files(root: Path) -> list[dict]:
         if _is_hidden(root, path, topic_index_file):
             continue
         if not inside_root(path, resolved_root):
-            continue  # 3A W4: a symlink / junction pointing out of output/
+            continue  # a symlink / junction pointing out of output/
         try:
             stat = path.stat()
         except OSError:
-            continue  # vanished mid-walk — skip, never 500 a listing
+            continue  # vanished mid-walk: skip, never 500 a listing
         entry = {
             "path": path.relative_to(root).as_posix(),
             "size": stat.st_size,
@@ -204,12 +204,12 @@ def list_files(root: Path) -> list[dict]:
         }
         logged = log_index.get(entry["path"])
         if logged is not None:
-            # SP6: the run log is the source of truth for a run it recorded.
+            # The run log is the source of truth for a run it recorded.
             if logged.get("difficulty"):
                 entry["difficulty"] = logged["difficulty"]
             if logged.get("problem_id"):
                 entry["problem_id"] = logged["problem_id"]
-            # SP6 fix O3: the record's own title / number for display.
+            # The record's own title / number for display.
             if logged.get("title"):
                 entry["title"] = logged["title"]
             if isinstance(logged.get("number"), int):
@@ -217,7 +217,7 @@ def list_files(root: Path) -> list[dict]:
             if path.suffix.lower() == ".md" and logged.get("verdict"):
                 entry["verdict"] = logged["verdict"]
         elif path.suffix.lower() == ".md":
-            # SP5 B18 (legacy files the log never saw): parsed from the doc.
+            # B18 (legacy files the log never saw): parsed from the doc.
             verdict = _md_verdict(path, stat)
             if verdict:
                 entry["verdict"] = verdict
@@ -227,8 +227,8 @@ def list_files(root: Path) -> list[dict]:
 
 
 def _prune_verdict_cache(root: Path, files: list[dict]) -> None:
-    """SP5 fix R7: forget cached verdicts of docs under ``root`` that are no
-    longer listed (deleted / renamed), so the cache cannot grow without bound
+    """Forget cached verdicts of docs under ``root`` that the listing
+    dropped (deleted / renamed), so the cache cannot grow without bound
     as runs come and go. Entries for other roots are left alone."""
     listed = {str(root / f["path"]) for f in files}
     prefix = str(root)
@@ -239,13 +239,13 @@ def _prune_verdict_cache(root: Path, files: list[dict]) -> None:
 
 
 def existing_runs(runs, listed: set[str] | frozenset[str] = frozenset()) -> list[str]:
-    """SP8 fix M7: the paths of a problem record's ``runs`` that are still
+    """The paths of a problem record's ``runs`` that are still
     library files. The record on disk is never pruned (a delete in Explorer
     or a restored file is reflected either way); the response just stops
     pointing at docs that are gone, so counts and "show the solution" agree
     with the library.
 
-    3B 3.5: ``listed`` holds the paths of the (cached, freshness-keyed)
+    ``listed`` holds the paths of the (cached, freshness-keyed)
     library listing; a path in it is a library file without touching the
     disk, so only a path it lacks pays :func:`resolve_file`'s
     realpath calls."""
@@ -258,15 +258,15 @@ def existing_runs(runs, listed: set[str] | frozenset[str] = frozenset()) -> list
 def resolve_file(rel: str) -> Path | None:
     """Resolve a request's ``path`` param against the output root, or ``None``.
 
-    This is the containment gate for the library's read path — the same rigor
+    This is the containment gate for the library's read path, with the same rigor
     as ``storage.slug`` on the write path. ``None`` (-> a uniform 404) unless
     ALL of the following hold, so a rejection never leaks what exists:
 
     * non-empty, no NUL, and not absolute / drive-anchored (``C:\\...``,
       ``\\\\server\\share``, ``/etc``, ``\\foo``);
-    * ``(root / rel).resolve()`` — which collapses ``..`` (in slash OR
+    * ``(root / rel).resolve()``, which collapses ``..`` (in slash OR
       backslash form; Windows Path treats both as separators) and follows
-      symlinks — stays inside ``root.resolve()`` per ``is_relative_to``;
+      symlinks, stays inside ``root.resolve()`` per ``is_relative_to``;
     * the suffix is on ``EXTENSIONS`` (checked on the RESOLVED path);
     * it is an existing regular file (directories and reserved names fail).
     """

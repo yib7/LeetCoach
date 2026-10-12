@@ -1,18 +1,18 @@
 """The fixed LeetCode pattern list and topic hygiene (B21 / D2).
 
-The classifier used to return a free-form ``problem_type`` slug, so the study
-library fragmented into near-duplicate folders (``dp`` vs
-``dynamic_programming``, ``bfs`` vs ``graph``) and every downstream feature
-keyed on "the pattern" (progress by pattern, prompt contract) had nothing
-stable to key on. This module is the single source of truth:
+A free-form ``problem_type`` slug would fragment the study library into
+near-duplicate folders (``dp`` vs ``dynamic_programming``, ``bfs`` vs
+``graph``) and leave every downstream feature keyed on "the pattern"
+(progress by pattern, prompt contract) with nothing stable to key on. This
+module is the single source of truth:
 
 * :data:`PATTERNS` - the ~18 canonical pattern slugs (+ human labels), shared
-  by the classifier prompt and (SP6) the study-doc contract;
+  by the classifier prompt and the study-doc contract;
 * :func:`normalize_pattern` - maps any free-form label the model returns (or a
   legacy folder name) onto that list, falling back to :data:`FALLBACK`;
 * :func:`sanitize_topic` / :func:`sanitize_topics` - topics are replayed into
   later prompts, so each is reduced to ``[a-z0-9 _+-]``, at most
-  :data:`TOPIC_MAX_LEN` chars (a 4 KB "topic" was a persistent prompt
+  :data:`TOPIC_MAX_LEN` chars (a 4 KB "topic" would be a persistent prompt
   injection), and a classification keeps at most :data:`MAX_TOPICS`.
 
 Existing library folders with legacy free-form names are untouched: they are
@@ -104,9 +104,9 @@ _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 _SLUG_MAX = 60  # a label longer than this is not a pattern name
 
-# SP2 M1: generic container words. Nearly every problem touches an array, so
-# as a *topic* these say nothing about the technique - letting them rescue a
-# label sent "sorting" + ["array", "sorting", "greedy"] to hash_map. They
+# Generic container words. Nearly every problem touches an array, so as a
+# *topic* these say nothing about the technique; letting them rescue a label
+# would send "sorting" + ["array", "sorting", "greedy"] to hash_map. They
 # still count in the label itself ("Arrays & Hashing" is NeetCode's name for
 # hash_map); only the topic rescue ignores them.
 _GENERIC_TOPIC_KEYWORDS = frozenset({"array", "arrays", "set", "map", "dict", "dictionary"})
@@ -141,9 +141,9 @@ def normalize_pattern(raw, topics=()) -> str:
 
     ``raw`` is tried first; if it maps nowhere, each of ``topics`` is tried in
     order (a reply like ``{"problem_type": "strings", "topics": ["hash map"]}``
-    still lands in ``hash_map``), ignoring generic container words (SP2 M1:
-    a topic "array" is no evidence of hash_map). An explicit
-    :data:`FALLBACK` answer is final (3A C8): the topics never override the
+    still lands in ``hash_map``), ignoring generic container words (a topic
+    "array" is no evidence of hash_map). An explicit
+    :data:`FALLBACK` answer is final: the topics never override the
     model's own "none of the patterns fits". Never raises; non-strings are
     ignored.
     """

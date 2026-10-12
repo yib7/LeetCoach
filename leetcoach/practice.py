@@ -1,7 +1,7 @@
-"""Re-attempt "Test my code" (SP7 / D3).
+"""Re-attempt "Test my code" (D3).
 
 The learner re-opens a saved problem with the answer hidden, writes their own
-Python script and runs it in the SP3 sandbox (``sandbox.verify_python``: job
+Python script and runs it in the sandbox (``sandbox.verify_python``: job
 object fail-closed, audit hook, READY/go handshake, cancel event) against
 
 * the sample I/O parsed from the problem's saved statement

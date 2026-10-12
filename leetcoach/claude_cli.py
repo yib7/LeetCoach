@@ -2,12 +2,12 @@
 
 The whole app drives Claude through this one module. Design goals:
 
-1. The prompt (which can be a huge pasted LeetCode problem) is fed on **stdin**,
+1. The prompt (which can be a huge pasted LeetCode problem) is fed on stdin,
    never as an argv argument, so it never hits OS arg-length or shell-escaping
    limits.
 2. Output is parsed from ``--output-format stream-json`` so callers get
-   incremental **text deltas** suitable for streaming to a browser over SSE.
-3. The subprocess is **injectable** (`runner=`) so tests can substitute a fake
+   incremental text deltas suitable for streaming to a browser over SSE.
+3. The subprocess is injectable (`runner=`) so tests can substitute a fake
    that yields canned stream-json lines without spawning `claude`.
 4. Availability is checkable up front (`is_available()`) and a clear error is
    raised if the binary is missing.
@@ -21,7 +21,7 @@ newline-delimited JSON objects; we only care about a couple of them:
          "index":1,"delta":{"type":"text_delta","text":"Hel"}}}
 
     Thinking blocks arrive on the same `content_block_delta` channel but as
-    ``signature_delta`` / ``thinking`` deltas — those are NOT answer text and
+    ``signature_delta`` / ``thinking`` deltas. Those are NOT answer text and
     are skipped.
 
   * fallback complete-block shape (no partial messages)::
@@ -35,9 +35,9 @@ newline-delimited JSON objects; we only care about a couple of them:
 passes it.
 
 Isolation (A7). A bare ``claude -p`` is a full Claude Code agent: run from the
-repo it loaded the developer's plugins, hooks, skills, ``CLAUDE.md`` and output
-style, could use tools (read ``.env``), and filed every run in the repo's
-session history. Every call therefore:
+repo it would load the developer's plugins, hooks, skills, ``CLAUDE.md`` and
+output style, could use tools (read ``.env``), and would file every run in the
+repo's session history. Every call therefore:
 
 * runs in a neutral working directory (``config.claude_cwd()``);
 * inherits the environment minus the variables that would make the CLI bill
@@ -75,8 +75,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import NamedTuple
 
-# Re-exported under the historical private name: this module's tests (and any
-# older callers) reach the tree-kill via ``claude_cli._kill_process_tree``.
+# Imported under a private alias: this module's tests reach the tree-kill via
+# ``claude_cli._kill_process_tree``.
 from leetcoach import config, process_tree
 from leetcoach.process_tree import kill_process_tree as _kill_process_tree
 
@@ -94,8 +94,8 @@ NO_RESULT_MESSAGE = (
 
 class ClaudeTimeoutError(ClaudeUnavailableError):
     """Raised when the wall-clock watchdog killed a run that ran too long.
-    The D6 follow-up does not fall back to a fresh call on it (SP8 fix M4):
-    a second full call would most likely time out too, doubling the wait."""
+    The D6 follow-up does not fall back to a fresh call on it: a second
+    full call would most likely time out too, doubling the wait."""
 
 
 class ResumeUnsupportedError(ClaudeUnavailableError):
@@ -114,7 +114,7 @@ class ClaudeCancelledError(RuntimeError):
 # rather than awaited.
 RESULT_EXIT_GRACE = 3.0
 
-# 3A C3: on POSIX the runner kills the CLI's process group once the CLI has
+# On POSIX the runner kills the CLI's process group once the CLI has
 # exited (Windows closes the kill-on-close job instead). A name, not an inline
 # check, so tests can exercise that path on any platform.
 _POSIX_GROUP_CLEANUP = os.name != "nt"
@@ -154,17 +154,16 @@ _flag_cache: dict = {}          # resolved binary -> (flags, expires_at|None)
 _flag_failure: dict = {}        # resolved binary -> why its last probe failed
 _flag_lock = threading.Lock()
 
-# SP2 M4: only a flag in the OPTION COLUMN counts (an indented line starting
-# with the option, optionally after a short alias such as "-p, "); one merely
-# mentioned in another option's description is not a supported flag.
+# Only a flag in the OPTION COLUMN counts (an indented line starting with the
+# option, optionally after a short alias such as "-p, "); one merely mentioned
+# in another option's description is not a supported flag.
 #
-# SP2 M6 review: the indent was unbounded (`^\s+`), so a WRAPPED description
-# continuation line that happens to start with something flag-shaped (e.g. a
-# long description wrapping onto its own line as "--config sets ...") was
-# mistaken for a real option-column entry. Real option lines sit at a shallow,
-# fixed indent (2 spaces in `claude --help`); continuation lines are indented
-# much further right (aligned under the description column), so capping the
-# indent at 8 keeps genuine options while excluding those continuations.
+# The indent is capped at 8 spaces. Real option lines sit at a shallow, fixed
+# indent (2 spaces in `claude --help`); a WRAPPED description continuation line
+# is indented much further right (aligned under the description column), and
+# one that happens to start with something flag-shaped (a long description
+# wrapping onto its own line as "--config sets ...") must not count as an
+# option-column entry.
 _HELP_FLAG_RE = re.compile(r"^ {1,8}(?:-\w,\s*)?(--[a-z][\w-]*)", re.MULTILINE)
 
 
@@ -186,7 +185,7 @@ class HelpProbeError(RuntimeError):
 
 def _probe_help_text(argv: list[str]) -> str | None:
     """Run ``claude --help`` (bounded, tree-killed on timeout) and return its
-    stdout. Runs in the neutral cwd (A7, SP2 M4) like every other `claude`
+    stdout. Runs in the neutral cwd (A7) like every other `claude`
     spawn. Raises :class:`HelpProbeError` on a nonzero exit and
     :class:`subprocess.TimeoutExpired` on a timeout (or whatever the spawn
     raised); the caller degrades."""
@@ -199,9 +198,9 @@ def _probe_help_text(argv: list[str]) -> str | None:
 def _probe_help_with_retry(binary: str) -> tuple[str | None, str]:
     """``(help text, failure reason)`` - the reason is ``""`` on success.
 
-    3A C2: a timeout is retried once at once - a cold first start of the CLI
+    A timeout is retried once, immediately: a cold first start of the CLI
     (npm shim + node, antivirus scan) can blow the 15 s budget, and failing
-    there would run the next minute of calls without any isolation flag."""
+    there would refuse every call for the next minute."""
     for attempt in (1, 2):
         try:
             text = _probe_help_text([binary, "--help"])
@@ -222,12 +221,11 @@ def cli_supported_flags() -> frozenset:
 
     A successful probe is cached for the life of the process (per resolved
     binary); a failed one (missing binary, timeout, crash, nonzero exit)
-    yields an empty set - "pass no optional flags", the pre-A7 behaviour - and
-    is retried after :data:`FLAG_PROBE_FAILURE_TTL`. A timeout is retried once
-    immediately, and a failure is logged as a WARNING with its reason (3A C2)
-    and kept for :func:`flag_probe_failure`. Never raises; :func:`run` is the
-    one that refuses to start a call after a failed probe (Phase 4: never run
-    without the isolation flags). The lock is held across
+    yields an empty set and is retried after :data:`FLAG_PROBE_FAILURE_TTL`.
+    A timeout is retried once immediately, and a failure is logged as a
+    WARNING with its reason and kept for :func:`flag_probe_failure`. Never
+    raises; :func:`run` is the one that refuses to start a call after a failed
+    probe (never run without the isolation flags). The lock is held across
     the probe so concurrent first calls (study run + background classifier)
     spawn it only once.
     """
@@ -264,12 +262,12 @@ def flag_probe_failure() -> str:
         return _flag_failure.get(shutil.which(binary) or binary, "")
 
 
-_mkdtemp_cwd: str | None = None  # 3A C6: the last-resort dir, made once per process
+_mkdtemp_cwd: str | None = None  # the last-resort dir, made once per process
 _mkdtemp_lock = threading.Lock()
 
 
 def _temp_cwd_candidate() -> Path:
-    """``<tempdir>/leetcoach-claude-cwd-<uid | user name>`` (3A C6): one name
+    """``<tempdir>/leetcoach-claude-cwd-<uid | user name>``: one name
     per user, never a single name every account on the box shares."""
     if hasattr(os, "getuid"):
         owner = str(os.getuid())
@@ -286,7 +284,7 @@ def _temp_cwd_candidate() -> Path:
 
 def _make_private_dir(path: Path) -> bool:
     """Create ``path`` (mode 0o700) or accept an existing one ONLY if it is a
-    real directory owned by us (3A C6, POSIX): in a shared ``/tmp`` another
+    real directory owned by us (POSIX): in a shared ``/tmp`` another
     user could pre-create the name and plant ``CLAUDE.md`` or
     ``.claude/settings.json`` for the CLI to load. Windows (per-user temp
     dir) just creates it."""
@@ -309,7 +307,7 @@ def ensure_claude_cwd() -> str:
     Falls back to a per-user ``<tempdir>/leetcoach-claude-cwd-<uid>`` and then
     to one fresh temp dir (made once per process, so calls keep sharing one
     --resume session bucket) if the configured one cannot be created or
-    resolved - a run must never fail over this (3A C5), and any of them is
+    resolved. A run must never fail over this, and any of them is
     still neutral (not the repo).
     """
     global _mkdtemp_cwd
@@ -380,11 +378,11 @@ class ClaudeRun:
     run metadata.
 
     * ``session_id`` - captured from the stream-json ``system``/``result``
-      events (``None`` until seen, or if the CLI never reports one); stored by
-      later phases so a follow-up can ``--resume`` the study session.
+      events (``None`` until seen, or if the CLI never reports one); saved
+      with the run so a follow-up can ``--resume`` the study session.
     * ``model`` - the concrete model id the CLI reports in its ``system/init``
       event (e.g. ``claude-opus-5-5`` when ``--model opus`` was passed), or
-      ``None`` until seen. Display only (SP5 model chip).
+      ``None`` until seen. Display only (the model chip).
     * ``cancel()`` - thread-safe: kills the `claude` process tree from ANY
       thread (a generator's ``close()`` cannot be called while another thread
       is blocked inside it). The blocked reader then sees end-of-stream and
@@ -418,7 +416,7 @@ class ClaudeRun:
         # The killer runs outside self._lock (it can block in taskkill). That
         # is safe even if the run is tearing down concurrently: the runner's
         # own kill lock makes a late killer a no-op once the job is closed and
-        # skips pid-based kills once the child is reaped (SP2 I2).
+        # skips pid-based kills once the child is reaped.
         with self._lock:
             self._cancelled = True
             killer = self._killer
@@ -458,7 +456,7 @@ class AuthStatus(NamedTuple):
     logged_in: bool
 
 
-# 3A C1: with any of these set, Claude Code in print mode authenticates with
+# With any of these set, Claude Code in print mode authenticates with
 # (and bills) the Anthropic API key / token or a cloud provider instead of the
 # subscription login this app is built on. `load_dotenv` puts every `.env` key
 # in os.environ, so a key kept there for some other tool would silently turn
@@ -477,7 +475,7 @@ _withheld_lock = threading.Lock()
 
 def child_env() -> dict[str, str]:
     """The environment for a `claude` child: ``os.environ`` minus
-    :data:`API_BILLING_ENV_VARS` (3A C1). The first time anything is withheld
+    :data:`API_BILLING_ENV_VARS`. The first time anything is withheld
     one WARNING names the variables (names only, never values)."""
     env: dict[str, str] = {}
     withheld: set[str] = set()
@@ -527,11 +525,11 @@ def _kill_claude_tree(proc: subprocess.Popen, job=None, *, pid_ok: bool = True) 
     in case taskkill could not run. POSIX: ``killpg`` on the child's own
     process group (it was started with ``start_new_session``). Never raises.
 
-    ``pid_ok=False`` (SP2 I2) skips the pid-based kills - the child was
-    already reaped, so its pid / process-group id may belong to an unrelated
+    ``pid_ok=False`` skips the pid-based kills: the child was already
+    reaped, so its pid / process-group id may belong to an unrelated
     process by now; only the job (still open, the caller guarantees) is used.
 
-    The order is deliberate (3A C14 reviewed it): taskkill runs BEFORE the
+    The order is deliberate: taskkill runs BEFORE the
     instant job kill. The npm ``cmd.exe`` shim can start ``node`` in the gap
     between Popen and the job assignment, leaving node OUTSIDE the job; only
     ``taskkill /T`` reaches it, and only while the shim is still alive for it
@@ -554,8 +552,8 @@ def _run_bounded(argv: list[str], *, timeout: float, cwd: str | None = None):
     Bounded and tree-safe (B1): the child runs in a kill-on-close job (Windows)
     or its own process group (POSIX); on timeout the WHOLE tree is killed (not
     just the ``cmd.exe`` shim) and :class:`subprocess.TimeoutExpired` is
-    raised. Output is decoded as UTF-8 with replacement - never the console
-    code page, which flipped a non-Latin account name into a decode error.
+    raised. Output is decoded as UTF-8 with replacement, never the console
+    code page, which turns a non-Latin account name into a decode error.
     """
     resolved = shutil.which(argv[0]) or argv[0]
     job = process_tree.create_kill_on_close_job()
@@ -569,7 +567,7 @@ def _run_bounded(argv: list[str], *, timeout: float, cwd: str | None = None):
             encoding="utf-8",
             errors="replace",
             cwd=cwd,
-            env=child_env(),  # 3A C1: never the API-billing variables
+            env=child_env(),  # never the API-billing variables
             **_spawn_kwargs(),
         )
     except BaseException:
@@ -595,9 +593,9 @@ def _default_auth_runner(argv: list[str]):
     """Run ``claude auth status`` for real, returning ``.returncode``/``.stdout``.
 
     B1: goes through :func:`_run_bounded` - Popen in a kill-on-close job /
-    own process group, the WHOLE tree killed on timeout (the old
-    ``subprocess.run`` killed only the ``cmd.exe`` shim and then waited on the
-    pipe the real ``node`` child still held), output decoded as UTF-8 with
+    own process group, the WHOLE tree killed on timeout (a plain
+    ``subprocess.run`` would kill only the ``cmd.exe`` shim and then wait on
+    the pipe the real ``node`` child still holds), output decoded as UTF-8 with
     replacement (never the console code page), in the neutral cwd (A7).
     Raises :class:`subprocess.TimeoutExpired` on timeout; the caller degrades.
     """
@@ -613,14 +611,14 @@ def auth_status(
     """Probe whether the `claude` CLI is installed and signed in.
 
     Uses ``claude auth status``, which prints a small JSON object
-    (``{"loggedIn": <bool>, ...}``) — a local, non-interactive check that costs
+    (``{"loggedIn": <bool>, ...}``): a local, non-interactive check that costs
     no model call. ``run`` is injectable so tests never spawn the real CLI; it
     takes the argv list and returns an object with a ``.stdout`` string (like
     :func:`subprocess.run` with ``capture_output=True``).
 
-    Robust by contract: a missing binary yields ``installed=False``; any other
-    failure (non-JSON output, a timeout, a crash) yields
-    ``installed=True, logged_in=False`` — this probe must never raise, because
+    A missing binary yields ``installed=False``; any other failure (non-JSON
+    output, a timeout, a crash) yields ``installed=True, logged_in=False``.
+    This probe must never raise, because
     it runs on the page-load path and in the launcher.
     """
     if which(config.claude_bin()) is None:
@@ -636,11 +634,11 @@ def auth_status(
     return AuthStatus(installed=True, logged_in=logged_in)
 
 
-# --- cached sign-in state (B1, SP2 M2) --------------------------------------
+# --- cached sign-in state (B1) ----------------------------------------------
 #
-# The page used to run `claude auth status` synchronously on EVERY `GET /`.
-# Now every result is cached: a signed-in one for AUTH_CACHE_TTL seconds, a
-# negative one (signed out / not installed / probe failed) for only
+# `GET /` shows the sign-in state, so `claude auth status` results are cached
+# rather than probed on every page load: a signed-in one for AUTH_CACHE_TTL
+# seconds, a negative one (signed out / not installed / probe failed) for only
 # AUTH_NEGATIVE_TTL seconds. Once stale, the cached value - positive OR
 # negative - is served as-is while ONE background thread refreshes it
 # (stale-while-revalidate, in-flight guarded). So after the first cache prime
@@ -730,31 +728,26 @@ def cached_auth_status() -> AuthStatus:
 # problem is authentication. Everything else (usage limits, a bad model name,
 # prompt too long, a crash) is headlined with its real text instead.
 #
-# SP2 M3: a status code only counts as a standalone number - never a stack
-# trace's ``cli.js:401:12`` line/column - and "log in" / "sign in" only as
-# whole words (not the tail of "catalog in" / "design in"). The limit marker
-# also knows the CLI's current wordings ("You've hit your limit",
-# "5-hour limit reached").
+# A status code only counts as a standalone number, never a stack trace's
+# ``cli.js:401:12`` line/column, and "log in" / "sign in" only as whole words
+# (not the tail of "catalog in" / "design in"). The limit marker also knows
+# the CLI's current wordings ("You've hit your limit", "5-hour limit reached").
 #
-# SP2 M6 review: the lookaheads used to be ``(?![\w:.])`` - reject the code if
-# ANYTHING in ``\w:.`` follows. That rejected legitimate trailing punctuation
-# too: "status code 401." or "429: Too Many Requests" lost the hint solely
-# because the code was followed by "." or ":". The fix only excludes a
-# following word character (glues the code to more digits/letters, as in
-# "4012") or a "." / ":" immediately followed by ANOTHER digit - exactly the
-# stack-trace column shape (":401:12") - while trailing punctuation with
-# nothing digit-like after it still counts as a standalone code.
+# The code's lookahead excludes only a following word character (which glues
+# the code to more digits/letters, as in "4012") or a "." / ":" immediately
+# followed by ANOTHER digit, which is the stack-trace column shape
+# (":401:12"). Trailing punctuation with nothing digit-like after it still
+# counts, so "status code 401." and "429: Too Many Requests" get the hint.
 _AUTH_MARKER_RE = re.compile(
     r"authenticat|oauth|unauthori[sz]ed|(?<![\w:.])401(?!\w|[:.]\d)|invalid api key|"
     r"api key|not (?:logged|signed) in|\blog[ -]?in\b|\bsign[ -]?in\b|/login|"
     r"credential|token (?:has )?expired|session expired",
     re.IGNORECASE,
 )
-# SP2 M6 review: a bare "limit reached" was too broad - "context window limit
-# reached" and "max output token limit reached" are NOT usage-limit errors,
-# but used to get the usage-limit hint anyway. Only the CLI's actual
-# usage-limit wordings count now: "usage limit", "N-hour limit (reached)",
-# "hit your ... limit", and the daily/weekly/monthly variants.
+# A bare "limit reached" is too broad: "context window limit reached" and "max
+# output token limit reached" are NOT usage-limit errors. Only the CLI's
+# usage-limit wordings count: "usage limit", "N-hour limit (reached)", "hit
+# your ... limit", and the daily/weekly/monthly variants.
 _LIMIT_MARKER_RE = re.compile(
     r"usage limit|rate limit|quota|(?<![\w:.])429(?!\w|[:.]\d)|"
     r"hit your (?:\w+ )?limit|\b\d+[- ]hour limit|"
@@ -793,7 +786,7 @@ def _compose_error(headline: str, detail: str) -> str:
     carries an auth / usage-limit marker.
 
     The headline already ends with the detail's first line, so only the lines
-    AFTER it follow (3A C11: the whole detail used to repeat it)."""
+    AFTER it follow, so the first line is not repeated."""
     parts = [headline]
     rest = "\n".join(detail.strip().splitlines()[1:]).strip()
     if rest:
@@ -811,7 +804,7 @@ def failure_message(returncode: int, stderr: str) -> str:
     added only when that text carries an auth marker. An ``is_error`` result
     the CLI reports on stdout never reaches this: the stream parser raises
     :func:`result_error_message` on it and stops the runner before the exit
-    code is ever looked at (3A C4).
+    code is ever looked at.
     """
     detail = (stderr or "").strip()
     binary = config.claude_bin()
@@ -855,7 +848,7 @@ def _is_result_line(line: str) -> bool:
         return False
     try:
         obj = json.loads(line)
-    except (ValueError, TypeError, RecursionError):  # 3A C9: absurd nesting
+    except (ValueError, TypeError, RecursionError):  # RecursionError: absurd nesting
         return False
     return isinstance(obj, dict) and obj.get("type") == "result"
 
@@ -882,7 +875,7 @@ def _real_runner(
     run open); and the wall-clock watchdog fires until *reading* is done, not
     merely until the direct child exits. Nothing outlives the run either: the
     job is closed (Windows) or the process group killed once the CLI exited
-    (POSIX, 3A C3).
+    (POSIX).
     """
     # stderr goes to a temp file, not a PIPE: an unread stderr PIPE can fill its
     # ~64KB OS buffer and deadlock the child (it blocks writing stderr while we
@@ -899,7 +892,7 @@ def _real_runner(
         "errors": "replace",
         "bufsize": 1,  # line-buffered so deltas surface promptly
         "cwd": cwd,
-        "env": child_env(),  # 3A C1: never the API-billing variables
+        "env": child_env(),  # never the API-billing variables
         # Windows: no console window; POSIX: own process group (C5).
         **_spawn_kwargs(),
     }
@@ -917,7 +910,7 @@ def _real_runner(
     job = process_tree.create_kill_on_close_job()
 
     # If Popen fails (e.g. the binary vanished in the narrow window after
-    # is_available()), release what we opened above — the try/finally that
+    # is_available()), release what we opened above: the try/finally that
     # normally does it starts below this line.
     try:
         proc = subprocess.Popen(argv, **popen_kwargs)
@@ -931,7 +924,7 @@ def _real_runner(
     # that window is still covered by taskkill /T, which walks live parents.)
     process_tree.assign_to_job(job, proc)
 
-    # SP2 I2: the tree-kill runs on other threads too (ClaudeRun.cancel(), the
+    # The tree-kill runs on other threads too (ClaudeRun.cancel(), the
     # watchdog), and a kill can block for a while inside `taskkill`. One
     # per-run lock serializes every kill with the reap and the job close, so a
     # killer can never act on a closed (possibly recycled) job handle nor, on
@@ -954,7 +947,7 @@ def _real_runner(
         with kill_lock:
             if reaped:
                 return False
-            # 3A C3 (POSIX): a CLI that exits - normally or after the result
+            # POSIX: a CLI that exits - normally or after the result
             # grace - can leave a helper behind in its process group, and
             # there is no job object to close. Kill the group when the CLI is
             # seen to have exited, while it is still an unreaped zombie: its
@@ -997,19 +990,19 @@ def _real_runner(
     drained = False
     saw_result = False    # stopped at the terminal `result` event (A6)
     stopped_after_result = False  # ...and had to kill a lingering CLI
-    stdin_ok = True       # False -> the child died before consuming stdin (P2-3)
+    stdin_ok = True       # False -> the child died before consuming stdin
     disconnected = False  # True -> consumer close()d us (SSE client went away)
-    stdin_thread: threading.Thread | None = None  # daemon feeding stdin (P1-1)
+    stdin_thread: threading.Thread | None = None  # daemon feeding stdin
 
-    # Wall-clock watchdog (audit6 P2-2, A6): a hung `claude` (network stall,
+    # Wall-clock watchdog (A6): a hung `claude` (network stall,
     # stuck auth prompt, wedged node) - or a grandchild still holding the
     # stdout pipe after `claude` itself exited - would otherwise block the read
     # loop, and the Flask worker thread driving it, forever. After
     # config.run_timeout() seconds the timer kills the whole tree (job /
     # process group / taskkill + proc.kill()); the read loop then sees EOF and
     # the `timed_out` flag makes the exit logic below raise a "timed out"
-    # error. Keyed on `reading_done` ONLY: the old `proc.poll()` bail-out is
-    # exactly what let a pipe-holding grandchild hang the run. The lock makes
+    # error. Keyed on `reading_done` ONLY: bailing out once `proc.poll()` sees
+    # the CLI exit would let a pipe-holding grandchild hang the run. The lock makes
     # the deadline race deterministic: once reading is done, a late-firing
     # timer can no longer reclassify the run as a timeout (or kill anything).
     timeout_s = config.run_timeout()
@@ -1021,7 +1014,7 @@ def _real_runner(
         nonlocal timed_out
         with watchdog_lock:
             if reading_done:
-                return  # run already finished — natural completion wins
+                return  # run already finished: natural completion wins
             timed_out = True
         _kill_tree()
         # No wait() here: the main path below always reaps the child.
@@ -1035,7 +1028,7 @@ def _real_runner(
         handle._attach_killer(_kill_tree)
     try:
         assert proc.stdin is not None and proc.stdout is not None
-        # audit P1-1: feed stdin on its own daemon thread so the main thread can
+        # Feed stdin on its own daemon thread so the main thread can
         # start draining stdout IMMEDIATELY. Writing the whole (potentially
         # multi-MB) prompt synchronously here first would deadlock a child that
         # floods stdout before it finishes reading stdin: the parent blocks on
@@ -1044,15 +1037,15 @@ def _real_runner(
         #
         # `stdin_ok` records whether the child consumed stdin cleanly. A broken
         # pipe means the child exited at startup (bad flag, corrupt install)
-        # before reading stdin — the real diagnostics are on its stderr, which
+        # before reading stdin. The real diagnostics are on its stderr, which
         # the nonzero-exit branch below reads back and raises instead of a bare
         # "[Errno 32]". The main thread only reads this flag after joining the
         # feeder (below), so no lock is needed.
-        # SP5 fix B1: write the prompt as UTF-8 BYTES to the pipe's binary
-        # buffer. The text wrapper Popen(text=True) puts on stdin translates
-        # LF to os.linesep, so on Windows the CLI received CRLF line
-        # endings it never asked for (and in-band markers on their own line
-        # stopped matching). Nothing is ever written through the wrapper, so
+        # The prompt is written as UTF-8 BYTES to the pipe's binary buffer.
+        # The text wrapper Popen(text=True) puts on stdin translates LF to
+        # os.linesep, so on Windows it would hand the CLI CRLF line endings it
+        # never asked for (and in-band markers on their own line would stop
+        # matching). Nothing is ever written through the wrapper, so
         # closing it below just flushes/closes the buffer we wrote to.
         payload = stdin_text.encode("utf-8")
 
@@ -1078,7 +1071,7 @@ def _real_runner(
                 # BEFORE the yield: the parser (`_iter_text_deltas`) stops at
                 # this line and close()s us, which raises GeneratorExit AT the
                 # yield - that close must get the post-result grace below, not
-                # the disconnect branch's immediate kill (SP2 fix I1).
+                # the disconnect branch's immediate kill.
                 saw_result = True
                 yield line
                 break
@@ -1090,7 +1083,7 @@ def _real_runner(
             # naturally.
             drained = not timed_out and not (handle is not None and handle.cancelled)
     except GeneratorExit:
-        # Closed early. Either a genuine consumer disconnect (nothing seen past
+        # Closed early. Either a consumer disconnect (nothing seen past
         # the last delta -> the finally kills the tree at once), or the parser
         # stopping at the `result` event (`saw_result` -> the finally waits up
         # to RESULT_EXIT_GRACE for a natural exit, then kills). Either way
@@ -1099,8 +1092,8 @@ def _real_runner(
         disconnected = True
         raise
     finally:
-        # Always disarm the watchdog — normal completion, timeout, disconnect,
-        # or error — so no timer thread outlives the run. cancel() is a no-op
+        # Always disarm the watchdog (normal completion, timeout, disconnect,
+        # or error), so no timer thread outlives the run. cancel() is a no-op
         # for a timer that already fired; the reading_done guard makes an
         # in-flight firing harmless.
         with watchdog_lock:
@@ -1114,7 +1107,7 @@ def _real_runner(
             except subprocess.TimeoutExpired:
                 stopped_after_result = True
                 _kill_tree()
-        # If we did NOT drain stdout, the generator is being closed early — the
+        # If we did NOT drain stdout, the generator is being closed early: the
         # SSE client disconnected (Flask throws GeneratorExit into us at the
         # next yield) or an exception unwound the consumer. The `claude`
         # subprocess would otherwise keep running to completion and keep
@@ -1123,7 +1116,7 @@ def _real_runner(
             _kill_tree()
         # Reap the stdin feeder before reading `stdin_ok`/returncode below. Once
         # the child has exited (drained to EOF, killed, or crashed) the write
-        # unblocks — broken-pipe on a dead child, or completed on a clean run —
+        # unblocks (broken-pipe on a dead child, or completed on a clean run),
         # so the join returns promptly. Guarded in case an error unwound the try
         # before the thread was even started.
         if stdin_thread is not None:
@@ -1137,7 +1130,7 @@ def _real_runner(
         except subprocess.TimeoutExpired:
             _kill_tree()
             returncode = _reap(None)
-        # SP2 I2: no new killer from here on; then wait for any in-flight one
+        # No new killer from here on; then wait for any in-flight one
         # (the watchdog thread is joined; a cancel() killer holds kill_lock,
         # which the close below takes) before the job handle goes away.
         if handle is not None:
@@ -1160,7 +1153,7 @@ def _real_runner(
                     timeout_s=timeout_s,
                     # A nonzero exit is reported on a normal, fully-drained run
                     # - or when the stdin write broke because the child died at
-                    # startup (audit6 P2-3). A CLI we stopped ourselves after
+                    # startup. A CLI we stopped ourselves after
                     # its `result` exits nonzero by design.
                     failed=(
                         (drained or not stdin_ok)
@@ -1222,7 +1215,7 @@ _SURROGATE_RE = re.compile("[\ud800-\udfff]")
 
 def _fix_surrogates(text: str) -> str:
     """Pair up UTF-16 surrogate halves into real code points and replace any
-    that stay unpaired with U+FFFD (3A C13). The CLI's JSON can carry an
+    that stay unpaired with U+FFFD. The CLI's JSON can carry an
     emoji as ``\\ud83d`` + ``\\ude00`` split across two deltas; joined
     naively they stay two lone surrogates, which raise ``UnicodeEncodeError``
     (not ``OSError``) when the answer is saved."""
@@ -1238,7 +1231,7 @@ def _iter_text_deltas(
 
     Strategy (robust to both partial-message and complete-block modes):
 
-    * Prefer ``stream_event`` ``text_delta`` chunks — true incremental output.
+    * Prefer ``stream_event`` ``text_delta`` chunks (true incremental output).
     * If the whole stream contained no such events, fall back to emitting the
       text content blocks from ``assistant`` messages (complete-block mode),
       and failing that the ``result`` text itself.
@@ -1249,11 +1242,11 @@ def _iter_text_deltas(
     * Ignore everything else (system/init lines, thinking/signature deltas,
       blank lines, non-JSON noise) and skip any event whose fields have an
       unexpected type (B3): the parser must never crash on an odd shape.
-    * Every chunk is valid Unicode (3A C13): a surrogate pair split across two
+    * Every chunk is valid Unicode: a surrogate pair split across two
       deltas is re-paired, and a surrogate that stays unpaired becomes U+FFFD.
     """
     saw_stream_event_text = False
-    held_surrogate = ""  # 3A C13: a high surrogate whose low half is pending
+    held_surrogate = ""  # a high surrogate whose low half is pending
     saw_result = False
     assistant_fallback: list[str] = []
     result_fallback = ""
@@ -1263,7 +1256,7 @@ def _iter_text_deltas(
     # `run()` returns, which is this generator via `yield from`); CPython
     # propagates that close() down through the `yield from` chain into this
     # `for` loop as a GeneratorExit, which in turn reaches `lines` only
-    # because `for` calls `lines.close()` implicitly on GC — relying on
+    # because `for` calls `lines.close()` implicitly on GC, relying on
     # refcounting timing, not a guaranteed protocol. Close `lines` explicitly
     # so `_real_runner`'s cleanup (which terminates the `claude` subprocess)
     # runs deterministically regardless of GC timing.
@@ -1291,7 +1284,7 @@ def _iter_text_deltas(
                     and (kind in ("system", "result") or state.session_id is None)):
                 state.session_id = sid
 
-            # SP5: the concrete model id behind an alias (system/init first;
+            # The concrete model id behind an alias (system/init first;
             # an assistant message's own `model` only if init never said).
             if state is not None:
                 if kind == "system" and obj.get("subtype") == "init":
@@ -1310,7 +1303,7 @@ def _iter_text_deltas(
                     text = delta.get("text")
                     if delta.get("type") == "text_delta" and isinstance(text, str) and text:
                         saw_stream_event_text = True
-                        # 3A C13: a trailing high surrogate waits for the
+                        # A trailing high surrogate waits for the
                         # next delta, which may carry its other half.
                         text = held_surrogate + text
                         held_surrogate = ""
@@ -1349,7 +1342,7 @@ def _iter_text_deltas(
             close()
 
     if not saw_result:
-        # SP5 fix B3: the CLI always ends a finished run with a `result`
+        # The CLI always ends a finished run with a `result`
         # event. A stream that stops without one (exit 0 mid-answer: a crash
         # the CLI swallowed, a killed helper) is an INCOMPLETE answer - never
         # pass it off, or save it, as a success.
@@ -1381,7 +1374,7 @@ def run(
     Parameters
     ----------
     prompt:
-        The full prompt. Delivered to the child process via **stdin**, so it can
+        The full prompt. Delivered to the child process via stdin, so it can
         be arbitrarily large.
     model:
         Model id for ``--model``. Defaults to ``config.model()``.
@@ -1463,7 +1456,7 @@ def _run_gen(
     if flags is None:
         flags = cli_supported_flags()
         if not flags:
-            # Phase 4: fail closed. Without the probe there is no --tools "",
+            # Fail closed. Without the probe there is no --tools "",
             # --safe-mode or --strict-mcp-config, and a prompt-injected problem
             # could reach the tools the user's own Claude Code settings allow.
             raise ClaudeUnavailableError(

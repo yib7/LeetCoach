@@ -1,4 +1,4 @@
-"""Trusted bootstrap for the Answer-mode sandbox (SP3 A5 + C6). STDLIB ONLY.
+"""Trusted bootstrap for the Answer-mode sandbox (A5 + C6). STDLIB ONLY.
 
 ``sandbox.verify_python`` spawns ``<base python> -I -X utf8 -B sandbox_bootstrap.py``
 instead of running the untrusted solution directly, and this file is what runs
@@ -6,13 +6,13 @@ first in the child. Its stdin carries, in order: the length-prefixed JSON
 config (script path, run dir, secret paths, rlimits; kept OFF the command line
 so ``sys.orig_argv`` does not reveal it), the go byte, then the sample input.
 
-0. **Config + POSIX rlimits.** :func:`read_config` reads exactly the framed
+0. Config and POSIX rlimits: :func:`read_config` reads exactly the framed
    config. On POSIX :func:`apply_rlimits` then sets the memory / CPU /
-   file-size / process limits in this process (soft == hard), replacing a
-   ``preexec_fn`` that is not fork-safe in the threaded parent. If a required
+   file-size / process limits in this process (soft == hard), instead of a
+   ``preexec_fn``, which is not fork-safe in the threaded parent. If a required
    limit cannot be set the bootstrap exits :data:`EXIT_NO_CAPS` with
    :data:`CAPS_MARKER` on stderr and the solution never runs (fail closed).
-1. **Audit hook (C6).** Unless the config says ``"audit": false`` (tests of
+1. Audit hook (C6): unless the config says ``"audit": false`` (tests of
    the other containment layers only), install a ``sys.addaudithook`` hook
    that refuses, with a ``PermissionError`` naming the sandbox:
 
@@ -25,14 +25,14 @@ so ``sys.orig_argv`` does not reveal it), the go byte, then the sample input.
      and the ``sys.path`` entries, taken before any untrusted code exists):
      imports and tracebacks keep working, but a solution cannot read your
      other files (browser profiles, other projects' ``.env``) just because
-     they are missing from the secret list (Phase 4);
+     they are missing from the secret list;
    * network, with no exceptions: ``socket.bind`` / ``connect`` / ``sendto``
      / ``sendmsg`` and name resolution, whatever the address (loopback
      included). That also rules out ``socket.socketpair()`` on Windows (it
      binds a loopback listener), so asyncio, whose Windows event loop needs
      one for its self-pipe, is unavailable: ``asyncio.run`` ends the run as
-     "blocked by sandbox (socket.bind)". An earlier socketpair allowance was
-     dropped after it was bypassed three times (the last by a socket subclass
+     "blocked by sandbox (socket.bind)". There is no socketpair allowance,
+     because one was bypassed three times (the last by a socket subclass
      faking ``getsockname``); LeetCode solutions need neither sockets nor
      asyncio;
    * SQLite entirely (``sqlite3.connect``, extension loading): ``ATTACH
@@ -55,7 +55,7 @@ so ``sys.orig_argv`` does not reveal it), the go byte, then the sample input.
    are known gaps (e.g. ``dir_fd``-relative opens on POSIX). It exists to stop
    careless or prompt-injected solution code from touching credentials, the
    network or the rest of the disk.
-2. **Handshake (A5).** Write the one-byte :data:`READY` signal to stdout,
+2. Handshake (A5): write the one-byte :data:`READY` signal to stdout,
    then block on an unbuffered ONE-byte ``os.read(0, 1)`` until the parent
    sends the go byte. The parent reads READY before it sends go, so an exit
    BEFORE READY is known to be the bootstrap's own (bad config, caps that
@@ -111,8 +111,7 @@ _MAX_CONFIG_BYTES = 1 << 20
 
 # POSIX rlimits the parent may configure -> required? NPROC counts every
 # process of the user and is not adjustable in some containers, so failing to
-# set it is tolerated (as the old preexec_fn did); the others are the memory /
-# CPU / disk caps.
+# set it is tolerated; the others are the memory / CPU / disk caps.
 _RLIMITS = {"AS": True, "CPU": True, "FSIZE": True, "NPROC": False}
 
 # POSIX names that are aliases of an already-open fd rather than files.

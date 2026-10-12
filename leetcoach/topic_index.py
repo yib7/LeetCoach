@@ -1,11 +1,11 @@
-"""A small persisted index of topics the learner has already studied (SP5).
+"""A small persisted index of topics the learner has already studied.
 
-Learning mode reads this so Claude can **skip covered tech and cross-link** the
+Learning mode reads this so Claude can skip covered tech and cross-link the
 prior note instead of re-teaching it; after a successful Learning run we record
 the run's topics back into the index so the next run benefits.
 
 Storage is a single JSON file (default ``<output_dir>/topic_index.json`` via
-``config.topic_index_path()`` — gitignored). Shape::
+``config.topic_index_path()``, gitignored). Shape::
 
     {
       "by_type": { "<problem_type>": ["topic_a", "topic_b", ...], ... },
@@ -22,13 +22,13 @@ runs record into their language's bucket, because a topic learned in Python
 (``heapq``) is not "already learned" in C++ (``priority_queue``). Every topic
 is sanitized on read (B21) - an index entry is replayed into later prompts, so
 a legacy 4 KB "topic" must not survive the trip - and every NEW topic on write.
-SP2 M5: ``record`` never rewrites what is already on disk: legacy entries stay
+``record`` never rewrites what is already on disk: legacy entries stay
 byte-for-byte as they were (only the touched lists get new topics appended),
 and if the file is unreadable or a section it must replace is malformed, the
 original is first copied once to ``<name>.pre-v1.5.bak``.
 
-Robustness is the whole point: a missing or corrupt file must NEVER crash a
-run — it just starts from an empty index. ``record`` merges new topics in (no
+A missing or corrupt file must NEVER crash a run: it just starts from an
+empty index. ``record`` merges new topics in (no
 duplicates, insertion order preserved). All paths are read at call time so tests
 can point ``LEETCOACH_TOPIC_INDEX`` at a tmp file.
 """
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # ``threaded=True``, so two concurrent Learning requests could otherwise
 # interleave loads and saves and lose one thread's merged topics (a TOCTOU
 # race). This is a single-process personal tool, so an in-process lock plus an
-# atomic tmp-then-rename write is sufficient (and Windows-compatible — no
+# atomic tmp-then-rename write is sufficient (and Windows-compatible: no
 # fcntl). All record() calls share this one module-level lock regardless of the
 # target path; contention is trivial for a personal tool.
 _RECORD_LOCK = threading.Lock()
@@ -115,13 +115,13 @@ def _read_raw(p: Path):
     """``(parsed top-level dict or None, file_existed, transient_error)``.
     Never raises.
 
-    SP2 M6: ``transient_error`` is True only when the file exists but could
+    ``transient_error`` is True only when the file exists but could
     not be READ at all (an ``OSError`` other than "missing" - e.g. another
     process briefly holding it locked). That is NOT corruption: unlike a
     missing file or bad JSON, there is nothing wrong with what is on disk, so
     the caller must not treat it as replaceable content.
 
-    SP4 review I2: bytes that are not UTF-8 (a UTF-16 file, binary junk) are
+    Bytes that are not UTF-8 (a UTF-16 file, binary junk) are
     corrupt content like bad JSON - never an exception. A UTF-8 BOM is
     tolerated."""
     try:
@@ -154,7 +154,7 @@ def _clean_index(data) -> dict:
 
 
 def _write_json(p: Path, obj) -> None:
-    # Atomic write through the shared helper (SP4/B7): sibling temp file +
+    # Atomic write through the shared helper (B7): sibling temp file +
     # os.replace, retried with backoff while Windows reports the index as held
     # by another process (AV, OneDrive, a reader), temp file always cleaned up.
     atomic_files.atomic_write_text(p, json.dumps(obj, indent=2))
@@ -163,8 +163,8 @@ def _write_json(p: Path, obj) -> None:
 def _preserve_corrupt(p: Path) -> bool:
     """B7: keep an unparseable index as ``<name>.corrupt-<timestamp>`` before
     it is replaced, so a corrupt file is never silently overwritten. Returns
-    whether the copy was made (SP4 review M9: if not, the caller must leave
-    the original alone). Never raises."""
+    whether the copy was made (if not, the caller must leave the original
+    alone). Never raises."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     dest = p.with_name(f"{p.name}.corrupt-{stamp}")
     n = 2
@@ -184,7 +184,7 @@ BACKUP_SUFFIX = ".pre-v1.5.bak"
 
 def _backup_once(p: Path) -> None:
     """Copy the index to ``<name>.pre-v1.5.bak`` unless a backup already
-    exists (SP2 M5). Best-effort: never raises."""
+    exists. Best-effort: never raises."""
     backup = p.with_name(p.name + BACKUP_SUFFIX)
     try:
         if p.exists() and not backup.exists():
@@ -213,14 +213,14 @@ def known_topics(path=None, *, limit=None, language=None) -> list:
     unkeyed entry) come first, then that language's own - never another
     language's. Without it, only the language-agnostic entries.
 
-    ``limit`` (audit6 P2-12) keeps only the LAST ``limit`` entries. The stored
+    ``limit`` keeps only the LAST ``limit`` entries. The stored
     lists preserve insertion order (first appearance), so the tail is the most
-    recently first-recorded topics — i.e. "the most recent N".
+    recently first-recorded topics, i.e. "the most recent N".
     """
     # Intentionally unlocked: this is a read-only path (no lock needed for
     # correctness here) and it's safe against a concurrent record() because
     # record() writes via tmp-file + os.replace(), an atomic rename on both
-    # Windows and POSIX — a reader here always sees either the old file or
+    # Windows and POSIX: a reader here always sees either the old file or
     # the fully-written new one, never a partial write.
     data = load(path)
     topics = list(data["all"])
@@ -241,7 +241,7 @@ def record(problem_type: str, topics, path=None, *, language=None) -> dict:
     insertion order. A blank ``problem_type`` defaults to ``"uncategorized"`` so a
     bucket always exists. B22: with ``language`` the topics go into that
     language's bucket; without it, into the language-agnostic one. Topics are
-    sanitized (B21). Never raises on a write hiccup — it returns the merged
+    sanitized (B21). Never raises on a write hiccup: it returns the merged
     in-memory index regardless.
     """
     ptype = (problem_type or "uncategorized").strip() or "uncategorized"
@@ -251,7 +251,7 @@ def record(problem_type: str, topics, path=None, *, language=None) -> dict:
     # Hold the lock across the whole load->merge->save so a concurrent record()
     # can't read a stale index between our load and save and clobber our write.
     #
-    # SP2 M5: the merge works on the RAW file content, not the sanitized
+    # The merge works on the RAW file content, not the sanitized
     # load() view, so legacy entries are never lossily rewritten; only the two
     # touched lists get the new topics appended. Anything that has to be
     # replaced (unreadable file, a malformed section) is backed up first.
@@ -259,7 +259,7 @@ def record(problem_type: str, topics, path=None, *, language=None) -> dict:
         p = _path(path)
         raw, existed, transient = _read_raw(p)
         if transient:
-            # SP2 M6: the file exists but a transient OSError (e.g. another
+            # The file exists but a transient OSError (e.g. another
             # process briefly locking it) stopped us reading it - unlike a
             # missing file or corrupt JSON, there is nothing wrong with its
             # content. Overwriting it here would silently discard everything
@@ -273,7 +273,7 @@ def record(problem_type: str, topics, path=None, *, language=None) -> dict:
             return _clean_index({})
         lossy = existed and raw is None
         if lossy and not _preserve_corrupt(p):
-            # B7 / SP4 review M9: never overwrite a corrupt file unkept. The
+            # B7: never overwrite a corrupt file unkept. The
             # copy failed (disk full, a locked folder), so drop this run's
             # topics rather than destroy the only copy of the old index.
             logger.warning(

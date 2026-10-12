@@ -1,59 +1,58 @@
-"""Best-effort sample-I/O verification of a generated solution (SP5).
+"""Best-effort sample-I/O verification of a generated solution.
 
-The generated solution is **untrusted code**, so we run it the way STATlee runs
+The generated solution is untrusted code, so we run it the way STATlee runs
 analysis code (``statlee/sandbox.py``):
 
 * a throwaway working directory (``tempfile.mkdtemp``) cleaned in ``finally``;
-* a **secret-free** environment (``_safe_env``) so the child can't read an API
-  key or any other app secret — only the bare minimum Windows/CPython needs;
+* a secret-free environment (``_safe_env``) so the child can't read an API
+  key or any other app secret: only the bare minimum Windows/CPython needs;
 * POSIX ``resource`` rlimits, set by the bootstrap itself before the go byte
   (no ``preexec_fn``: it is not fork-safe in a threaded parent); on Windows a
-  **Job Object** (``process_tree.create_job_with_caps`` created+configured
+  Job Object (``process_tree.create_job_with_caps`` created+configured
   *before* the spawn, ``assign_to_job`` right after) caps per-process memory
   (512 MB, parity with ``RLIMIT_AS``) and active process count (16), with
   KILL_ON_JOB_CLOSE so closing the job handle in the ``finally`` nukes any
   straggler. Both FAIL CLOSED: if the caps cannot be applied the solution
   never runs and the verdict is ``not_verified`` ("sandbox caps
   unavailable");
-* a **trusted bootstrap** (``sandbox_bootstrap.py``, SP3 A5) is what the child
+* a trusted bootstrap (``sandbox_bootstrap.py``, A5) is what the child
   actually runs, under the REAL interpreter (``sys._base_executable -I``, never
   the venv launcher stub). Its config arrives framed on stdin (not argv), then
   it blocks on a one-byte handshake that the parent sends only after the job
   is assigned, so no untrusted line can run outside the caps, however long a
   GIL-starved parent takes to assign it;
-* an **audit hook** installed by that bootstrap (C6) refuses writes outside the
+* an audit hook installed by that bootstrap (C6) refuses writes outside the
   run dir, reads of known secret paths (:func:`_secret_paths`), sockets,
-  process creation and ctypes loading — defence in depth, NOT a security
+  process creation and ctypes loading. It is defence in depth, NOT a security
   boundary (SECURITY.md says so);
 * ``subprocess.Popen`` with both output pipes drained on capped reader threads
-  (never more than ``_OUTPUT_LIMIT`` retained — a runaway print loop gets the
-  child killed, not hundreds of MB buffered) and a **whole-tree kill** on
+  (never more than ``_OUTPUT_LIMIT`` retained: a runaway print loop gets the
+  child killed, not hundreds of MB buffered) and a whole-tree kill on
   timeout/overflow (``process_tree.kill_process_tree``) so grandchildren spawned
   by the untrusted code die too.
 
 The public surface:
 
-* :func:`verify_python` — write Python to the throwaway dir, run it via the
+* :func:`verify_python`: write Python to the throwaway dir, run it via the
   bootstrap feeding ``stdin_text`` on stdin, diff stdout vs expected.
-* :func:`parse_samples` — pull ``Input:`` / ``Output:`` example pairs out of a
+* :func:`parse_samples`: pull ``Input:`` / ``Output:`` example pairs out of a
   pasted LeetCode problem (best effort; ``[]`` when none found).
-* :func:`verify_answer` — orchestrator. Python is first-class (parse samples ->
+* :func:`verify_answer`: orchestrator. Python is first-class (parse samples ->
   run -> pass/fail). For cpp/java we only check a compiler is on PATH and
-  otherwise return ``not_verified``. It **never raises** — a verifier hiccup
+  otherwise return ``not_verified``. It never raises: a verifier hiccup
   must never break a study run.
 
 Statuses (see :class:`VerifyResult`):
 
-* ``"pass"``         — every parsed sample matched expected stdout.
-* ``"fail"``         — at least one sample's stdout differed, or the code
-                       crashed on some samples but passed others.
-* ``"error"``        — the code crashed / timed out / wouldn't run on every
-                       sample that ran.
-* ``"not_verified"`` — couldn't verify (no samples, no compiler, unsupported
-                       language, sandbox caps unavailable, the bootstrap
-                       failed before running the solution) — *not* a
-                       failure, just "not auto-verified". A later
-                       not-verified sample never hides an earlier fail.
+* ``"pass"``: every parsed sample matched expected stdout.
+* ``"fail"``: at least one sample's stdout differed, or the code crashed on
+  some samples but passed others.
+* ``"error"``: the code crashed / timed out / wouldn't run on every sample
+  that ran.
+* ``"not_verified"``: couldn't verify (no samples, no compiler, unsupported
+  language, sandbox caps unavailable, the bootstrap failed before running
+  the solution). This is *not* a failure, just "not auto-verified". A later
+  not-verified sample never hides an earlier fail.
 """
 from __future__ import annotations
 
@@ -105,7 +104,7 @@ _STALE_RUN_DIR_AGE_S = 24 * 60 * 60
 _sleep = time.sleep
 
 # Per-process memory cap for the untrusted child: RLIMIT_AS on POSIX, a Job
-# Object ProcessMemoryLimit on Windows — same number, parity by construction.
+# Object ProcessMemoryLimit on Windows; the same number on both platforms.
 _MEM_LIMIT_BYTES = 512 * 1024 * 1024
 
 # Windows job active-process cap. The job counts only this child's own tree:
@@ -126,7 +125,7 @@ _POSIX_RLIMITS = {
 # thread in the solution (Linux) or any process at all (macOS). It is set to
 # what the user runs right now plus this headroom (threads count on Linux,
 # so it is roomier than the job cap), and left unset when that cannot be
-# counted: it was always optional (not adjustable in some containers), and
+# counted: it is optional (not adjustable in some containers), and
 # process creation is refused by the audit hook regardless.
 _NPROC_HEADROOM = 128
 _PS_TIMEOUT_S = 5
@@ -202,14 +201,14 @@ _BOOTSTRAP_PATH = os.path.join(
 _GO = GO
 # The bootstrap writes READY to stdout right before it blocks on the go byte;
 # the parent reads it before sending go, so a pre-READY exit is known to be
-# the bootstrap's, never the solution's (M-1 / M-3).
+# the bootstrap's, never the solution's.
 _READY = READY
 
-# I1: the verdict when the caps cannot be put in place (fail closed).
+# The verdict when the caps cannot be put in place (fail closed).
 _CAPS_UNAVAILABLE_NOTE = "sandbox caps unavailable (job object could not be applied)"
 _RLIMITS_UNAVAILABLE_NOTE = "sandbox caps unavailable (resource limits could not be applied)"
 
-# SP4 review M2: the verdict when the run was cancelled (Stop, or the client
+# The verdict when the run was cancelled (Stop, or the client
 # went away) while verifying; the child's tree is killed at once.
 _CANCELLED_NOTE = "verification cancelled"
 
@@ -228,8 +227,8 @@ def _secret_paths() -> list:
     one ``LEETCOACH_DOTENV_PATH`` points at), SSH / cloud / git / GitHub CLI
     credentials, package-registry / container / cluster / GPG credential
     stores (``~/.npmrc``, ``~/.pypirc``, ``~/.docker/config.json``,
-    ``~/.kube``, ``~/.gnupg`` - 3A S14b), and the Windows credential stores.
-    Only paths are computed here — nothing is ever opened.
+    ``~/.kube``, ``~/.gnupg``), and the Windows credential stores.
+    Only paths are computed here; nothing is ever opened.
     """
     home = os.path.expanduser("~")
     paths = [
@@ -266,7 +265,7 @@ def _secret_paths() -> list:
 def _child_python() -> str:
     """The interpreter the untrusted child runs under (A5).
 
-    ``sys._base_executable`` — the REAL interpreter — rather than
+    ``sys._base_executable`` (the REAL interpreter) rather than
     ``sys.executable``: inside a Windows venv the latter is a launcher stub
     that re-spawns the real ``python.exe`` as its own child, and that
     grandchild can be created before the parent assigns the stub to the job
@@ -342,7 +341,7 @@ def _safe_env(run_dir: str) -> dict:
     """A minimal, secret-free environment for the child process.
 
     The generated solution gets PATH (to find the interpreter) plus the bare
-    Windows variables CPython needs to start, and nothing else — no
+    Windows variables CPython needs to start, and nothing else, so no
     ``ANTHROPIC_*`` / ``LEETCOACH_*`` / other secrets leak in.
     """
     env = {
@@ -370,10 +369,10 @@ class _CappedReader(threading.Thread):
     ``_OUTPUT_LIMIT`` bytes.
 
     B6: reads are RAW (``os.read`` on the pipe's fd), returning whatever has
-    arrived instead of waiting for a full buffer. The old buffered
-    ``read(8192)`` blocked until 8 KB or EOF, so when a grandchild held the
-    pipe open after the solution exited, a short answer sat in the reader's
-    private buffer, the bounded join gave up, and the verdict saw empty
+    arrived instead of waiting for a full buffer. A buffered ``read(8192)``
+    blocks until 8 KB or EOF, so when a grandchild holds the pipe open after
+    the solution exits, a short answer would sit in the reader's private
+    buffer, the bounded join would give up, and the verdict would see empty
     stdout. Bytes are decoded once, at the end (:meth:`text`).
 
     Draining both pipes on dedicated threads is what makes the design
@@ -410,7 +409,7 @@ class _CappedReader(threading.Thread):
                 if self._total > _OUTPUT_LIMIT:
                     self.overflowed.set()
         except (OSError, ValueError):
-            pass  # pipe torn down under us mid-kill — keep what we have
+            pass  # pipe torn down under us mid-kill; keep what we have
         finally:
             try:
                 self._stream.close()
@@ -450,10 +449,9 @@ def _rmtree_with_retry(path: str, *, attempts: int = 6, base_delay: float = 0.05
     the verdict.
 
     Right after a kill, Windows can keep a handle on a file in the run dir for
-    a moment (the process object is torn down asynchronously), so the old
-    single ``rmtree(ignore_errors=True)`` routinely leaked the dir: 98 stale
-    ``leetcoach_run_*`` dirs were found in %TEMP%. Worst case this waits
-    ~1.5 s in total (0.05 + 0.1 + ... + 0.8).
+    a moment (the process object is torn down asynchronously), so a single
+    ``rmtree(ignore_errors=True)`` routinely leaks the dir. Worst case this
+    waits ~1.5 s in total (0.05 + 0.1 + ... + 0.8).
 
     Success is judged by whether ``path`` itself still exists, never by the
     exception type: a ``FileNotFoundError`` about an entry INSIDE the dir
@@ -553,7 +551,7 @@ class _StdinFeeder(threading.Thread):
             if self._go:
                 self._pipe.write(_GO + self._payload)
         except (BrokenPipeError, OSError, ValueError):
-            pass  # child exited / closed stdin without reading — not an error
+            pass  # child exited / closed stdin without reading; not an error
         finally:
             try:
                 self._pipe.close()
@@ -608,7 +606,7 @@ def _exit_note(returncode: int, stderr: str) -> str:
     else the bare exit code. Only the final exception line of the uncaught
     traceback is looked at (:func:`_final_exception_line`), so a solution
     that caught the sandbox's error and raised something else is not blamed
-    on the sandbox (M-2)."""
+    on the sandbox."""
     lines = [ln for ln in (stderr or "").splitlines() if ln.strip()]
     last = _final_exception_line(lines)
     m = _BLOCKED_RE.search(last) if last else None
@@ -628,7 +626,7 @@ def _classify_pre_go_exit(returncode, stderr: str, *, posix: bool | None = None)
     solution's (no solution code had run), so it is always ``not_verified``.
     The caps note needs POSIX (only there does the bootstrap set rlimits),
     :data:`EXIT_NO_CAPS` and the marker; anything else is an internal error.
-    A solution exiting 98 AFTER go is an ordinary ``error`` (M-1)."""
+    A solution exiting 98 AFTER go is an ordinary ``error``."""
     if posix is None:
         posix = os.name != "nt"
     if posix and returncode == EXIT_NO_CAPS and CAPS_MARKER in (stderr or ""):
@@ -719,25 +717,24 @@ def _normalize(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-# --- A3: tolerant structural output comparison ----------------------------
+# --- tolerant structural output comparison --------------------------------
 #
-# The old comparison was ``_normalize(got) == _normalize(want)`` — whitespace
-# trimming only, so `[0, 1]` vs `[0,1]`, `True` vs `true`, and `'x'` vs `"x"`
-# all FAILED a correct solution (a real recorded Two Sum answer was graded
-# FAIL 0/3 for exactly this reason). :func:`_outputs_match` adds a tolerant
-# second tier that parses both sides as a structured value (Python-literal or
-# JSON-ish) and compares that structure, with a float tolerance. It stays
-# conservative by design: order-insensitivity is applied ONLY when the
-# problem text explicitly says "any order" AND the two sides are the same
-# multiset — a genuinely wrong (misordered when order matters, or a different
-# value entirely) answer must never become a PASS.
+# Whitespace trimming alone (``_normalize(got) == _normalize(want)``) FAILS a
+# correct solution on `[0, 1]` vs `[0,1]`, `True` vs `true`, or `'x'` vs `"x"`
+# (a recorded Two Sum answer graded FAIL 0/3 for exactly this reason).
+# :func:`_outputs_match` adds a tolerant second tier that parses both sides as
+# a structured value (Python-literal or JSON-ish) and compares that structure,
+# with a float tolerance. It stays conservative by design: order-insensitivity
+# is applied ONLY when the problem text explicitly says "any order" AND the
+# two sides are the same multiset. A wrong answer (misordered when order
+# matters, or a different value entirely) must never become a PASS.
 
 _JSON_KEYWORD_MAP = {"true": "True", "false": "False", "null": "None"}
 
 # Matches EITHER a full quoted string (single or double, with backslash
 # escapes honoured) OR a bare JSON keyword. Quoted-string alternatives are
 # listed FIRST so the regex engine consumes an entire string literal in one
-# match — a `true`/`false`/`null` substring INSIDE quotes is swallowed as part
+# match, so a `true`/`false`/`null` substring INSIDE quotes is swallowed as part
 # of that match and never reaches the bare-keyword alternatives. Without this,
 # a naive `\bnull\b` substitution would rewrite the "null" inside the string
 # `"not null"` into `"not None"`, silently making two DIFFERENT string values
@@ -751,7 +748,7 @@ _JSON_TOKEN_RE = re.compile(
 
 def _translate_json_keywords(text: str) -> str:
     """Rewrite bare JSON ``true``/``false``/``null`` to Python's
-    ``True``/``False``/``None`` — but never inside a quoted string, so a
+    ``True``/``False``/``None``, but never inside a quoted string, so a
     keyword-shaped SUBSTRING of an actual string value is left alone (see
     :data:`_JSON_TOKEN_RE`)."""
 
@@ -804,12 +801,11 @@ def _values_equal(a, b, *, rel_tol: float = 1e-5, abs_tol: float = 1e-9) -> bool
     the numeric branch (``bool`` is a subclass of ``int`` in Python) so
     ``True`` never equals ``1``.
 
-    The float tolerance is applied ONLY when at least one side is a ``float``
-    — two ``int``s must compare EXACTLY equal. Regression: ``math.isclose``'s
-    default ``rel_tol=1e-5`` is scaled by the operands' magnitude, so two
-    large-but-different ints (``100001`` vs ``100000``, or two ~1e9 values a
-    LeetCode "wrong answer" would plausibly print) were being reported equal
-    even though no float was involved anywhere.
+    The float tolerance is applied ONLY when at least one side is a
+    ``float``; two ``int``s must compare EXACTLY equal. ``math.isclose``'s
+    ``rel_tol=1e-5`` is scaled by the operands' magnitude, so it would report
+    two large-but-different ints (``100001`` vs ``100000``, or two ~1e9 values
+    a LeetCode "wrong answer" could plausibly print) as equal.
     """
     if isinstance(a, bool) or isinstance(b, bool):
         return a is b
@@ -830,8 +826,8 @@ def _values_equal(a, b, *, rel_tol: float = 1e-5, abs_tol: float = 1e-9) -> bool
 
 def _any_order_allowed(problem_text: str) -> bool:
     """True only when the problem statement explicitly says the order of a
-    returned collection doesn't matter — the sole trigger for order-
-    insensitive comparison (A3 is deliberately conservative here)."""
+    returned collection doesn't matter. This is the sole trigger for
+    order-insensitive comparison, which is deliberately conservative."""
     return "any order" in (problem_text or "").lower()
 
 
@@ -857,7 +853,7 @@ def _outputs_match(got: str, want: str, problem_text: str = "") -> bool:
     """The verifier's comparison: exact-normalized first, then a tolerant
     structural comparison, then (only if the problem allows it) order-
     insensitive. Never raises."""
-    # Tier 1: exact, whitespace-normalized match — the fast, zero-risk path.
+    # Tier 1: exact, whitespace-normalized match (the fast, zero-risk path).
     if _normalize(got) == _normalize(want):
         return True
 
@@ -870,8 +866,8 @@ def _outputs_match(got: str, want: str, problem_text: str = "") -> bool:
         return True
 
     # Tier 3: order-insensitive, ONLY when the problem says so AND the two
-    # sides are the same multiset — never turns a genuinely wrong answer (a
-    # different value, or a misordered one when order matters) into a pass.
+    # sides are the same multiset, so a wrong answer (a different value, or a
+    # misordered one when order matters) never turns into a pass.
     return _any_order_allowed(problem_text) and _multiset_equal(val_got, val_want)
 
 
@@ -890,8 +886,8 @@ def verify_python(
     """Run ``code`` through the trusted bootstrap (A5; see
     :func:`_child_python`), feeding ``stdin_text`` on stdin,
     and compare captured stdout to ``expected_stdout`` via :func:`_outputs_match`
-    (exact-normalized, then tolerant structural, then — only when ``problem_text``
-    says "any order" — order-insensitive; see A3).
+    (exact-normalized, then tolerant structural, then order-insensitive only
+    when ``problem_text`` says "any order").
 
     Returns a :class:`VerifyResult` with status ``pass`` / ``fail`` / ``error``.
     Never raises. ``timeout`` is a float end-to-end (B5): a sub-second budget
@@ -899,7 +895,7 @@ def verify_python(
 
     Containment (the code is untrusted): on timeout the whole process TREE is
     killed (grandchildren included), and each output stream is capped at
-    ``_OUTPUT_LIMIT`` — exceeding it kills the tree and yields ``error``
+    ``_OUTPUT_LIMIT``; exceeding it kills the tree and yields ``error``
     ("output exceeded ... limit") since the capture is incomplete. On Windows
     the child also runs inside a Job Object capping memory and process count;
     POSIX gets the equivalent rlimits, set by the bootstrap before the go
@@ -915,7 +911,7 @@ def verify_python(
     pipe capture) by spawning a grandchild on purpose; production callers
     never pass it.
 
-    ``cancel`` (SP4 review M2): an optional ``threading.Event``. Once set,
+    ``cancel``: an optional ``threading.Event``. Once set,
     nothing new is spawned and a running child's tree is killed within one
     poll tick; the result is ``not_verified`` ("verification cancelled").
     """
@@ -924,11 +920,11 @@ def verify_python(
     try:
         run_dir = tempfile.mkdtemp(prefix=_RUN_DIR_PREFIX)
     except OSError as exc:
-        # 3A S14a: this sat outside the try below, so a temp dir that is full
-        # or unwritable RAISED despite "never raises" (verify_answer caught
-        # it, /attempt/test did not). Like the caps being unavailable, the
-        # sandbox could not be set up and no solution code ran: not_verified
-        # (which also stops the remaining samples), with the reason.
+        # A full or unwritable temp dir must not raise: callers such as
+        # /attempt/test rely on "never raises". Like the caps being
+        # unavailable, the sandbox could not be set up and no solution code
+        # ran: not_verified (which also stops the remaining samples), with
+        # the reason.
         logger.warning("sandbox: could not create a run directory: %s", exc)
         return VerifyResult(
             status="not_verified",
@@ -953,10 +949,10 @@ def verify_python(
 
         # Windows: create + configure the Job Object BEFORE the spawn. Every
         # slow step (one-time ctypes setup at process_tree import, job creation,
-        # limit configuration) happens while no child exists — an earlier
-        # revision did the ctypes setup lazily AFTER Popen, and the ~100ms
-        # first-call import cost let the first child of a fresh process run
-        # its untrusted code before the caps existed (cold-start race).
+        # limit configuration) happens while no child exists. Doing the ctypes
+        # setup lazily AFTER Popen would cost ~100ms on the first call, long
+        # enough for the first child of a fresh process to run untrusted code
+        # before the caps exist (a cold-start race).
         # None is normal on POSIX (rlimits instead); on Windows it means NO
         # memory / process caps, so we fail closed without spawning anything.
         job_handle = create_job_with_caps(
@@ -1001,12 +997,13 @@ def verify_python(
         waiter = _ReadyWaiter(proc.stdout)
 
         # A5 ordering: assign the job FIRST, and only then release the go byte.
-        # Until the bootstrap reads it, no untrusted line has run — so it no
-        # longer matters how long this thread takes to get here (the old
-        # "one syscall beats ~20ms of interpreter startup" argument lost to GIL
-        # contention: a busy parent let a 700 MB allocation escape 19/20 runs).
-        # I1: a failed assignment on Windows means no caps — kill the child
-        # while it is still parked at the handshake (fail closed).
+        # Until the bootstrap reads it, no untrusted line has run, so it does
+        # not matter how long this thread takes to get here. Racing the child
+        # instead (betting one syscall beats ~20ms of interpreter startup)
+        # loses to GIL contention: a busy parent can let a 700 MB allocation
+        # escape in 19 of 20 runs. A failed assignment on Windows means no
+        # caps: kill the child while it is still parked at the handshake
+        # (fail closed).
         assigned = assign_to_job(job_handle, proc)
         if os.name == "nt" and not assigned:
             logger.warning(
@@ -1017,7 +1014,7 @@ def verify_python(
             _discard_child(proc)
             return VerifyResult(status="not_verified", note=_CAPS_UNAVAILABLE_NOTE)
 
-        # M-1 / M-3: wait for the bootstrap's READY before sending go. An
+        # Wait for the bootstrap's READY before sending go. An
         # exit before READY is the bootstrap's own failure (bad config, caps
         # that could not be applied) and no solution code ran; once go is
         # sent, every exit code is the solution's, so it cannot fake one.
@@ -1035,7 +1032,7 @@ def verify_python(
         feeder.release()
         out_reader = _CappedReader(proc.stdout)
 
-        # Wait for exit / timeout / output overflow — whichever comes first.
+        # Wait for exit / timeout / output overflow, whichever comes first.
         # A short poll loop (not proc.wait(timeout)) so the overflow flag can
         # interrupt the wait; 50ms granularity is plenty for a verifier.
         timed_out = False
@@ -1052,8 +1049,8 @@ def verify_python(
             time.sleep(0.05)
 
         if proc.poll() is None:
-            # Timeout or overflow: kill the WHOLE tree — the untrusted code may
-            # have spawned grandchildren that a plain terminate() would leak —
+            # Timeout or overflow: kill the WHOLE tree (the untrusted code may
+            # have spawned grandchildren that a plain terminate() would leak),
             # then reap the direct child (kill() as a last resort).
             kill_process_tree(proc, group=os.name != "nt")
             try:
@@ -1063,7 +1060,7 @@ def verify_python(
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    pass  # unreapable zombie — readers are daemons, move on
+                    pass  # unreapable zombie; readers are daemons, move on
 
         # B6: the direct child is gone, but a straggler it spawned may still
         # hold a pipe open, so the readers would never see EOF. Give them a
@@ -1082,11 +1079,10 @@ def verify_python(
         err_reader.join(timeout=2)
 
         # Whatever the readers captured before the kill is still useful context
-        # for the user (and it's already there — the readers keep draining
-        # right up to the kill) — grab it regardless of the timed-out branch
-        # below (B4/#4: a timeout used to report bare "timed out after Xs"
-        # with no stdin/expected/partial-output, which the saved .md then
-        # couldn't show either).
+        # for the user (the readers keep draining right up to the kill), so
+        # grab it before the timed-out branch below. B4: a timeout carries its
+        # stdin, expected and partial output, not just "timed out after Xs",
+        # so the saved .md can show them.
         stdout = out_reader.text()
         stderr = err_reader.text()
 
@@ -1155,8 +1151,8 @@ def verify_python(
         if feeder is not None:
             feeder.abort()  # no-op once released; never leaves the thread parked
         # KILL_ON_JOB_CLOSE: closing the job handle terminates anything still
-        # alive inside the job — the second kill mechanism after
-        # kill_process_tree — and runs BEFORE rmtree so no straggler can hold
+        # alive inside the job (the second kill mechanism after
+        # kill_process_tree) and runs BEFORE rmtree so no straggler can hold
         # files in run_dir open. The teardown is asynchronous, so the delete
         # retries with backoff (B6).
         close_job(job_handle)
@@ -1172,7 +1168,7 @@ def verify_python(
 # line. ``Explanation:`` (and the next ``Example``/``Constraints``) terminate the
 # Output capture so we don't swallow prose. The leading char class also allows
 # markdown emphasis wrappers (``*``/``_``/`` ` ``) before the label itself, e.g.
-# ``**Input:**`` or `` `Input:` `` (A4) — the label's OWN closing wrapper (the
+# ``**Input:**`` or `` `Input:` `` (A4). The label's OWN closing wrapper (the
 # ``**`` right after the colon) lands inside the captured value instead, which
 # is why :func:`_strip_markdown_noise` is applied to every captured value below.
 _INPUT_RE = re.compile(
@@ -1184,7 +1180,7 @@ _OUTPUT_RE = re.compile(
 # Section markers that terminate the search for an ``Output:`` after an
 # ``Input:``. A multi-line Input block (e.g. an array printed across several
 # lines) can push Output well past a small fixed window, so instead of a fixed
-# line count we scan forward until the Output — or bail at the next section so
+# line count we scan forward until the Output, or bail at the next section so
 # we never swallow prose or the following example's data.
 _TERMINAL_RE = re.compile(
     r"(?im)^[ \t>*_`-]*(?:explanation|example|constraints?|follow[ -]?up|note)\b"
@@ -1192,7 +1188,7 @@ _TERMINAL_RE = re.compile(
 
 # Strips a leading/trailing run of markdown emphasis wrappers (bold ``**``,
 # italic ``_``, inline code `` ` ``) and the whitespace they leave behind, e.g.
-# from ``**Input:** value`` or `` `Output:` ``value``` `` (A4) — otherwise the
+# from ``**Input:** value`` or `` `Output:` ``value``` `` (A4). Otherwise the
 # label's own closing wrapper leaks into the synthesized stdin/expected and
 # false-FAILs an otherwise-correct solution.
 _MD_WRAP_RE = re.compile(r"^[\s`*_]+|[\s`*_]+$")
@@ -1201,8 +1197,8 @@ _MD_WRAP_RE = re.compile(r"^[\s`*_]+|[\s`*_]+$")
 # across several lines under a bare ``Input:``): only markdown wrap characters
 # are stripped, never LEADING whitespace, since a body line's indentation can
 # be meaningful data (a nested list's own formatting) rather than incidental
-# markdown padding (#11 — the old ``_MD_WRAP_RE`` stripped leading whitespace
-# on every body line via its ``^[\s...]+`` half, silently de-indenting it).
+# markdown padding (``_MD_WRAP_RE``'s ``^[\s...]+`` half would strip leading
+# whitespace on every body line, silently de-indenting it).
 _MD_WRAP_LEADING_NO_INDENT_RE = re.compile(r"^[`*_]+")
 _MD_WRAP_TRAILING_RE = re.compile(r"[\s`*_]+$")
 
@@ -1212,8 +1208,8 @@ def _strip_markdown_noise(text: str) -> str:
 
 
 def _strip_markdown_noise_keep_indent(text: str) -> str:
-    """Like :func:`_strip_markdown_noise` but preserves leading whitespace
-    (#11): strips leading markdown wrap characters and trailing
+    """Like :func:`_strip_markdown_noise` but preserves leading whitespace:
+    strips leading markdown wrap characters and trailing
     whitespace/markdown wrap characters only."""
     text = _MD_WRAP_LEADING_NO_INDENT_RE.sub("", text or "")
     return _MD_WRAP_TRAILING_RE.sub("", text)
@@ -1232,14 +1228,14 @@ def parse_samples(problem_text: str) -> list:
     ``nums = [2,7,11,15], target = 9``) on its own line, and expected stdout is
     the raw text after ``Output:`` (e.g. ``[0,1]``). The generated Python driver
     is instructed (see ``prompts.py``) to read that exact line format from stdin
-    and print the result in that exact format — so this is a literal round-trip.
+    and print the result in that exact format, so this is a literal round-trip.
 
     Bare labels (data on the following lines) are handled too: an empty
     remainder after ``Input:`` takes the lines up to the ``Output:`` as the
     stdin body (verbatim, surrounding blank lines trimmed), and an empty
     remainder after ``Output:`` takes the following lines up to a blank line /
     the next section / the next ``Input:`` as the expected stdout. A pair where
-    either side is *still* empty is dropped — a bogus ``('\\n', '')`` sample
+    either side is *still* empty is dropped: a bogus ``('\\n', '')`` sample
     would false-FAIL a correct solution, whereas no sample degrades to
     "not auto-verified".
     """
@@ -1256,8 +1252,8 @@ def parse_samples(problem_text: str) -> list:
             i += 1
             continue
         stdin_val = _strip_markdown_noise(m_in.group(1))
-        # Scan forward for the matching Output:. No fixed window — a multi-line
-        # Input block can push Output arbitrarily far down — but bail at a
+        # Scan forward for the matching Output:. No fixed window (a multi-line
+        # Input block can push Output arbitrarily far down), but bail at a
         # section marker (Explanation/Example/Constraints/...) or another Input:,
         # so we never cross into prose or the next example.
         out_val = None
@@ -1276,9 +1272,9 @@ def parse_samples(problem_text: str) -> list:
             i += 1
             continue
 
-        # Bare ``Input:`` label — the data sits on the lines between it and the
+        # Bare ``Input:`` label: the data sits on the lines between it and the
         # ``Output:``. Take that body verbatim (indentation may be meaningful,
-        # #11 — e.g. a 2-D grid's own row formatting), trimming only
+        # e.g. a 2-D grid's own row formatting), trimming only
         # surrounding blank lines and markdown wrap noise, never a line's own
         # leading whitespace.
         if not stdin_val:
@@ -1289,7 +1285,7 @@ def parse_samples(problem_text: str) -> list:
                 body.pop()
             stdin_val = "\n".join(_strip_markdown_noise_keep_indent(ln) for ln in body)
 
-        # Bare ``Output:`` label — the value sits on the following line(s), up
+        # Bare ``Output:`` label: the value sits on the following line(s), up
         # to a blank line, the next section, or the next ``Input:``. Each line
         # is stripped, mirroring the single-line ``.strip()`` convention.
         next_i = j + 1
@@ -1309,7 +1305,7 @@ def parse_samples(problem_text: str) -> list:
 
         if stdin_val and out_val:
             samples.append(Sample(stdin=stdin_val + "\n", expected_stdout=out_val))
-        # else: even after the multi-line capture one side is still empty —
+        # else: even after the multi-line capture one side is still empty, so
         # skip the pair rather than emit a bogus sample. Either way, resume
         # past everything this pair consumed (no Input: line is in that span;
         # both scans bail at _INPUT_RE).
@@ -1337,19 +1333,19 @@ def verify_answer(
 ) -> VerifyResult:
     """Verify a generated solution against the problem's sample I/O.
 
-    * **python** — first-class: parse samples from ``problem_text``, run ``code``
+    * **python** (first-class): parse samples from ``problem_text``, run ``code``
       against each, and aggregate to ``pass`` (all matched) / ``error`` (every
       sample that ran crashed) / ``fail`` (anything else - see
       :func:`_verify_python_samples`). If no samples parse, status is
       ``not_verified`` ("no sample I/O found").
-    * **cpp / java** — only checks the compiler is on PATH (``g++`` / ``javac``).
+    * **cpp / java**: only checks the compiler is on PATH (``g++`` / ``javac``).
       Absent -> ``not_verified`` ("no <compiler> on PATH..."). Present but
       auto-run is still out of MVP scope -> ``not_verified`` (compiler found, but
       auto-run unsupported). Either way it's "not auto-verified", never a fail.
 
     Never raises: any unexpected failure degrades to ``not_verified`` so a
     verifier bug can't break the study run. ``cancel`` is passed through to
-    :func:`verify_python` (SP4 review M2). ``progress`` (SP5 D11), when given,
+    :func:`verify_python`. ``progress`` (D11), when given,
     is called as ``progress(i, n)`` before sample ``i`` of ``n`` runs; it is
     display-only, so an exception from it is ignored.
     """
@@ -1410,16 +1406,16 @@ def _verify_python_samples(
 ) -> VerifyResult:
     """Run ``code`` against each parsed sample and aggregate the verdict.
 
-    Aggregation keeps three verdicts — ``pass`` (all matched), ``error``
-    (every sample that ran crashed - none passed, none answered wrong) and
+    Aggregation keeps three verdicts: ``pass`` (all matched), ``error``
+    (every sample that ran crashed; none passed, none answered wrong) and
     ``fail`` (anything else: a wrong answer, or a crash alongside a pass).
-    3A S8: so a run that passes some samples and crashes on others is
-    ``fail`` - the same rule as the re-attempt "Test my code" summary
-    (``practice.run_cases``) - and the note names the errored count
+    So a run that passes some samples and crashes on others is ``fail``,
+    the same rule as the Re-attempt "Test my code" summary
+    (``practice.run_cases``), and the note names the errored count
     (``"X/Y passed, Z errored"``), so a crash is never silently folded into
     a plain wrong-answer verdict. ``timeout`` is passed straight through as
-    a float (B5) — no truncating ``int()`` cast, so a sub-second budget like
-    ``0.5`` is honoured instead of becoming ``0``.
+    a float (B5) with no truncating ``int()`` cast, so a sub-second budget
+    like ``0.5`` is honoured instead of becoming ``0``.
     """
     total = len(samples)
     passed = 0
@@ -1443,8 +1439,8 @@ def _verify_python_samples(
             # The sandbox refused to run it (caps unavailable): later samples
             # would hit the same wall, so stop here. With nothing failed so
             # far the whole run is unverified, never a "0/N passed" fail; but
-            # an earlier genuine fail / error still stands (M-1): a wrong
-            # answer is never hidden behind "not verified".
+            # an earlier fail / error still stands: a wrong answer is never
+            # hidden behind "not verified".
             if passed == len(detail):
                 return VerifyResult(
                     status="not_verified", note=r.note, samples_total=total, detail=detail
@@ -1452,11 +1448,11 @@ def _verify_python_samples(
             unverified_note = r.note
             break
         # B4: seed the entry with the sample's own stdin/expected AND the
-        # verifier's note (the timeout/crash reason) up front — some error
+        # verifier's note (the timeout/crash reason) up front. Some error
         # paths (timeout, "could not run", ...) carry a `note` but no
-        # `detail`, and the note was previously dropped entirely, leaving the
-        # user with "errored 1/1" and no explanation. `r.detail`, when
-        # present, still overrides with the actual captured stdout/stderr.
+        # `detail`; without the note the user would see "errored 1/1" and no
+        # explanation. `r.detail`, when present, still overrides with the
+        # actual captured stdout/stderr.
         entry = {
             "sample": idx,
             "status": r.status,
@@ -1476,11 +1472,11 @@ def _verify_python_samples(
     if passed == total:
         status, note = "pass", f"all {total} sample(s) passed"
     elif errored and passed == 0 and errored == ran:
-        # every non-passing sample crashed — a pure error, not a wrong answer
+        # every non-passing sample crashed: a pure error, not a wrong answer
         status, note = "error", f"code errored on {errored}/{total} sample(s)"
     elif errored:
         # mixed: crashes alongside passes and/or wrong answers - surface both
-        # counts (3A S8: a pass + a crash is "fail", see the docstring)
+        # counts (a pass + a crash is "fail", see the docstring)
         status, note = "fail", f"{passed}/{total} sample(s) passed, {errored} errored"
     else:
         status, note = "fail", f"{passed}/{total} sample(s) passed"

@@ -4,18 +4,18 @@ Why this module exists: two places in LeetCoach must kill a child process AND
 everything it spawned, and a plain ``proc.terminate()`` cannot do that on
 Windows:
 
-* ``claude_cli`` — the `claude` binary is typically an npm shim (``claude.cmd``
+* ``claude_cli``: the `claude` binary is typically an npm shim (``claude.cmd``
   launching node as a child), so terminating the shim leaks the node process
   that is doing the actual work (and burning subscription usage).
-* ``sandbox`` — the Answer-mode verifier runs **untrusted, LLM-generated**
-  code; on a timeout the direct child dies but any grandchildren it spawned
-  would survive and keep running on the host.
+* ``sandbox``: the Answer-mode verifier runs untrusted, LLM-generated code;
+  on a timeout the direct child dies but any grandchildren it spawned would
+  survive and keep running on the host.
 
 Both need the same primitive, so it lives here rather than being copy-pasted.
 
-The sandbox additionally needs *resource caps* for its untrusted child. POSIX
-gets rlimits (set by ``sandbox_bootstrap.apply_rlimits``); the Windows analogue is a **Job
-Object** (:func:`create_job_with_caps` pre-spawn, :func:`assign_to_job` right
+The sandbox also needs resource caps for its untrusted child. POSIX gets
+rlimits (set by ``sandbox_bootstrap.apply_rlimits``); the Windows analogue is a
+Job Object (:func:`create_job_with_caps` pre-spawn, :func:`assign_to_job` right
 after spawn, :func:`close_job` in cleanup), implemented via ctypes so no new
 dependency (pywin32/psutil) is pulled in.
 """
@@ -29,7 +29,7 @@ import sys
 
 
 def _taskkill_exe() -> str:
-    """``%SystemRoot%\\System32\\taskkill.exe`` (3A C14). A bare ``taskkill``
+    """``%SystemRoot%\\System32\\taskkill.exe``. A bare ``taskkill``
     goes through CreateProcess's search order, which tries the application
     directory and the current directory before System32 - a planted
     ``taskkill.exe`` there would run instead. The bare name is only the
@@ -53,7 +53,7 @@ def kill_process_tree(proc: subprocess.Popen[str], *, group: bool = False) -> bo
 
     ``group=True`` (C5, POSIX only) is for a child spawned with
     ``start_new_session=True``: its pid is also its process-group id, so
-    ``killpg`` takes down every descendant still in that group — including
+    ``killpg`` takes down every descendant still in that group, including
     ones that outlived the direct child. Only pass it for a child you started
     in its own session; otherwise the pid is not a group you own.
     """
@@ -67,13 +67,13 @@ def kill_process_tree(proc: subprocess.Popen[str], *, group: bool = False) -> bo
             )
             return True
         except (OSError, subprocess.TimeoutExpired):
-            pass  # taskkill missing/unusable/hung — fall through to terminate()
+            pass  # taskkill missing/unusable/hung: fall through to terminate()
     elif group and hasattr(os, "killpg"):
         try:
             os.killpg(proc.pid, signal.SIGKILL)
             return True
         except (OSError, AttributeError):
-            pass  # group already gone / not ours — fall through to terminate()
+            pass  # group already gone / not ours: fall through to terminate()
     try:
         proc.terminate()
     except OSError:
@@ -85,7 +85,7 @@ def child_exited_unreaped(pid: int) -> bool | None:
     """POSIX: has our child ``pid`` exited? Asked WITHOUT reaping it
     (``waitid`` + ``WNOWAIT``), so its pid - and, for a child started with
     ``start_new_session``, its process-group id - stays reserved until the
-    caller reaps it (3A C3).
+    caller reaps it.
 
     ``True`` once it exited (a zombie), ``False`` while it runs, ``None`` when
     this cannot be told without reaping: no ``waitid``/``WNOWAIT`` (Windows,
@@ -104,7 +104,7 @@ def child_exited_unreaped(pid: int) -> bool | None:
 
 
 def kill_process_group(pgid: int) -> bool:
-    """POSIX: SIGKILL every process in group ``pgid`` (3A C3). Only for the
+    """POSIX: SIGKILL every process in group ``pgid``. Only for the
     group of a child you started with ``start_new_session`` and whose pid is
     still reserved (alive, an unreaped zombie, or a group with members left).
     True if the signal was sent; a group that is already gone, or one we may
@@ -119,18 +119,17 @@ def kill_process_group(pgid: int) -> bool:
     return True
 
 
-# --- Windows Job Object caps (audit6 P1-2 step 2) --------------------------
+# --- Windows Job Object caps ------------------------------------------------
 #
-# ALL ctypes machinery — imports, structure definitions, kernel32 bindings —
-# is set up at MODULE IMPORT time, not lazily inside the helpers. This is
-# load-bearing, not style: the first in-process `import ctypes` + WinDLL
-# binding costs ~100ms, and an earlier revision paid it AFTER Popen, inside
-# the assignment helper — so the FIRST child of a fresh process (exactly the
-# Flask app's first verification) finished interpreter startup and ran its
-# untrusted code before any cap existed (cold-start race, caught at
-# checkpoint verification; a warm pytest process never saw it because earlier
-# tests pre-import ctypes). Import-time setup pays the cost long before any
-# child exists, and the split into create_job_with_caps (pre-spawn) /
+# ALL ctypes machinery (imports, structure definitions, kernel32 bindings) is
+# set up at MODULE IMPORT time, not lazily inside the helpers, and the caps
+# depend on it. The first in-process `import ctypes` + WinDLL binding costs
+# ~100ms. Paid lazily, AFTER Popen inside the assignment helper, it would let
+# the FIRST child of a fresh process (exactly the Flask app's first
+# verification) finish interpreter startup and run its untrusted code before
+# any cap existed. A warm pytest process hides that cold-start race, because
+# earlier tests pre-import ctypes. Import-time setup pays the cost long before
+# any child exists, and the split into create_job_with_caps (pre-spawn) /
 # assign_to_job (post-spawn) leaves exactly ONE syscall after the spawn.
 # A setup failure here must not break the app import: it degrades to
 # _job_api = None and the helpers no-op (uncapped run, never an error).
@@ -207,23 +206,23 @@ def create_job_with_caps(
     memory_bytes: int = 512 * 1024 * 1024,
     active_processes: int = 16,
 ):
-    """Windows only: create and fully configure an anonymous Job Object —
-    call this BEFORE spawning the child — carrying three limits:
+    """Windows only: create and fully configure an anonymous Job Object
+    (call this BEFORE spawning the child) carrying three limits:
 
-    * ``JOB_OBJECT_LIMIT_PROCESS_MEMORY`` — per-process commit cap
+    * ``JOB_OBJECT_LIMIT_PROCESS_MEMORY``: per-process commit cap
       (``memory_bytes``), the Windows analogue of the POSIX ``RLIMIT_AS``;
-    * ``JOB_OBJECT_LIMIT_ACTIVE_PROCESS`` — at most ``active_processes``
+    * ``JOB_OBJECT_LIMIT_ACTIVE_PROCESS``: at most ``active_processes``
       simultaneous processes in the job (a fork bomb hits a wall instead of
       the host);
-    * ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` — closing the returned handle
+    * ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE``: closing the returned handle
       terminates everything still inside the job, so :func:`close_job` in the
-      caller's ``finally`` is an airtight second kill mechanism alongside
+      caller's ``finally`` is a second kill mechanism alongside
       :func:`kill_process_tree`.
 
     Creating + configuring pre-spawn means every slow step happens while no
     child exists; the only post-spawn work is the single syscall in
-    :func:`assign_to_job`. Returns the job HANDLE — keep it alive for the
-    child's whole lifetime, then hand it to :func:`close_job` — or ``None``
+    :func:`assign_to_job`. Returns the job HANDLE (keep it alive for the
+    child's whole lifetime, then hand it to :func:`close_job`), or ``None``
     on POSIX / when any job API fails (pre-Windows-8 can't nest jobs;
     unexpected environments), which means "proceed without caps": a cap is
     defense-in-depth and must never break a verification run. Never raises.
@@ -232,14 +231,14 @@ def create_job_with_caps(
 
 
 def create_kill_on_close_job():
-    """Windows only: a Job Object with ONLY ``KILL_ON_JOB_CLOSE`` — no memory
+    """Windows only: a Job Object with ONLY ``KILL_ON_JOB_CLOSE``, no memory
     or process-count caps (A6).
 
     For the ``claude`` CLI: it is trusted, needs far more than the sandbox's
     512 MB, and spawns helpers, so caps would break it. What it does need is a
     kill switch that reaches descendants even after the direct child exited
     (``taskkill /T`` walks parent pids, so it cannot find a grandchild whose
-    parent is already gone — e.g. one still holding the stdout pipe open).
+    parent is already gone, e.g. one still holding the stdout pipe open).
     :func:`terminate_job` / :func:`close_job` provide that. Same lifecycle and
     graceful-degradation contract as :func:`create_job_with_caps`: ``None`` on
     POSIX or any API failure, never raises.
@@ -285,14 +284,14 @@ def _create_job(*, memory_bytes, active_processes):
 def assign_to_job(job_handle, proc: subprocess.Popen[str]) -> bool:
     """Assign a just-spawned ``proc`` to a job from :func:`create_job_with_caps`.
 
-    One ``AssignProcessToJobObject`` syscall — everything slow (the one-time
+    One ``AssignProcessToJobObject`` syscall: everything slow (the one-time
     ctypes setup, job creation, limit configuration) already happened at
-    module import / pre-spawn. The call itself is NOT a race guard: an
-    earlier revision relied on "one syscall beats ~20ms of interpreter
-    startup", and GIL contention in the parent (other busy Python threads
-    delay this thread several switch intervals) let a 700 MB allocation
-    escape the cap in 19/20 runs. The sandbox therefore makes the child wait
-    for a go byte that is only sent after this returns (SP3 A5, see
+    module import / pre-spawn. The call itself is NOT a race guard. "One
+    syscall beats ~20ms of interpreter startup" does not hold under GIL
+    contention in the parent (other busy Python threads delay this thread
+    several switch intervals); in testing, a 700 MB allocation escaped the
+    cap in 19 of 20 runs. The sandbox therefore makes the child wait for a
+    go byte that is only sent after this returns (A5, see
     ``sandbox_bootstrap.py``), and spawns the real interpreter rather than a
     venv launcher stub whose grandchild would start outside the job.
     ``CREATE_SUSPENDED`` is still avoided: resuming needs the main thread id
@@ -307,7 +306,7 @@ def assign_to_job(job_handle, proc: subprocess.Popen[str]) -> bool:
         return False
     try:
         # CPython's Windows Popen keeps the CreateProcess handle (opened with
-        # PROCESS_ALL_ACCESS) in `_handle` — private but stable across
+        # PROCESS_ALL_ACCESS) in `_handle`: private but stable across
         # versions, and the graceful-degradation contract covers us if it
         # ever moves.
         proc_handle = getattr(proc, "_handle", None)

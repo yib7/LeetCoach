@@ -2,36 +2,32 @@
 
 These knobs are the only machine-specific settings the app needs:
 
-- ``LEETCOACH_MODEL``       — Claude model alias/id passed to ``claude --model``
-                              (default ``opus``, an alias the CLI resolves to the
-                              latest Opus; override with ``fable`` for the most
-                              capable model, or a smaller/faster alias like
-                              ``sonnet`` to save your subscription budget).
-- ``LEETCOACH_CLASSIFIER_MODEL`` — model for the short classification call (default
-                              ``haiku`` — classifying a problem is trivial, so the
-                              cheapest model saves budget on every run).
-- ``LEETCOACH_QUICK_ASK_MODEL`` — model for the Quick Ask lookup (default
-                              ``haiku`` — a syntax/stdlib question is a trivial
-                              lookup, so the cheapest model keeps the feature
-                              near-free and spares the subscription budget).
-- ``LEETCOACH_CLAUDE_BIN``  — name/path of the ``claude`` executable (default
-                              ``claude``; set an absolute path if it is not on PATH).
-- ``LEETCOACH_OUTPUT_DIR``  — where the study library is written (default: the
-                              ``output`` directory at the repo root, so the
-                              library never forks when the app is launched from
-                              a different working directory; a relative override
-                              stays relative — that is the user's explicit choice).
-- ``LEETCOACH_RUN_TIMEOUT`` — wall-clock cap in seconds for a single ``claude`` run
-                              (default ``600``); a hung CLI is killed after this long.
-- ``LEETCOACH_VERIFY_TIMEOUT`` — wall-clock cap in seconds for each Answer-mode
-                              sample-verification subprocess (default ``10``); a
-                              wedged solution is tree-killed after this long.
-- ``LEETCOACH_CLAUDE_CWD``  — neutral working directory every ``claude`` call runs
-                              in (A7), so the CLI never picks up this repo's
-                              ``CLAUDE.md``/settings and its saved sessions land
-                              in their own project bucket (default
-                              ``%LOCALAPPDATA%\\LeetCoach\\claude-cwd`` on Windows,
-                              ``~/.local/share/leetcoach/claude-cwd`` elsewhere).
+- ``LEETCOACH_MODEL``: Claude model alias/id passed to ``claude --model``
+  (default ``opus``, an alias the CLI resolves to the latest Opus; override
+  with ``fable`` for the most capable model, or a smaller/faster alias like
+  ``sonnet`` to save your subscription budget).
+- ``LEETCOACH_CLASSIFIER_MODEL``: model for the short classification call
+  (default ``haiku``; classifying a problem is trivial, so the cheapest model
+  saves budget on every run).
+- ``LEETCOACH_QUICK_ASK_MODEL``: model for the Quick Ask lookup (default
+  ``haiku``; a syntax/stdlib question is a trivial lookup, so the cheapest
+  model keeps the feature near-free and spares the subscription budget).
+- ``LEETCOACH_CLAUDE_BIN``: name/path of the ``claude`` executable (default
+  ``claude``; set an absolute path if it is not on PATH).
+- ``LEETCOACH_OUTPUT_DIR``: where the study library is written (default: the
+  ``output`` directory at the repo root, so the library never forks when the
+  app is launched from a different working directory). A relative override
+  stays relative, since the user chose it explicitly.
+- ``LEETCOACH_RUN_TIMEOUT``: wall-clock cap in seconds for a single ``claude``
+  run (default ``600``); a hung CLI is killed after this long.
+- ``LEETCOACH_VERIFY_TIMEOUT``: wall-clock cap in seconds for each Answer-mode
+  sample-verification subprocess (default ``10``); a wedged solution is
+  tree-killed after this long.
+- ``LEETCOACH_CLAUDE_CWD``: neutral working directory every ``claude`` call
+  runs in (A7), so the CLI never picks up this repo's ``CLAUDE.md``/settings
+  and its saved sessions land in their own project bucket (default
+  ``%LOCALAPPDATA%\\LeetCoach\\claude-cwd`` on Windows,
+  ``~/.local/share/leetcoach/claude-cwd`` elsewhere).
 
 Reading env at *call time* (not import time) keeps tests able to monkeypatch the
 environment without re-importing the module.
@@ -56,35 +52,34 @@ DEFAULT_CLAUDE_BIN = "claude"
 # The two filesystem anchors every default path is built from. PACKAGE_DIR is
 # this package (its static/ and templates/ ship inside it); REPO_ROOT is the
 # checkout that holds it, where the user's own files live: the `.env` and the
-# default `output/` study library. They stayed at the repo root when the code
-# moved into leetcoach/, so an existing library and .env keep working with no
-# migration; resolve them from here, never from a `../..` chain.
+# default `output/` study library. Both live outside the package, at the repo
+# root, so existing libraries and `.env` files work without a migration;
+# resolve them from here, never from a `../..` chain.
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_DIR.parent
 # The project `.env` (the model picker writes it; the app loads it at import).
 DOTENV_FILE = REPO_ROOT / ".env"
-# Anchored to the repo root (audit6 P2-10): a CWD-relative default would let
-# `flask run` (or any launch from another directory) silently fork the study
-# library and its topic index.
+# Anchored to the repo root: a CWD-relative default would let `flask run` (or
+# any launch from another directory) silently fork the study library and its
+# topic index.
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "output"
-DEFAULT_RUN_TIMEOUT = 600.0  # seconds; generous — Opus study material can be slow
+DEFAULT_RUN_TIMEOUT = 600.0  # seconds; generous, since Opus study material can be slow
 DEFAULT_VERIFY_TIMEOUT = 10.0  # seconds; per sample-verification subprocess
 
-# Upper bound accepted for either timeout knob (B5): 24h is already an absurd
-# wait for a local tool. A value past it is CLAMPED to this ceiling (#6) rather
-# than silently discarded in favor of the (much shorter) default — a user who
-# deliberately asked for a long-running verify/run budget still gets the
-# longest sane wait, not a surprise 10s/600s instead. `inf`/NaN/non-positive
-# values are still rejected outright and fall back to the default: an infinite
-# verify timeout would defeat the whole point of the sandbox's containment
-# watchdog, hanging forever instead of tree-killing the child.
+# Upper bound accepted for either timeout knob (B5). 24h is already an absurd
+# wait for a local tool. A value past it is clamped to this ceiling rather than
+# replaced by the much shorter default, so a user who asked for a long run or
+# verify budget gets the longest sane wait instead of a surprise 10s/600s.
+# `inf`, NaN and non-positive values are rejected and fall back to the default:
+# an infinite verify timeout would defeat the sandbox's containment watchdog,
+# which would hang forever instead of tree-killing the child.
 MAX_TIMEOUT_SECONDS = 86400.0
 
 
 def _env_str(name: str, default: str) -> str:
     """``os.environ[name]`` stripped, or ``default`` when it is unset, empty
-    or blank (3A C10): ``LEETCOACH_MODEL=`` in ``.env`` used to reach argv as
-    ``--model ""`` (and an empty binary name could not be run at all)."""
+    or blank. Without the fallback, ``LEETCOACH_MODEL=`` in ``.env`` would
+    reach argv as ``--model ""``, and an empty binary name cannot run at all."""
     return (os.environ.get(name) or "").strip() or default
 
 
@@ -94,8 +89,8 @@ def model() -> str:
 
 
 # The generic aliases the in-app model picker offers. Aliases (not pinned ids)
-# so each always resolves to the CLI's current opus/sonnet/haiku — nothing to
-# maintain as new versions ship. Anything reaching `--model` is allowlisted to
+# so each always resolves to the CLI's current opus/sonnet/haiku, with nothing
+# to maintain as new versions ship. Anything reaching `--model` is allowlisted to
 # one of these; an explicit id like ``claude-opus-5`` is still settable by hand
 # in ``.env``.
 ALLOWED_MODEL_ALIASES = ("fable", "opus", "sonnet", "haiku")
@@ -129,9 +124,9 @@ def model_alias() -> str:
 
     Maps the active :func:`model` id to one of :data:`ALLOWED_MODEL_ALIASES` by
     substring (so both the default ``opus`` alias and a pinned
-    ``claude-opus-5-5`` highlight ``opus``). Returns
-    ``""`` when the configured model matches no alias — the picker then shows no
-    selection rather than a wrong one.
+    ``claude-opus-5-5`` highlight ``opus``). Returns ``""`` when the
+    configured model matches no alias; the picker then shows no selection
+    rather than a wrong one.
     """
     current = model().lower()
     for alias in ALLOWED_MODEL_ALIASES:
@@ -141,7 +136,7 @@ def model_alias() -> str:
 
 
 def resolve_run_model(alias: str) -> str:
-    """The ``--model`` value for a per-run picker ``alias`` (SP4 review I1).
+    """The ``--model`` value for a per-run picker ``alias``.
 
     When ``alias`` is the picker button the configured model already maps to
     (:func:`model_alias`), the configured value itself is used, so a pinned id
@@ -155,10 +150,10 @@ def resolve_run_model(alias: str) -> str:
 
 
 def classifier_model() -> str:
-    """Model id/alias for the classifier's short Claude call (audit6 P2-4).
+    """Model id/alias for the classifier's short Claude call.
 
-    Separate from :func:`model` because classification is a trivial task — a
-    tiny JSON object naming the technique — so it defaults to the cheapest
+    Separate from :func:`model` because classification is a trivial task (a
+    tiny JSON object naming the technique), so it defaults to the cheapest
     alias (``haiku``) regardless of which model produces the study material.
     """
     return _env_str("LEETCOACH_CLASSIFIER_MODEL", DEFAULT_CLASSIFIER_MODEL)
@@ -181,17 +176,17 @@ def claude_bin() -> str:
 
 
 def _clamped_timeout(env_var: str, default: float) -> float:
-    """Shared parsing for both timeout knobs (B5/#6): a float in
+    """Shared parsing for both timeout knobs (B5): a float in
     ``(0, MAX_TIMEOUT_SECONDS]``, clamping anything above the ceiling down to
     it, else ``default``.
 
     Rejects (falls back to ``default``) everything that could defeat a
     wall-clock containment watchdog: an unparseable value, zero, negatives,
     ``NaN`` (``NaN > 0`` is ``False``, catching it in the same comparison), and
-    ``inf``/``-inf`` (explicitly checked — ``inf > 0`` is otherwise ``True``).
-    A finite value past the 24h ceiling is CLAMPED to the ceiling instead of
-    being discarded (#6) — a deliberately long timeout still gets the longest
-    sane wait rather than silently reverting to the (much shorter) default.
+    ``inf``/``-inf`` (checked explicitly, because ``inf > 0`` is ``True``).
+    A finite value past the 24h ceiling is clamped to the ceiling instead of
+    being discarded, so a deliberately long timeout gets the longest sane wait
+    rather than silently reverting to the much shorter default.
     """
     raw = os.environ.get(env_var, "")
     try:
@@ -235,8 +230,8 @@ def verify_timeout() -> float:
 def output_dir() -> Path:
     """Root directory of the generated study library (created lazily elsewhere).
 
-    Defaults to the ``output`` directory next to this file — absolute, so the
-    library does not depend on the process's CWD. An explicit
+    Defaults to :data:`DEFAULT_OUTPUT_DIR` (``output/`` at the repo root), an
+    absolute path, so the library does not depend on the process's CWD. An explicit
     ``LEETCOACH_OUTPUT_DIR`` override is used verbatim (relative stays relative).
     """
     override = os.environ.get("LEETCOACH_OUTPUT_DIR")
@@ -266,7 +261,7 @@ def default_claude_cwd(*, os_name=None, env=None, home=None) -> Path:
     ``~/.local/share/leetcoach/claude-cwd``. The parameters exist only so tests
     can exercise both branches on one machine.
 
-    The home directory is looked up only on a branch that needs it (3A C5):
+    The home directory is looked up only on a branch that needs it:
     ``Path.home()`` raises ``RuntimeError`` when no home variable is set, and
     a Windows box with ``LOCALAPPDATA`` must not trip over that. It can still
     raise when the home is needed and unresolvable; ``ensure_claude_cwd``
@@ -287,15 +282,15 @@ def default_claude_cwd(*, os_name=None, env=None, home=None) -> Path:
 def claude_cwd() -> Path:
     """Neutral working directory for every ``claude`` subprocess (A7).
 
-    Running ``claude -p`` in the repo made it load this project's
-    ``CLAUDE.md``/``.claude`` settings and filed every run under the repo's
+    Run in the repo, ``claude -p`` would load this project's
+    ``CLAUDE.md``/``.claude`` settings and file every run under the repo's
     session history. A dedicated directory keeps the CLI's view of the world
     empty and gives LeetCoach's persisted sessions (needed for ``--resume``)
     their own project bucket. Override with ``LEETCOACH_CLAUDE_CWD``; the
     directory is created on demand by ``claude_cli.ensure_claude_cwd``.
 
-    The override is ``~``-expanded and made absolute (3A C7): ``~/lc`` from
-    ``.env`` used to create a literal ``~`` folder under the launch directory,
+    The override is ``~``-expanded and made absolute. Otherwise ``~/lc`` from
+    ``.env`` would create a literal ``~`` folder under the launch directory,
     often inside this repo, whose ``CLAUDE.md`` the CLI would then load. If
     either step fails (no resolvable home) the value is used as written.
     """
@@ -342,7 +337,7 @@ def _quote_closes(text: str, quote: str) -> int:
 
 
 def _env_entries(text: str) -> list[tuple[str | None, list[str]]]:
-    """Split dotenv ``text`` into ``(key, lines)`` entries (SP4 review M3).
+    """Split dotenv ``text`` into ``(key, lines)`` entries.
 
     Lines are split on ``"\n"`` only (a trailing ``"\r"`` is dropped) -
     ``str.splitlines`` would also break on U+2028, ``\x85``, form feed and
@@ -407,7 +402,7 @@ def read_env_text(path) -> str:
     """The text of the dotenv file at ``path``, decoded per
     :func:`_decode_env_bytes`; ``""`` when it does not exist. Any other
     ``OSError`` and any decode error propagate - callers must not mistake an
-    unreadable file for an empty one (B12: that used to wipe ``.env``)."""
+    unreadable file for an empty one (B12: the next write would wipe ``.env``)."""
     try:
         data = Path(path).read_bytes()
     except FileNotFoundError:
@@ -420,14 +415,13 @@ def upsert_env_var(path, key: str, value: str) -> None:
 
     Updates the FIRST assignment to ``key`` in place and removes every later
     one (dotenv is last-wins, so a stale duplicate would otherwise override
-    the choice - SP4 review M4), preserving every other line, comment, and
-    blank, or appends the assignment when the key is absent. A ``key=`` that
-    sits inside another key's quoted multi-line value is not an assignment and
-    is left alone (M3). Creates the file if it does not exist. This is how the
-    in-app model picker persists ``LEETCOACH_MODEL`` so the choice survives a
-    restart.
+    the choice), preserving every other line, comment, and blank, or appends
+    the assignment when the key is absent. A ``key=`` that sits inside another
+    key's quoted multi-line value is not an assignment and is left alone.
+    Creates the file if it does not exist. This is how the in-app model picker
+    persists ``LEETCOACH_MODEL`` so the choice survives a restart.
 
-    B12 robustness: a UTF-8 BOM or UTF-16 file is read correctly and written
+    B12: a UTF-8 BOM or UTF-16 file is read correctly and written
     back as plain UTF-8 (what python-dotenv reads at boot); a read or decode
     error ABORTS (raises ``OSError`` / ``ValueError``) instead of treating the
     file as empty and wiping it; the write is atomic (:mod:`atomic_files`). Pure I/O

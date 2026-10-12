@@ -6,7 +6,7 @@ forgiving: Claude often wraps JSON in prose or ```` ```json ```` fences, so we
 decode the first JSON object in the reply (``raw_decode``, B21). The type is
 normalized onto the fixed pattern list in :mod:`patterns` and the topics are
 sanitized. Anything we cannot make sense of degrades to a safe fallback
-(``uncategorized`` / no topics) rather than raising — classification is
+(``uncategorized`` / no topics) rather than raising: classification is
 best-effort metadata, never a hard dependency.
 """
 from __future__ import annotations
@@ -73,9 +73,9 @@ def _extract_json(text: str) -> dict | None:
 
     Handles bare JSON, fenced ```` ```json ... ``` ```` blocks, and JSON
     embedded in surrounding prose. B21: every ``{`` is tried as the start of
-    an object with ``json.JSONDecoder().raw_decode`` - which understands
-    strings, so a ``}`` inside a topic no longer truncates the object the way
-    the old brace counter did. The first object carrying ``problem_type``
+    an object with ``json.JSONDecoder().raw_decode``, which understands
+    strings, so a ``}`` inside a topic does not end the object early. The
+    first object carrying ``problem_type``
     wins, else the first object at all. Returns ``None`` if there is none;
     never raises.
     """
@@ -134,15 +134,15 @@ def classify(problem: str, *, run_fn=claude_cli.run, **run_kwargs) -> Classifica
             )
         )
     except claude_cli.ClaudeCancelledError:
-        # 3A C12: cancelled on purpose (client disconnect, the bounded join
-        # expired) - expected, so no WARNING and no traceback.
+        # Cancelled on purpose (client disconnect, the bounded join expired):
+        # expected, so no WARNING and no traceback.
         logger.debug("classification cancelled, using the fallback")
         return Classification(FALLBACK_TYPE, [])
     except Exception as exc:
         # A flaky/missing Claude must not crash the caller; classification is
         # best-effort metadata. Logged so a persistent failure is diagnosable;
         # an expected CLI failure already says what is wrong, so it gets one
-        # line, not a traceback (3A G2), and anything else keeps its traceback.
+        # line, not a traceback, and anything else keeps its traceback.
         expected = isinstance(exc, claude_cli.ClaudeUnavailableError)
         logger.warning("classification failed, using the fallback: %s", exc,
                        exc_info=not expected)

@@ -1,7 +1,7 @@
-"""Shared atomic file writes (SP4).
+"""Shared atomic file writes.
 
 Every file LeetCoach owns (study docs, the topic index, the model picker's
-``.env``, and the SP6 problem store / run log) is written through
+``.env``, and the problem store / run log) is written through
 :func:`atomic_write_text`:
 
 * the body goes to a hidden sibling temp file (``.<name>.<8 hex>.tmp``, created
@@ -160,7 +160,7 @@ def _replace_with_retry(tmp: Path, target: Path, *, retries: int, backoff: float
 
 def _encode(text: str, encoding: str, newline: str | None) -> bytes:
     # ``newline=None`` mirrors ``Path.write_text``: "\n" becomes os.linesep.
-    # 3A S5: line endings are normalised to "\n" FIRST (a "\r\n" pair and a
+    # Line endings are normalised to "\n" FIRST (a "\r\n" pair and a
     # lone "\r" alike), so text that already carries CRLF - code posted with
     # CRLF to Code Review - is not written as "\r\r\n" on Windows, and reads
     # back (universal newlines) exactly like its LF form.
@@ -203,16 +203,16 @@ def atomic_write_text(
     """Atomically replace ``path`` with ``text``; return the target ``Path``.
 
     ``newline=None`` (the default) translates ``"\\n"`` to the platform line
-    ending exactly like ``Path.write_text``, so files written before this
-    helper existed compare equal on re-read. Any ``"\\r\\n"`` / lone ``"\\r"``
-    in ``text`` counts as a ``"\\n"`` first (3A S5), whatever ``newline`` is.
+    ending exactly like ``Path.write_text``, so a file written by either one
+    compares equal on re-read. Any ``"\\r\\n"`` / lone ``"\\r"`` in ``text``
+    counts as a ``"\\n"`` first, whatever ``newline`` is.
     """
     return atomic_write_bytes(
         path, _encode(text, encoding, newline), retries=retries, backoff=backoff
     )
 
 
-# 3A S9: :func:`_backup`'s answer for a target that exists but can't be read.
+# :func:`_backup`'s answer for a target that exists but can't be read.
 _UNREADABLE = object()
 
 
@@ -242,7 +242,7 @@ def atomic_write_many(
     already swapped are rolled back: a target that did not exist is removed,
     one that did gets its previous bytes back. A target that existed but
     could not be READ for that backup (locked, unreadable) is left as
-    swapped in - never deleted (3A S9). Returns the target paths.
+    swapped in - never deleted. Returns the target paths.
     """
     targets = [(Path(p), _encode(t, encoding, newline)) for p, t in items]
     for target, _ in targets:

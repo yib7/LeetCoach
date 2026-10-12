@@ -9,10 +9,10 @@ Directory layout (from the plan):
       learning/<problem_type>_learning/<problem>.md
       guided/<problem_type>/<problem>.md
       answers/<problem_type>/<problem>__<tier>.<ext>   (+ a sibling .md)
-      reviews/<problem_type>/<problem>__review.md      (SP7 Code Review)
+      reviews/<problem_type>/<problem>__review.md      (Code Review, D5)
 
 A saved ``.md`` doc can later grow ``## Follow-up — <question>`` sections at
-its end (SP8 / D6, :func:`append_followup`), written in place under the same
+its end (D6, :func:`append_followup`), written in place under the same
 write lock and through the same atomic helper.
 
 The single most important property is **containment**: a hostile problem name
@@ -23,7 +23,7 @@ separators and ``..`` entirely before they can be interpreted as a directory.
 ``slug`` is the only thing standing between user input and the filesystem, so it
 is deliberately strict and well-tested.
 
-Second property: **no silent overwrites** (audit6 P2-11). Re-running with
+Second property: **no silent overwrites**. Re-running with
 identical content is idempotent, but a target that already exists with
 *different* content (a re-run producing new material, or two long titles
 sharing the same 80-char slug) shifts the write to ``<stem>__2`` / ``__3`` /
@@ -50,11 +50,11 @@ _LANG_EXT = {
 }
 
 # Any run of characters that is NOT a lowercase letter, digit, hyphen or
-# underscore becomes a single underscore. Crucially this maps ``/``, ``\`` and
-# ``.`` (so ``..``) to underscores, which is what guarantees containment.
+# underscore becomes a single underscore. This maps ``/``, ``\`` and ``.``
+# (so ``..``) to underscores, which is what guarantees containment.
 _UNSAFE = re.compile(r"[^a-z0-9_-]+")
 
-# Windows reserved device names — illegal as a filename even with an extension,
+# Windows reserved device names: illegal as a filename even with an extension,
 # so a slug must never emit one bare (the project's primary platform is Windows).
 _WIN_RESERVED = (
     {"con", "prn", "aux", "nul"}
@@ -63,22 +63,22 @@ _WIN_RESERVED = (
 )
 
 # Cap a single path segment so a long input (e.g. a whole pasted problem) can't
-# build a filename that blows past the OS path limit — Windows MAX_PATH is ~260.
+# build a filename that blows past the OS path limit (Windows MAX_PATH is ~260).
 _MAX_SLUG = 80
 
-# Serializes resolve-slot-then-write in `_write_entry` (audit P1-2). Flask runs
+# Serializes resolve-slot-then-write in `_write_entry`. Flask runs
 # `threaded=True`, so two concurrent identical-shaped saves (same problem,
 # problem_type, tier/language) could otherwise both observe "slot N is free"
 # in `_resolve_slot` before either has written, and the second write would
-# silently clobber the first's saved material — violating the "no silent
+# silently clobber the first's saved material, breaking the "no silent
 # overwrites" guarantee above. This mirrors `topic_index._RECORD_LOCK`: a
 # single module-level lock is sufficient for a single-process personal tool
 # (no per-path locking needed); contention is trivial. The lock must cover
-# BOTH the slot resolution AND the write(s) as one critical section — a lock
+# BOTH the slot resolution AND the write(s) as one critical section: a lock
 # that only guarded `_resolve_slot` and released before writing would still
 # let two threads resolve to the same free slot before either had written.
 _WRITE_LOCK = threading.Lock()
-# SP8 fix M5: the library's write lock, public so DELETE /library/file can
+# The library's write lock, public so DELETE /library/file can
 # take it too and never race a follow-up append's read-then-write.
 WRITE_LOCK = _WRITE_LOCK
 
@@ -97,7 +97,7 @@ def slug(name: str) -> str:
 
     * lowercase; spaces and other punctuation collapse to single ``_``;
     * ``-`` and ``_`` are preserved (they are valid, readable separators);
-    * path separators (``/`` ``\\``) and ``..`` are stripped — a slug can never
+    * path separators (``/`` ``\\``) and ``..`` are stripped, so a slug can never
       contain a directory boundary or a traversal token;
     * leading/trailing separators are trimmed;
     * length is capped at ``_MAX_SLUG`` so a huge input can't overflow the OS
@@ -106,14 +106,14 @@ def slug(name: str) -> str:
       suffixed so the slug is always a legal filename on Windows;
     * non-ASCII letters are transliterated through NFKD first (B25), so
       ``Café`` -> ``cafe`` and full-width ``Ｔｗｏ`` -> ``two``;
-    * never empty — a title with letters but no ASCII transliteration (e.g. a
-      Chinese title) yields ``untitled_<8-hex hash>`` so distinct titles no
-      longer collide on one file (B25); pure punctuation yields the literal
+    * never empty: a title with letters but no ASCII transliteration (e.g. a
+      Chinese title) yields ``untitled_<8-hex hash>`` so distinct titles do
+      not collide on one file (B25); pure punctuation yields the literal
       ``"untitled"`` so a filename always exists;
     * when MOST of the title's letters/digits have no ASCII transliteration
       (``跳跃游戏 II``), the short hash is appended to whatever ASCII survived
       (``ii_<8-hex>``), so two such titles sharing a Latin tail don't collide
-      either (SP4 review M8).
+      either.
     """
     raw = (name or "").strip()
     ascii_text = (
@@ -145,10 +145,10 @@ def slug(name: str) -> str:
     return s
 
 
-# M2 (problem ids) / 3A S6 (file names): first lines that name no problem -
-# ``Description``, ``Problem:``, punctuation-only - and the ``Problem: <title>``
-# / ``Title - <title>`` label. Shared with ``problem_store.parse_problem`` so a
-# paste's file name and its problem id pick the SAME title line.
+# First lines that name no problem (``Description``, ``Problem:``,
+# punctuation-only) and the ``Problem: <title>`` / ``Title - <title>`` label.
+# Shared with ``problem_store.parse_problem`` so a paste's file name and its
+# problem id pick the SAME title line.
 _GENERIC_LINE = re.compile(
     r"^(?:(?:the\s+)?problem(?:\s+(?:statement|description))?|description|question|title"
     r"|untitled|statement)\s*[:.\-]?\s*$",
@@ -183,18 +183,18 @@ def title_line(lines) -> tuple[int, str] | None:
 def _problem_name(problem: str) -> str:
     """A short, clean filename stem for a pasted problem.
 
-    Uses the first non-blank line — the title, for a standard LeetCode paste —
+    Uses the first non-blank line (the title, for a standard LeetCode paste)
     so a full multi-line paste saves as e.g. ``two_sum.md`` instead of a name
     built from the entire description. ``slug`` caps the length either way, which
     is what stops a giant paste from overflowing the OS path limit.
 
-    3A S6: when that first line names no problem (``Description``,
-    ``Problem:``, ``---``) or is a ``Problem: <title>`` label, the stem comes
-    from the line :func:`title_line` picks instead - the one the problem id
-    is built from - so pastes that all start with ``Description`` no longer
-    pile up as ``description.md``, ``description__2.md``, ... Every paste
-    whose first line already names the problem keeps its old file name (an
-    existing library's re-runs still land on their own files).
+    When that first line names no problem (``Description``, ``Problem:``,
+    ``---``) or is a ``Problem: <title>`` label, the stem comes from the
+    line :func:`title_line` picks instead (the one the problem id is built
+    from), so pastes that all start with ``Description`` do not pile up as
+    ``description.md``, ``description__2.md``, ... A paste whose first line
+    already names the problem is named from that line, so re-runs in an
+    existing library still land on their own files.
     """
     first = next((line for line in (problem or "").splitlines() if line.strip()), None)
     if first is None:
@@ -211,10 +211,10 @@ def _problem_name(problem: str) -> str:
 def _same_content(path: Path, body: str) -> bool:
     """True iff ``path`` already holds exactly ``body`` (UTF-8 text).
 
-    An unreadable/undecodable existing file counts as *different* — when in
+    An unreadable/undecodable existing file counts as *different*: when in
     doubt we suffix rather than risk clobbering something we could not read.
 
-    3A S5: compared line-ending-blind on both sides - ``read_text`` already
+    Compared line-ending-blind on both sides - ``read_text`` already
     reads any CRLF / CR back as ``"\\n"`` and :mod:`atomic_files` writes ``body``'s
     CRLF / CR as one line break - so an identical re-run of a CRLF body
     reuses its slot instead of shifting to ``__2``.
@@ -230,9 +230,9 @@ def _lf(text: str) -> str:
 
 
 def _resolve_slot(folder: Path, stem: str, files: list[tuple[str, str]]) -> list[Path]:
-    """Pick the collision-free stem for one logical entry (audit6 P2-11).
+    """Pick the collision-free stem for one logical entry.
 
-    ``files`` is ``[(ext, body), ...]`` — one tuple per sibling file that must
+    ``files`` is ``[(ext, body), ...]``: one tuple per sibling file that must
     share the stem (a Learning/Guided note is one file; an Answer is a
     code + reasoning pair). Starting from the bare ``stem``, then ``<stem>__2``,
     ``<stem>__3``, ... the first slot where EVERY sibling is either absent or
@@ -254,7 +254,7 @@ def _resolve_slot(folder: Path, stem: str, files: list[tuple[str, str]]) -> list
 
 def _write(path: Path, body: str) -> str:
     """Atomically write ``body`` to ``path`` (UTF-8), creating parents; return
-    the str path. Goes through the shared :mod:`atomic_files` helper (SP4) so a
+    the str path. Goes through the shared :mod:`atomic_files` helper so a
     reader never sees a half-written doc and a held file is retried."""
     atomic_files.atomic_write_text(path, body)
     return str(path)
@@ -265,7 +265,7 @@ def _write_entry(folder: Path, stem: str, files: list[tuple[str, str]]) -> list[
 
     Identical re-runs are idempotent (same paths, no duplicates); a collision
     with different content shifts the whole group to the next ``__N`` stem.
-    Resolving the slot and writing to it happen inside one lock (audit P1-2)
+    Resolving the slot and writing to it happen inside one lock
     so the whole check-then-write is atomic under concurrent callers.
     """
     with _WRITE_LOCK:
@@ -319,7 +319,7 @@ REVIEW_SUFFIX = "review"
 
 
 def save_review(problem: str, problem_type: str, body: str) -> str:
-    """Write a Code Review doc (SP7 / D5) and return its path.
+    """Write a Code Review doc (D5) and return its path.
 
     -> ``output/reviews/<problem_type>/<problem>__review.md``
     """
@@ -352,7 +352,7 @@ def save_answer(
     there's actually code to save.
 
     -> code:      ``output/answers/<problem_type>/<problem>__<tier>.<ext>``,
-                   or ``None`` when ``code`` is blank (B24) — ``extract_code``
+                   or ``None`` when ``code`` is blank (B24): ``extract_code``
                    returns ``""`` when the response had no fenced block at
                    all, and writing a 0-byte "solution" file would silently
                    look like a real (if empty) saved answer in the library.
@@ -376,7 +376,7 @@ def save_answer(
     return code_path, reasoning_path
 
 
-# --- follow-up answers appended to a saved doc (SP8 / D6) -----------------
+# --- follow-up answers appended to a saved doc (D6) -----------------------
 
 FOLLOWUP_HEADING = "## Follow-up — "
 FOLLOWUP_TITLE_CAP = 80
@@ -384,8 +384,8 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f  ]+")
 _FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _TOP_HEADING = re.compile(r"^ {0,3}#{1,2}(?=[ \t]|$)")
 # The verdict regex (app.verdict_from_text) keys on this exact bold label; an
-# answer that quotes it - in prose OR inside a code fence (SP8 fix M1: the
-# verdict regex does not know about fences) - is reworded, so an appended
+# answer that quotes it - in prose OR inside a code fence (the verdict
+# regex does not know about fences) - is reworded, so an appended
 # section never contains the label and can never read as a verdict block.
 _VERIFICATION_LABEL = re.compile(r"\*\*Verification:\*\*")
 
@@ -432,9 +432,9 @@ def followup_body(answer: str) -> str:
     the model wrote becomes an H3, so the follow-up stays ONE section of the
     doc and can never open a new ``## Follow-up`` / ``## Flashcards`` section.
     A quoted ``**Verification:**`` label is reworded everywhere, inside code
-    fences too, so it can never read as the app's verdict block (SP8 fix M1),
+    fences too, so it can never read as the app's verdict block,
     and a fence the answer left open is closed so it cannot swallow the next
-    follow-up's heading (SP8 fix M3)."""
+    follow-up's heading."""
     out = []
     fence = None
     for line in (answer or "").replace("\r\n", "\n").strip("\n").split("\n"):
@@ -461,8 +461,8 @@ def append_followup(path, question: str, answer: str) -> str:
     Raises ``FileNotFoundError`` when the doc is gone (nothing is created) and
     ``UnicodeDecodeError`` when it is not UTF-8 (nothing is written).
 
-    SP8 fix M3: a doc that ends inside an open code fence has it closed first,
-    so the heading is real Markdown. SP8 fix I1: the doc keeps its original
+    A doc that ends inside an open code fence has it closed first, so the
+    heading is real Markdown. The doc keeps its original
     modified (and access) time - a follow-up is not a new run, and Stats
     (legacy files) and the recent-runs list date a run by its mtime. The
     library cache is still invalidated by the caller, and the verdict cache
@@ -496,9 +496,9 @@ def _renamed_tier(filename: str) -> str | None:
     """Map a saved answer filename to its post-rename name, or ``None`` if it
     needs no change.
 
-    Splits the stem on ``__`` — which is *only* ever the tier (and optional
-    ``__N`` slot) delimiter, because :func:`slug` collapses any run of ``_`` in a
-    problem name to a single ``_`` — so the tier is always the second segment.
+    Splits the stem on ``__``, which is *only* ever the tier (and optional
+    ``__N`` slot) delimiter because :func:`slug` collapses any run of ``_`` in a
+    problem name to a single ``_``. The tier is always the second segment.
     """
     p = Path(filename)
     parts = p.stem.split("__")

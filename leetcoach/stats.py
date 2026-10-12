@@ -1,13 +1,13 @@
-"""Study stats (SP6 / A8), computed server-side from the run log.
+"""Study stats (A8), computed server-side from the run log.
 
 Every run-log entry (``.leetcoach/runs.jsonl``) is one activity at its own
 ``ts``. Library files that NO log entry names (libraries saved before the log
 existed) still count: one activity per saved run, i.e. per
 ``<mode>/<topic>/<base name>`` group (an Answer's ``.md`` + code file are one
 run), at the group's newest mtime. Nothing collapses on the stem: each tier
-and each ``__<n>`` slot (a re-run) is its own run - the old client grouped by
-the text before the first ``__``, so repeat days, tiers and slots collided
-and a 4-day streak showed as 1 (A8).
+and each ``__<n>`` slot (a re-run) is its own run (A8). Grouping by the text
+before the first ``__`` would merge repeat days, tiers and slots, and a 4-day
+streak would show as 1.
 
 Days are LOCAL calendar days of the machine (the browser on localhost shares
 it). The returned shape matches ``LeetCoachCore.computeStats`` so the page
@@ -65,9 +65,9 @@ def _activities(entries, files):
         if not isinstance(e, dict):
             continue
         if e.get("mode") == "followup":
-            continue  # SP8 / D6: a follow-up question is not a study run
+            continue  # D6: a follow-up question is not a study run
         files_named = e.get("files")
-        # 3A S3: a hand-edited line's "files" may be any JSON value
+        # A hand-edited line's "files" may be any JSON value
         for f in files_named if isinstance(files_named, list) else ():
             if isinstance(f, str):
                 logged_files.add(f)
