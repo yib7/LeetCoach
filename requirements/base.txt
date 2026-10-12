@@ -1,4 +1,5 @@
 # Runtime dependencies for LeetCoach (what the web app needs to run).
-# Dev/test tools (pytest, ruff) live in requirements-dev.txt.
+#   pip install -r requirements/base.txt
+# Dev/test tools (pytest, ruff) live in dev.txt; exact pins in lock.txt.
 flask>=3.0,<4.0
 python-dotenv>=1.0,<2.0
