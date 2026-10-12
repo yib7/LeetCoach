@@ -16,7 +16,7 @@ subscription, a sign-in or any usage:
       It recognises the three kinds of call LeetCoach makes:
         - the problem classifier  -> one compact JSON object;
         - Quick Ask               -> a short Markdown answer;
-        - a follow-up (SP8 / D6)  -> a short canned answer. With
+        - a follow-up (D6)        -> a short canned answer. With
           ``--resume <id>`` it answers "in" that session; without, it is the
           app's fresh fallback call and says it read the fenced STUDY NOTE;
         - a study run             -> a Markdown study doc. For Answer/Guided in
@@ -277,7 +277,7 @@ HINTS = (
 
 
 # A generic map-membership idiom per language for Learning docs - an
-# illustration of one operation, never the problem's solution (O4).
+# illustration of one operation, never the problem's solution.
 IDIOMS = {
     "python": 'ages = {"ana": 31}\nprint("ana" in ages)  # True',
     "cpp": 'std::unordered_map<std::string, int> ages{{"ana", 31}};\n'
@@ -303,7 +303,7 @@ def _header(problem: str) -> tuple[str, str]:
 
 
 def _review_body(key: str, *, attempt: str) -> str | None:
-    """SP7 / D5: a Code Review critiques the learner's attempt - it quotes at
+    """D5: a Code Review critiques the learner's attempt - it quotes at
     most a line and never contains a full solution."""
     lines = [ln for ln in attempt.splitlines() if ln.strip()]
     loops = [ln.strip() for ln in lines if re.match(r"\s*for\b", ln)]
@@ -363,7 +363,7 @@ def _section_body(name: str, *, mode: str, fence: str, tier: str, problem: str,
         )
     if key == "key":
         if mode == "learning":
-            # SP6 fix O4: Learning never shows solution-shaped code.
+            # Learning never shows solution-shaped code.
             return (
                 "Each value has exactly one partner, and the target fixes it. "
                 "A structure with constant-time membership turns the search "
@@ -377,7 +377,7 @@ def _section_body(name: str, *, mode: str, fence: str, tier: str, problem: str,
             "    seen[x] = i\n```\n"
         )
     if key == "approach":
-        # SP6 fix I1: a fixed H3 follows the hint ladder; FAKE_NOWALK leaves it
+        # A fixed H3 follows the hint ladder; FAKE_NOWALK leaves it
         # out (the app must still end Hint 4 after its own paragraph).
         no_walk = "FAKE_NOWALK" in problem
         if mode == "learning":
@@ -601,7 +601,7 @@ def run_print(argv: list[str]) -> int:
 
 
 def run_followup(argv: list[str], prompt: str, model: str, delay: float) -> int:
-    """SP8 / D6: a follow-up, resumed (``--resume <id>``) or the fallback."""
+    """D6: a follow-up, resumed (``--resume <id>``) or the fallback."""
     question = _followup_question(prompt)
     resume = _arg_after(argv, "--resume") if "--resume" in argv else None
     if resume is not None and "FAKE_NORESUME" in question:

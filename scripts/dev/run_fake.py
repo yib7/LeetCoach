@@ -9,15 +9,15 @@ NEVER CALLS REAL CLAUDE and never touches your real data:
   stream-json; see ``fake_claude.py`` for the FAKE_* knobs and markers);
 * ``LEETCOACH_OUTPUT_DIR`` -> ``%TEMP%/leetcoach-fake/output``, re-seeded on
   every start (unless ``--keep``) with pass / fail / error / not-verified /
-  learning runs spread over several days. SP6: some runs are in the run log
+  learning runs spread over several days. Some runs are in the run log
   (``.leetcoach/runs.jsonl`` + problem records with Easy / Medium / Hard, and
   D2-contract Guided / Learning docs with hints), the rest are legacy files
   with no log entry (Stats' per-file fallback, the doc-parsed verdict), incl.
-  extra tiers and ``__2`` slots of one problem. SP7: a Code Review doc
-  (``reviews/``), a review queue with problems due today / overdue and one
+  extra tiers and ``__2`` slots of one problem. It also seeds a Code Review
+  doc (``reviews/``), a review queue with problems due today / overdue and one
   not due (``REVIEW_STATE``), a seeded note, ``## Flashcards`` in every
   contract doc, and Two Sum's statement keeps its sample for "Test my code".
-  SP8 (D6 follow-up): every logged run has a session id the fake resumes
+  For D6 follow-ups, every logged run has a session id the fake resumes
   except the 206 Java run (``NO_SESSION``: logged, but no session -> the
   fallback); unlogged legacy docs such as ``guided/stack/20_valid_parentheses.md``
   fall back too;
@@ -131,7 +131,7 @@ def _fake_claude():
     return mod
 
 
-# SP7 / D5: the attempt the seeded Code Review critiques (the classic
+# D5: the attempt the seeded Code Review critiques (the classic
 # "inner loop starts at 0" Two Sum bug).
 REVIEW_ATTEMPT = (
     "import json, sys\n\n"
@@ -186,7 +186,7 @@ CONTRACT_SEED = [
     ("reviews/hash_map/1_two_sum__review.md", "review", TWO_SUM_PASTE, None, 0),
 ]
 
-# SP6 fix: a legacy (unlogged) Guided doc whose ## Approach has NO heading after
+# A legacy (unlogged) Guided doc whose ## Approach has NO heading after
 # Hint 4 (the fake's FAKE_NOWALK marker) - Hint 4 must reveal only its own
 # paragraph - and whose numbered file name shows as "#20 - Valid Parentheses".
 LEGACY_CONTRACT_SEED = [
@@ -232,12 +232,12 @@ LOG = [
 ]
 
 
-# SP8 / D6: logged runs WITHOUT a session id (an older run, or a CLI that never
+# D6: logged runs WITHOUT a session id (an older run, or a CLI that never
 # reported one): a follow-up on their doc takes the fresh fallback call.
 NO_SESSION = {"206-reverse_linked_list"}
 
 
-# SP7 / D4: review state per problem, relative to today: (box, due in N days
+# D4: review state per problem, relative to today: (box, due in N days
 # (negative = overdue), [(graded N days ago, grade, from box, to box)], notes).
 # 1-two_sum is due today (graded "solo" 3 days ago: box 1 -> 2, +3 days);
 # 215 is NOT due (graded "hints" 2 days ago in box 3: due in 5 days). The
@@ -259,7 +259,7 @@ def _ago(now: float, days: int, seconds: float = 0) -> float:
     """Epoch seconds ``days`` local calendar days (and ``seconds``) before
     ``now``, by wall-clock arithmetic: ``days * 86400`` real seconds lands on
     the neighbouring date near midnight when a 23 h / 25 h DST day lies in
-    between (3A W9)."""
+    between."""
     # naive on purpose: local wall-clock arithmetic
     local = datetime.fromtimestamp(now) - timedelta(days=days, seconds=seconds)  # noqa: DTZ006
     return local.timestamp()
@@ -375,7 +375,7 @@ def running_instance(port: int = PORT, *, timeout: float = 1.0, opener=None) -> 
         with opener(url + "healthz", timeout=timeout) as resp:
             data = json.loads(resp.read(4096).decode("utf-8"))
     except (OSError, ValueError, http.client.HTTPException):
-        # 3A S12: a non-HTTP listener raises BadStatusLine (not an OSError).
+        # A non-HTTP listener raises BadStatusLine (not an OSError).
         return None
     return url if isinstance(data, dict) and data.get("app") == "leetcoach" else None
 
@@ -383,7 +383,7 @@ def running_instance(port: int = PORT, *, timeout: float = 1.0, opener=None) -> 
 def main(argv: list[str], *, probe=running_instance) -> int:
     existing = probe(PORT)
     if existing:
-        # SP5 fix R6: re-seeding would wipe the library under a live server.
+        # Re-seeding would wipe the library under a live server.
         print(f"LeetCoach is already running at {existing} - not re-seeding; use that one.")
         return 0
     scratch = Path(tempfile.gettempdir()) / "leetcoach-fake"

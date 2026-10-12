@@ -1,4 +1,4 @@
-"""Manual smoke test for the `claude_cli` keystone — NOT collected by pytest.
+"""Manual smoke test for the `claude_cli` keystone. NOT collected by pytest.
 
 Runs a trivial REAL prompt through the actual `claude` CLI and prints the
 streamed text deltas, proving the wrapper works end-to-end on this machine.

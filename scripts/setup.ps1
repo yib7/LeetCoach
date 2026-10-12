@@ -16,7 +16,7 @@ Set-Location -Path $RepoRoot
 $VenvPath = Join-Path $RepoRoot ".venv"
 $MarkerPath = Join-Path $VenvPath ".setup-ok"
 $RequirementsPath = Join-Path $RepoRoot "requirements\base.txt"
-# 6.7: the committed lock is applied as pip constraints - base.txt says WHAT to
+# The committed lock is applied as pip constraints: base.txt says WHAT to
 # install, lock.txt fixes WHICH versions (the ones CI tests), and the dev-only
 # tools the lock also pins (pytest, ruff) are not pulled in.
 $LockPath = Join-Path $RepoRoot "requirements\lock.txt"
@@ -36,22 +36,21 @@ function Exit-OnFailure {
     exit 1
 }
 
-# Shared by both the fast path and the full setup path below, so the two
-# don't drift out of sync with each other.
-# 6.10: it names the one launcher, not .venv\Scripts\Activate.ps1, which the
-# default PowerShell execution policy refuses to run on a client PC.
+# Shared by the fast path and the full setup path below, so the two don't
+# drift apart. It names the one launcher, not .venv\Scripts\Activate.ps1,
+# which the default PowerShell execution policy refuses to run on a client PC.
 function Write-SetupCompleteMessage {
     Write-Host "Setup complete. Start LeetCoach with:" -ForegroundColor Green
     Write-Host "  .\LeetCoach.cmd"
 }
 
-# 3A S1: every native command (python, py, pip) runs through these two
-# helpers. Under Windows PowerShell 5.1 with $ErrorActionPreference = "Stop",
-# a native command's stderr that is redirected (2>$null, *> $null, 2>&1)
-# turns its FIRST stderr line into a terminating NativeCommandError - so a
-# venv python printing "ModuleNotFoundError", or `py -3` printing "No
-# suitable Python runtime found", aborted the whole script instead of
-# reaching the exit-code check after it. Each helper sets "Continue" in its
+# Every native command (python, py, pip) runs through these two helpers.
+# Under Windows PowerShell 5.1 with $ErrorActionPreference = "Stop", a native
+# command's stderr that is redirected (2>$null, *> $null, 2>&1) turns its
+# FIRST stderr line into a terminating NativeCommandError, so a venv python
+# printing "ModuleNotFoundError", or `py -3` printing "No suitable Python
+# runtime found", would abort the whole script instead of reaching the
+# exit-code check after it. Each helper sets "Continue" in its
 # OWN scope only (the script keeps "Stop" for its cmdlets), judges the
 # command purely by its exit code, and reports a command that could not be
 # started at all (a missing or non-executable path) as exit code 1.
@@ -95,17 +94,16 @@ function Get-NativeOutput {
 # a stale "setup is fine" marker behind (B9).
 if (Test-Path $MarkerPath) { Remove-Item $MarkerPath -Force }
 
-# #10: if THIS .venv already has a working install (its own python can
-# actually import every runtime dependency - flask AND python-dotenv; the app
-# imports both), just confirm it and write the marker - no `py` launcher, no
-# pip, no network needed. This is what makes re-running the shortcut work
-# OFFLINE, or on a machine where the `py` launcher isn't installed at all,
-# once .venv already has a working install from an earlier successful setup
-# (e.g. the marker was lost, or setup is simply being re-run defensively).
-# Test-Path guards the call so a fresh machine with no .venv yet goes
-# straight on to the full install.
+# If THIS .venv already has a working install (its own python can import
+# every runtime dependency: flask AND python-dotenv, which the app imports),
+# just confirm it and write the marker. No `py` launcher, no pip, no network.
+# This is what makes re-running the shortcut work OFFLINE, or on a machine
+# where the `py` launcher isn't installed at all, once .venv has a working
+# install from an earlier successful setup (e.g. the marker was lost, or
+# setup is being re-run defensively). Test-Path guards the call so a fresh
+# machine with no .venv yet goes straight on to the full install.
 #
-# 3A S1: anything else decides how the full install below starts. A venv
+# Anything else decides how the full install below starts. A venv
 # whose python RUNS (`import sys` works) but lacks a dependency (e.g. only
 # flask got installed before a previous run was interrupted) is reused and
 # pip-installed into. A venv whose python is MISSING (an interrupted
@@ -159,10 +157,9 @@ if (-not $VenvUsable) {
 }
 
 Write-Host "Installing dependencies..."
-# #10: a failed pip SELF-upgrade is not fatal - warn and keep going with
-# whatever pip version the venv already has. Blocking all of setup on this
-# step (as before) needlessly failed offline/flaky-network runs that would
-# otherwise have succeeded fine with the venv's bundled pip; the actual
+# A failed pip SELF-upgrade is not fatal: warn and keep going with whatever
+# pip version the venv already has. Blocking setup on this step would fail
+# offline or flaky-network runs that work with the venv's bundled pip; the
 # dependency install below is still a hard failure.
 $pipExit = Invoke-Native -FilePath $PythonExe -Arguments @("-m", "pip", "install", "--upgrade", "pip") -HideOutput
 if ($pipExit -ne 0) {

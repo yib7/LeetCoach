@@ -1,4 +1,4 @@
-# ensure-claude-auth.ps1 - make LeetCoach's claude sign-in friction-free.
+# ensure-claude-auth.ps1 - sign the `claude` CLI in before LeetCoach starts.
 #
 # Run by LeetCoach.cmd (the desktop shortcut) just before the app starts. If the
 # `claude` CLI is signed out, it launches `claude auth login` in its own visible
@@ -9,7 +9,7 @@
 # complete, it prints the exact copy-paste command and lets the app open
 # anyway (the in-app banner guides from there).
 #
-# 3A S10: both waits on the CLI are bounded. `claude auth status` gets
+# Both waits on the CLI are bounded. `claude auth status` gets
 # LEETCOACH_AUTH_STATUS_TIMEOUT_MS (default 15 s; its process tree is killed
 # after that and startup simply continues), the login window
 # LEETCOACH_AUTH_LOGIN_TIMEOUT_MS (default 5 min; the window is left open so
@@ -44,11 +44,11 @@ function Get-ClaudeLoggedIn {
     # string "timeout" if the CLI did not answer within $StatusTimeoutMs.
     #
     # Resolution goes through PowerShell's OWN command lookup (Get-Command),
-    # like the `&` call operator this used before, so an ExternalScript
-    # (.ps1) shim and a native Application (.exe/.cmd) both work - unlike
-    # Start-Process's ShellExecute path below. 3A S10: it then runs as a
-    # Process with a bounded WaitForExit instead of a plain `&` call, which
-    # had no timeout and could hang app startup forever.
+    # the same one the `&` call operator uses, so an ExternalScript (.ps1)
+    # shim and a native Application (.exe/.cmd) both work, unlike
+    # Start-Process's ShellExecute path below. It then runs as a Process with
+    # a bounded WaitForExit: a plain `&` call has no timeout and could hang
+    # app startup forever.
     $cmd = Get-Command $ClaudeBin -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $cmd) { return $null }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -100,8 +100,7 @@ function Start-ClaudeLogin {
     # Windows ships both), ShellExecute can pick the `.ps1` - and a `.ps1`'s
     # default verb is "Edit", so Start-Process actually opens the script in
     # Notepad instead of running it, and `-Wait` then hangs forever waiting
-    # for Notepad to close (reproduced on this machine: identical repro with
-    # two same-named shims). Resolve to a concrete Application (.exe/.com/
+    # for Notepad to close (reproduced with two same-named shims). Resolve to a concrete Application (.exe/.com/
     # .bat/.cmd - Get-Command's "Application" type never includes an
     # ExternalScript/.ps1) FIRST so Start-Process is always handed something
     # it can actually execute.
@@ -131,7 +130,7 @@ if (Test-SignedIn $state) {
     exit 0  # already signed in - nothing to do
 }
 if ($state -is [string]) {
-    # 3A S10: a status check that never answered is not "signed out" - don't
+    # A status check that never answered is not "signed out" - don't
     # open a login window over it; let the app start (its banner guides).
     Write-Host ""
     Write-Host "Could not check the 'claude' sign-in in time; LeetCoach will open anyway." -ForegroundColor Yellow
@@ -145,8 +144,8 @@ Write-Host "You're signed out of the 'claude' CLI - signing you in now..." -Fore
 # A1: run login in its own normal (non-minimized) window - see the header
 # comment above. -PassThru + an explicit WaitForExit (not -Wait) so we only
 # ever wait on the login process ITSELF, never a descendant browser process
-# `claude auth login` may open for its OAuth flow. 3A S10: the wait is
-# bounded; a login still open after it is left running for the user.
+# `claude auth login` may open for its OAuth flow. The wait is bounded; a
+# login still open after it is left running for the user.
 $loginProcess = Start-ClaudeLogin
 $loginFinished = $true
 if ($loginProcess) {
