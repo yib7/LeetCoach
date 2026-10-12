@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 
-from test_web_sp6 import _client, _run, _run_fn, out  # noqa: F401 - fixture
+from test_web_problems import _client, _run, _run_fn, out  # noqa: F401 - fixture
 
 from leetcoach import problem_store
 
