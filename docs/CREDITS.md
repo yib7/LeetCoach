@@ -1,8 +1,8 @@
 # Credits
 
 LeetCoach is original work by yib7 under the [MIT License](../LICENSE). It bundles two
-third-party front-end libraries, vendored under `static/vendor/` so the app needs no
-runtime CDN. Everything else in the repo is original to this project.
+third-party front-end libraries, vendored under `leetcoach/static/vendor/` so the app
+needs no runtime CDN. Everything else in the repo is original to this project.
 
 ## Vendored libraries
 
@@ -22,9 +22,9 @@ with the code, so the full texts are reproduced under [License texts](#license-t
 
 ## Original assets
 
-- **Icons.** The `[lc]` mark (`static/favicon.svg`, `docs/media/leetcoach.ico`) and the
-  inline SVG interface icons in `templates/index.html` and `static/app.js` are drawn for
-  this project. No icon set is bundled.
+- **Icons.** The `[lc]` mark (`leetcoach/static/favicon.svg`, `docs/media/leetcoach.ico`)
+  and the inline SVG interface icons in `leetcoach/templates/index.html` and
+  `leetcoach/static/app.js` are drawn for this project. No icon set is bundled.
 - **Fonts.** None are bundled. The CSS uses the operating system's own UI and monospace
   font stacks.
 - **README media.** `docs/media/screenshot.png` and `docs/media/demo.gif` are captures of
@@ -38,10 +38,11 @@ with the code, so the full texts are reproduced under [License texts](#license-t
 
 Two patterns were adapted from the author's own sibling projects (not third-party code):
 
-- The throwaway-directory, secret-free, resource-capped sandbox runner in `sandbox.py`
-  follows the approach used in STATlee.
-- The server-sent-events streaming endpoint in `app.py` mirrors the injectable-runner
-  pattern (`run_fn` here) from the Xeno RAG project, translated from FastAPI to Flask.
+- The throwaway-directory, secret-free, resource-capped sandbox runner in
+  `leetcoach/sandbox.py` follows the approach used in STATlee.
+- The server-sent-events streaming endpoint in `leetcoach/app.py` mirrors the
+  injectable-runner pattern (`run_fn` here) from the Xeno RAG project, translated from
+  FastAPI to Flask.
 
 ## License texts
 

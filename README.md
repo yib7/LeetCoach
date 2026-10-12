@@ -214,7 +214,7 @@ the default.
 | `LEETCOACH_VERIFY_TIMEOUT`| `10`                        | Wall-clock cap, in seconds, for each sandboxed sample check (Answer/Guided verification and Test my code). |
 | `LEETCOACH_NO_BROWSER`   | *(unset)*                      | Set to `1`/`true`/`yes` to stop `python app.py` opening your browser on launch. |
 | `LEETCOACH_NO_DOTENV`    | *(unset)*                      | Set to `1`/`true`/`yes` to skip loading `.env` entirely and use real environment variables only. |
-| `LEETCOACH_DOTENV_PATH`  | `.env` next to the app         | **Dev/test only.** Where the model picker writes its choice. The test suite and `scripts/dev/run_fake.py` point it at a scratch file. Startup always loads the `.env` next to the app, not this path. |
+| `LEETCOACH_DOTENV_PATH`  | `.env` in the repo root        | **Dev/test only.** Where the model picker writes its choice. The test suite and `scripts/dev/run_fake.py` point it at a scratch file. Startup always loads the repo-root `.env`, not this path. |
 
 `setup.ps1` also reads `LEETCOACH_SETUP_PYTHON_EXE`, a **test-only** override for the
 Python it bootstraps with. The fake CLI in `scripts/dev/` reads its own `FAKE_*`

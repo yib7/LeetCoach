@@ -86,7 +86,7 @@ function Get-NativeOutput {
 if (Test-Path $MarkerPath) { Remove-Item $MarkerPath -Force }
 
 # #10: if THIS .venv already has a working install (its own python can
-# actually import every runtime dependency - flask AND python-dotenv; app.py
+# actually import every runtime dependency - flask AND python-dotenv; the app
 # imports both), just confirm it and write the marker - no `py` launcher, no
 # pip, no network needed. This is what makes re-running the shortcut work
 # OFFLINE, or on a machine where the `py` launcher isn't installed at all,
